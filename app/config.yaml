@@ -1,0 +1,83 @@
+text_model: "llama3.2:8b-instruct"
+fallback_text_model: "llama3.2:3b-instruct"
+vision_model: "llava:7b"
+embed_model: "nomic-embed-text"
+max_context_tokens: 3000
+chunk_size: 1000
+chunk_overlap: 150
+top_k: 6
+use_mmr: true
+bind_host: "127.0.0.1"
+port: 8000
+offline_only: true
+base_dir: "C:\\LocalAI"
+security:
+  use_local_https: false
+  encrypt_sqlite: true
+  use_windows_efs: true
+rbac:
+  roles: ["admin", "analyst", "viewer"]
+  auto_assign_uploader: true
+performance_targets:
+  ten_page_pdf_seconds: 15
+
+available_models:
+  - llama3.2:8b-instruct
+  - llama3.2:3b-instruct
+  - qwen3.5:9b
+  - mistral:7b-instruct
+  - llava:7b
+  - nomic-embed-text
+default_model: "llama3.2:8b-instruct"
+pull:
+  max_retries: 3
+  backoff_seconds: [2, 4, 8]
+  resume: true
+
+bootstrap:
+  scan_paths:
+    - "C:/LocalAI/data/projects"
+    - "C:/LocalAI/data/uploads"
+  schedule_seconds: 90
+  ocr: true
+  overwrite_existing_analysis: false
+
+auth:
+  access_token_minutes: 30
+  refresh_token_days: 7
+  auto_signin_modal: true
+
+ui:
+  enable_model_selector: true
+  enable_scope_switch: true
+  pull_modal: true
+  clear_input_on_send: true
+  allow_chat_while_ingesting: true
+  show_intro_animation: true
+  show_greeting_message: true
+  intro_duration_ms: 2400
+  greeting_messages:
+    - "Powered up and ready!"
+    - "How can I support your workflow today?"
+    - "Let's get things done ⚡"
+    - "What would you like me to analyze for you?"
+  poll:
+    ingest_ms: 1500
+    pull_ms: 800
+
+storage:
+  upload_root: "C:/LocalAI/data/uploads"
+  processed_root: "C:/LocalAI/data/processed"
+  vector_root: "C:/LocalAI/data/chroma"
+  backup_days: 30
+  organize_by_project: true
+
+zetdc:
+  system_prompt: ""
+  tags: []
+  policy_template: ""
+  allow_web_search: false
+
+diagnostics:
+  log_level: "INFO"
+  show_health: true

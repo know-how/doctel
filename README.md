@@ -1,93 +1,257 @@
-# doctel
+# DocIntel (ZETDC Internal Document AI)
 
+DocIntel is an internal ZETDC system for uploading, summarising, analysing, and querying company documents using AI.
 
+It consists of:
+- A **FastAPI** backend (Python) exposing REST APIs and Swagger docs.
+- A **React + TypeScript** frontend (Vite) providing a ZETDC‑branded web/mobile UI.
+- A **React Native (Expo)** mobile app for iOS and Android.
 
-## Getting started
+> Stack: FastAPI, Pydantic, Uvicorn, React, TypeScript, Vite, Expo.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+---
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Project Structure
 
-## Add your files
+- `app/` – FastAPI backend
+  - `main.py` – FastAPI app entry (routes, CORS, Swagger)
+  - `config.py` – environment‑based settings
+  - `controllers/` – HTTP controllers (routing layer)
+  - `services/` – business logic (document, chat, etc.)
+  - `models/` – Pydantic models / API schemas
+- `frontend/` – React + TypeScript ZETDC UI
+  - `src/App.tsx` – main app component
+  - `src/pages/DocumentViewPage.tsx` – analysis + copilot screen
+  - `src/api/client.ts` – API client for backend
+  - `src/theme/colors.ts` – ZETDC colour palette
+- `mobile/` – React Native (Expo) iOS/Android app
+  - `App.tsx` – mobile app entry
+  - `src/screens/ChatScreen.tsx` – chat interface with EC history
+  - `src/screens/DocumentUploadScreen.tsx` – document ingestion + metadata
+- `run_dev.py` – helper script to start backend and frontend together (optional)
+- `requirements.txt` – Python backend dependencies
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+---
 
+## Prerequisites
+
+- Python 3.12.x (Windows) installed and available via the Python Launcher (`py`)
+- Node.js + npm installed, `npm` available on PATH
+- Expo CLI available (`npm i -g expo-cli`) or use `npx expo`
+
+---
+
+## Backend Setup (FastAPI)
+
+From the project root:
+
+```bash
+cd C:\Users\ze9167523\Documents\trae_projects\doctel
+py -3.12 -m pip install -r requirements.txt
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/zetdcdev2/doctel.git
-git branch -M main
-git push -uf origin main
+
+Environment variables (optional but recommended):
+
+- `DOCINTEL_ENV` – environment name (default: `development`)
+- `DOCINTEL_DB_URL` – database URL (for future persistent storage)
+- `DOCINTEL_LLM_API_KEY` – API key for LLM provider
+- `DOCINTEL_OBJECT_STORAGE_BUCKET` – documents bucket/container
+- `DOCINTEL_CORS_ORIGINS` – comma‑separated list of allowed origins (default: `*`)
+
+Example (PowerShell):
+
+```powershell
+$env:DOCINTEL_ENV = "development"
+$env:DOCINTEL_CORS_ORIGINS = "http://localhost:5173"
 ```
 
-## Integrate with your tools
+---
 
-* [Set up project integrations](https://gitlab.com/zetdcdev2/doctel/-/settings/integrations)
+## Frontend Setup (React + TypeScript)
 
-## Collaborate with your team
+```bash
+cd C:\Users\ze9167523\Documents\trae_projects\doctel\frontend
+npm install
+```
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Optional `.env` in `frontend/`:
 
-## Test and Deploy
+```env
+VITE_API_BASE_URL=http://localhost:8000
+```
 
-Use the built-in continuous integration in GitLab.
+---
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+## Mobile App Setup (iOS / Android)
 
-***
+```bash
+cd C:\Users\ze9167523\Documents\trae_projects\doctel\mobile
+npm install
+```
 
-# Editing this README
+For a physical device, set the backend base URL to your machine’s IP:
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```bash
+set EXPO_PUBLIC_API_BASE_URL=http://192.168.1.20:8000
+```
 
-## Suggestions for a good README
+---
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## How to Run (Recommended)
 
-## Name
-Choose a self-explaining name for your project.
+Use two terminals: one for the backend, one for the frontend.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+### 1. Start Backend
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+```bash
+cd C:\Users\ze9167523\Documents\trae_projects\doctel
+py -3.12 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload 
+Or
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+Backend URLs:
+- Swagger API docs: `http://localhost:8000/docs`
+- OpenAPI JSON: `http://localhost:8000/openapi.json`
+- Health check: `http://localhost:8000/healthz`
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+---
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+## Ollama (Local Models)
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+DocIntel uses Ollama locally at `http://127.0.0.1:11434` for text generation, embeddings, and vision.
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Key endpoints:
+- `GET /api/models/available` → returns `{ installed, available, offline, default_model, embed_model, vision_model }`
+- `POST /api/models/pull` → server-sent events stream for pulling a model (resume + retry)
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+Troubleshooting:
+- If chat returns `ollama_unreachable`, start Ollama: `ollama serve`
+- If a model is not installed, pull it: `ollama pull <model>`
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+---
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## Bootstrap Indexing (Ready on Startup)
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+On backend startup DocIntel scans and indexes local folders (default):
+- `C:\LocalAI\data\projects\**\*`
+- `C:\LocalAI\data\uploads\**\*`
 
-## License
-For open source projects, say how it is licensed.
+Endpoints:
+- `GET /api/bootstrap/status` → progress + counts
+- `POST /api/admin/reindex` (admin) → trigger a rescan
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Notes:
+- New/changed files are detected by SHA-256 and queued for ingestion.
+- Embeddings use `nomic-embed-text` via Ollama.
+
+---
+
+## Model Pull Progress
+
+Endpoints:
+- `POST /api/models/pull` with `{ "model": "llama3.2:3b-instruct", "resume": true }` starts a background pull.
+- `GET /api/models/pull/status/{model}` returns `{ state, percent, bytes_completed, bytes_total, eta_seconds, attempt, last_event, error, resume_supported }`.
+
+---
+
+## Logout + Token Expiry
+
+- `POST /auth/logout` returns `{ "success": true }` and revokes the in-memory session token.
+- Protected endpoints return `401` with `{ "error": "token_expired" }` when the token is missing/expired.
+
+---
+
+## Admin System Settings
+
+Admin-only endpoints:
+- `GET /admin/settings` → effective settings + per-key sources (`default|file|db`)
+- `PATCH /admin/settings` → apply partial updates (DB overrides) + restart recommendations
+- `POST /admin/settings/test` → validate without applying
+- `POST /admin/settings/backup` → write snapshot to `C:\LocalAI\backups\settings\YYYYMMDD_HHMMSS.yaml`
+- `POST /admin/settings/restore` → restore from `{ path }` or `{ yaml }`
+- `GET /admin/settings/audit` → audit feed
+
+### 2. Start Frontend
+
+```bash
+cd C:\Users\ze9167523\Documents\trae_projects\doctel\frontend
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+ 
+Frontend URL:
+
+- Web UI (desktop + mobile responsive): `http://localhost:5173/`
+
+If Vite reports a different port (e.g. 5174), open the exact `Local` URL it prints.
+
+---
+
+## Run Mobile App
+
+From the `mobile/` folder:
+
+```bash
+npm start
+```
+
+Then:
+
+- Press `a` for Android emulator
+- Press `i` for iOS simulator (macOS only)
+- Scan the QR code with Expo Go on a device
+
+---
+
+## Optional: Single Dev Command
+
+You can also use the helper script:
+
+```bash
+cd C:\Users\ze9167523\Documents\trae_projects\doctel
+python run_dev.py
+```
+
+This attempts to:
+
+- Start `npm run dev` in `frontend/`
+- Start the FastAPI backend with Uvicorn
+
+If ports are busy or `npm` is not on PATH, prefer the two‑terminal method described above.
+
+---
+
+## Current Features
+
+Backend:
+- Upload a document with metadata (Project Name, Document Type, Date).
+- Fetch document analysis: executive + detailed summary, entities, topics, sentiment.
+- Fetch suggested prompts for a document.
+- Ask questions about a document via chat endpoint, with source snippets.
+- Swagger UI with grouped `Documents` tag.
+- Retrieve user chat history by EC number.
+ - Store uploaded files on disk in `app/data/documents/` as a centralized repository.
+
+Frontend:
+- ZETDC‑branded layout with header and DocIntel shell.
+- Document view page showing:
+  - Analysis dashboard (executive summary, detailed summary, key insights).
+  - DocIntel Copilot (suggested prompts + chat interface with citations).
+- Model selector in the chat bar (persisted in browser + per chat session).
+- Responsive layout:
+  - Desktop: analysis on the left, copilot on the right.
+  - Mobile: copilot first, analysis below, single column scroll.
+
+Mobile:
+- iOS/Android app with EC number gate.
+- Document ingestion screen with metadata fields and file upload.
+- Chat screen with prompts and EC history.
+
+---
+
+## Next Steps / Roadmap
+
+- Integrate real document storage (database + object storage).
+- Add async processing pipeline for extraction, summarisation, and analysis.
+- Add vector database for document embeddings and retrieval‑augmented Q&A.
+- Implement authentication and RBAC for ZETDC users.

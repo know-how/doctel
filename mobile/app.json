@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "DocIntel",
+    "slug": "docintel",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "platforms": ["ios", "android"],
+    "sdkVersion": "54.0.0"
+  }
+}
