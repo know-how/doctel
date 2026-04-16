@@ -14,6 +14,10 @@ export interface DocumentCreateResponse {
 
 export interface DocumentAnalysisResponse {
   id: string
+  project_name?: string
+  filename?: string
+  document_type?: string
+  document_date?: string
   executive_summary: string
   detailed_summary: string[]
   entities: string[]
@@ -60,18 +64,53 @@ export interface ChatSource {
   snippet: string
 }
 
-export interface ChatRequest {
-  ec_number?: string | null
-  session_id?: string | null
-  question: string
-  history?: any[] | null
+export interface ChatAskOkResponse {
+  answer: string
+  citations: { filename: string; chunk_index: number; text: string }[]
+  cross_references?: { filename: string; reason: string }[]
+  used_model: string
+  session_id: string
 }
 
-export interface ChatResponse {
-  document_id: string
+export interface ChatAskQueuedResponse {
+  status: "queued" | "pending_analysis"
+  reason: string
+  document_status: string
+  retry_after_ms: number
+  poll_url: string
+  session_id: string
+  pending_message_id?: number
+}
+
+export type ChatResponse = ChatAskOkResponse | ChatAskQueuedResponse
+
+export interface ChatSessionCreateResponse {
+  session_id: string
+}
+
+export interface ChatMessage {
+  id: number
+  role: "user" | "assistant" | "system"
+  content: string
+  status: "pending" | "done" | "failed"
+  citations: { filename: string; chunk_index: number; text: string }[]
+  created_at: string
+}
+
+export interface ChatMessagesResponse {
+  session_id: string
+  messages: ChatMessage[]
+}
+
+export interface ChatRequest {
   question: string
-  answer: string
-  sources: ChatSource[]
+  project_id?: number
+  session_id?: string
+  pending_message_id?: number | string
+  model?: string
+  scope?: "project" | "all"
+  force_policy?: boolean
+  force_diagram?: boolean
 }
 
 export interface LoginRequest {
@@ -84,6 +123,9 @@ export interface LoginResponse {
   token_type: string
   ec_number: string
   display_name?: string | null
+  role?: string
+  email?: string
+  user_id?: number
 }
 
 export interface EmailOtpRequest {
@@ -126,4 +168,106 @@ export interface SummaryHistoryEntry {
 export interface SummaryHistoryResponse {
   ec_number: string
   history: SummaryHistoryEntry[]
+}
+
+export interface ModelsAvailableResponse {
+  installed?: string[]
+  available?: string[]
+  models?: string[]
+  default_model?: string
+  offline?: boolean
+  embed_model?: string
+  vision_model?: string
+}
+
+export interface ModelPullStatusResponse {
+  model: string
+  state: "idle" | "pending" | "downloading" | "verifying" | "retrying" | "success" | "failed"
+  percent: number
+  bytes_completed: number
+  bytes_total: number
+  eta_seconds?: number | null
+  attempt: number
+  last_event: string
+  error?: string
+  resume_supported?: boolean
+  installed?: boolean
+}
+
+export interface BootstrapStatusResponse {
+  running: boolean
+  scanned: number
+  new: number
+  updated: number
+  skipped: number
+  percent: number
+  last_error?: string
+}
+
+export interface MyProjectsResponse {
+  projects: { id: string; name: string; role: string }[]
+}
+
+export interface MyDocumentsResponse {
+  documents: {
+    id: string
+    filename: string
+    project_id: string | null
+    project_name: string
+    status: string
+    created_at: string
+    download_url: string
+    view_url: string
+    needs_project_review?: boolean
+    auto_project_confidence?: number
+  }[]
+}
+
+export interface ChatSessionsListResponse {
+  sessions: {
+    session_id: string
+    title?: string
+    scope?: string
+    project_id: string | null
+    document_id?: string | null
+    model: string
+    started_at: string
+    updated_at?: string
+  }[]
+}
+
+export interface IngestStatusResponse {
+  status: string
+  percent: number
+  message: string
+}
+
+export interface UserMeResponse {
+  username: string
+  role: string
+  user_id?: number
+  ec_number?: string
+  email?: string
+  display_name?: string
+}
+
+export interface AdminSettingsResponse {
+  settings: Record<string, any>
+  sources: Record<string, string>
+}
+
+export interface AdminSettingsPatchResponse {
+  ok: boolean
+  applied: Record<string, any>
+  restart_recommended: boolean
+}
+
+export interface AdminSettingsAuditResponse {
+  audit: Array<{
+    key: string
+    old_value: any
+    new_value: any
+    changed_by: string
+    changed_at: string
+  }>
 }

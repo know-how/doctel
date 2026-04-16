@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react"
+import React, { useEffect, useRef, useState } from "react"
 import { View, Text, TextInput, Pressable, ScrollView } from "react-native"
 import { colors } from "../theme/colors"
 import {
@@ -7,8 +7,18 @@ import {
   getUserHistory,
   getSummaryHistory,
   getDocumentAnalysis,
+  getIngestStatus,
 } from "../api/client"
 import { ChatResponse, UserHistoryEntry, SummaryHistoryEntry, DocumentAnalysisResponse } from "../types/api"
+
+type MobMsgStatus = "sending" | "waiting" | "success" | "error"
+interface MobileMessage {
+  id: string
+  question: string
+  answer: string
+  sources: ChatResponse["sources"]
+  status: MobMsgStatus
+}
 
 interface ChatScreenProps {
   documentId: string
@@ -17,13 +27,14 @@ interface ChatScreenProps {
 export const ChatScreen: React.FC<ChatScreenProps> = ({ documentId }) => {
   const [prompts, setPrompts] = useState<string[]>([])
   const [question, setQuestion] = useState("")
-  const [messages, setMessages] = useState<ChatResponse[]>([])
+  const [messages, setMessages] = useState<MobileMessage[]>([])
   const [history, setHistory] = useState<UserHistoryEntry[]>([])
   const [summaryHistory, setSummaryHistory] = useState<SummaryHistoryEntry[]>([])
   const [analysis, setAnalysis] = useState<DocumentAnalysisResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadingAnalysis, setLoadingAnalysis] = useState(true)
   const [error, setError] = useState("")
+  const scrollRef = useRef<ScrollView>(null)
 
   useEffect(() => {
     setMessages([])
@@ -53,22 +64,82 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({ documentId }) => {
   }, [documentId])
 
   const handleAsk = async (q: string) => {
-    if (!q.trim()) return
-    setLoading(true)
+    if (!q.trim() || loading) return
+
+    const ts = Date.now()
+    const msgId = `msg_${ts}`
+
+    // Optimistic update: show question immediately with typing indicator
+    setQuestion("")
     setError("")
+    setLoading(true)
+    setMessages((prev) => [
+      ...prev,
+      { id: msgId, question: q, answer: "", sources: [], status: "waiting" },
+    ])
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50)
+
+    const resolve = (answer: string, sources: ChatResponse["sources"], status: MobMsgStatus) => {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === msgId ? { ...m, answer, sources, status } : m)),
+      )
+    }
+
     try {
       const res = await chatWithDocument(documentId, {
         question: q,
         session_id: undefined,
         history: undefined,
       })
-      setMessages((prev) => [...prev, res])
-      setQuestion("")
+
+      if ("status" in res && (res.status === "queued" || res.status === "pending_analysis")) {
+        let attempts = 0
+        const checkStatus = async () => {
+          try {
+            const status = await getIngestStatus(documentId)
+            if (status.status === "completed" || status.analysis_ready || status.ingestion_completed) {
+              const answer = await chatWithDocument(documentId, {
+                question: q,
+                pending_message_id: (res as any).pending_message_id,
+              } as any)
+              if (!("status" in answer)) {
+                resolve(answer.answer, answer.sources, "success")
+              }
+              setLoading(false)
+            } else if (status.status === "failed") {
+              resolve("Ingestion failed. Your chat has been reset.", [], "error")
+              setMessages([])
+              setLoading(false)
+            } else {
+              if (attempts < 60) {
+                attempts++
+                setTimeout(checkStatus, 2000)
+              } else {
+                resolve("Ingestion is taking too long.", [], "error")
+                setLoading(false)
+              }
+            }
+          } catch (e: any) {
+            resolve(e.message ?? "Retry failed.", [], "error")
+            setLoading(false)
+          }
+        }
+        setTimeout(checkStatus, (res as any).retry_after_ms ?? 2000)
+        return
+      }
+
+      resolve(res.answer, res.sources, "success")
     } catch (e: any) {
-      setError(e.message ?? "Failed to get answer.")
+      resolve(e.message ?? "Failed to get answer.", [], "error")
     } finally {
       setLoading(false)
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80)
     }
+  }
+
+  const handleRetry = (failedMsg: MobileMessage) => {
+    setMessages((prev) => prev.filter((m) => m.id !== failedMsg.id))
+    void handleAsk(failedMsg.question)
   }
 
   return (
@@ -82,7 +153,11 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({ documentId }) => {
 
       {error ? <Text style={{ color: colors.danger }}>{error}</Text> : null}
 
-      <ScrollView style={{ flex: 1, marginBottom: 12 }}>
+      <ScrollView
+        ref={scrollRef}
+        style={{ flex: 1, marginBottom: 12 }}
+        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+      >
         {loadingAnalysis && (
           <Text style={{ color: colors.textMuted, marginBottom: 12 }}>Loading analysis...</Text>
         )}
@@ -242,21 +317,39 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({ documentId }) => {
             </View>
           )}
 
-          {messages.map((msg, idx) => (
-            <View key={`${msg.document_id}-${idx}`} style={{ marginBottom: 12 }}>
+          {messages.map((msg) => (
+            <View key={msg.id} style={{ marginBottom: 12 }}>
               <View style={userBubbleStyle}>
                 <Text style={{ color: "#FFFFFF" }}>{msg.question}</Text>
               </View>
-              <View style={assistantBubbleStyle}>
-                <Text style={{ color: colors.textPrimary }}>{msg.answer}</Text>
-                <View style={{ marginTop: 6, gap: 4 }}>
-                  {msg.sources.map((src) => (
-                    <Text key={src.chunk_id} style={{ fontSize: 11, color: colors.textMuted }}>
-                      Source: {src.chunk_id}
-                    </Text>
-                  ))}
+              {msg.status === "waiting" ? (
+                <View style={[assistantBubbleStyle, { flexDirection: "row", alignItems: "center", gap: 4 }]}>
+                  <Text style={{ color: colors.textMuted, fontSize: 14 }}>●</Text>
+                  <Text style={{ color: colors.textMuted, fontSize: 14 }}>●</Text>
+                  <Text style={{ color: colors.textMuted, fontSize: 14 }}>●</Text>
                 </View>
-              </View>
+              ) : msg.status === "error" ? (
+                <View style={[assistantBubbleStyle, { borderColor: "rgba(239,68,68,0.4)", backgroundColor: "#FEF2F2" }]}>
+                  <Text style={{ color: "#dc2626" }}>❌ {msg.answer || "Failed to get a response."}</Text>
+                  <Pressable
+                    onPress={() => handleRetry(msg)}
+                    style={[primaryButtonStyle, { marginTop: 8, backgroundColor: "#dc2626" }]}
+                  >
+                    <Text style={{ color: "#FFFFFF", fontSize: 13 }}>↩ Retry</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <View style={assistantBubbleStyle}>
+                  <Text style={{ color: colors.textPrimary }}>{msg.answer}</Text>
+                  <View style={{ marginTop: 6, gap: 4 }}>
+                    {msg.sources.map((src) => (
+                      <Text key={src.chunk_id} style={{ fontSize: 11, color: colors.textMuted }}>
+                        Source: {src.chunk_id}
+                      </Text>
+                    ))}
+                  </View>
+                </View>
+              )}
             </View>
           ))}
         </View>
@@ -275,10 +368,11 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({ documentId }) => {
           value={question}
           onChangeText={setQuestion}
           placeholder="Ask a question"
-          style={[inputStyle, { flex: 1 }]}
+          editable={!loading}
+          style={[inputStyle, { flex: 1, opacity: loading ? 0.6 : 1 }]}
         />
         <Pressable onPress={() => handleAsk(question)} style={primaryButtonStyle} disabled={loading}>
-          <Text style={{ color: "#FFFFFF" }}>{loading ? "..." : "Send"}</Text>
+          <Text style={{ color: "#FFFFFF" }}>{loading ? "…" : "Send"}</Text>
         </Pressable>
       </View>
     </View>

@@ -10,7 +10,7 @@ use_mmr: true
 bind_host: "127.0.0.1"
 port: 8000
 offline_only: true
-base_dir: "C:\\LocalAI"
+base_dir: "C:\\Users\\ze9167523\\IdeaProjects\\doctel\\localai"
 security:
   use_local_https: false
   encrypt_sqlite: true
@@ -36,8 +36,8 @@ pull:
 
 bootstrap:
   scan_paths:
-    - "C:/LocalAI/data/projects"
-    - "C:/LocalAI/data/uploads"
+    - "C:/Users/ze9167523/IdeaProjects/doctel/localai/data/projects"
+    - "C:/Users/ze9167523/IdeaProjects/doctel/localai/data/uploads"
   schedule_seconds: 90
   ocr: true
   overwrite_existing_analysis: false
@@ -66,9 +66,9 @@ ui:
     pull_ms: 800
 
 storage:
-  upload_root: "C:/LocalAI/data/uploads"
-  processed_root: "C:/LocalAI/data/processed"
-  vector_root: "C:/LocalAI/data/chroma"
+  upload_root: "C:/Users/ze9167523/IdeaProjects/doctel/localai/data/uploads"
+  processed_root: "C:/Users/ze9167523/IdeaProjects/doctel/localai/data/processed"
+  vector_root: "C:/Users/ze9167523/IdeaProjects/doctel/localai/data/chroma"
   backup_days: 30
   organize_by_project: true
 
@@ -76,8 +76,44 @@ zetdc:
   system_prompt: ""
   tags: []
   policy_template: ""
-  allow_web_search: false
+  allow_web_search: true
 
 diagnostics:
   log_level: "INFO"
   show_health: true
+
+# ── Training Room (LoRA/QLoRA) ─────────────────────────────────────────────────
+# Drop files into training/inbox/ then trigger a learning cycle via the UI
+# or API: POST /api/training/now
+
+training:
+  hf_base_model: "meta-llama/Llama-3.2-3B-Instruct"
+  min_free_ram_for_training_mb: 4096
+  use_4bit_qlora: false
+  lora:
+    r: 8
+    lora_alpha: 16
+    lora_dropout: 0.05
+  run:
+    max_steps: 200
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 4
+#     learning_rate: 0.0002
+#     max_seq_length: 512
+
+# ── Cloud Teacher (optional) ───────────────────────────────────────────────────
+# Set DOCTEL_TEACHER_API_KEY in .env to enable teacher-student learning.
+# Supported providers: deepseek | gemini | openai
+#
+# Cloud answers are captured in training_room/teacher_samples/ for fine-tuning.
+# Environment variables:
+#   DOCTEL_TEACHER_PROVIDER   = deepseek
+#   DOCTEL_TEACHER_API_KEY    = sk-...
+#   DOCTEL_TEACHER_MODEL      = deepseek-chat
+#   DOCTEL_CONFIDENCE_THRESHOLD = 0.5
+
+# ── Web Search Fallback (optional) ────────────────────────────────────────────
+# Uses DuckDuckGo – no API key required. Enable by setting:
+#   DOCTEL_WEB_SEARCH_ENABLED  = true
+#   DOCTEL_WEB_SEARCH_MAX_RESULTS = 3
+# Install: pip install duckduckgo-search

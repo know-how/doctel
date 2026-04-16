@@ -102,7 +102,13 @@ async def get_rag_answer_scoped(
 
     user_prompt = f"Question: {user_query}\n\nContext:\n{context}"
     chosen = model_name or select_text_model("rag")
-    answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
+
+    # Route to Gemini API if that model is selected
+    from app.services.gemini_service import GEMINI_MODEL_ID, generate as gemini_generate
+    if chosen == GEMINI_MODEL_ID:
+        answer_text = await gemini_generate(user_prompt, system=system_prompt)
+    else:
+        answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
 
     mermaid_code = ""
     drawing_prompt = ""

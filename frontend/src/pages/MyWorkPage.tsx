@@ -21,7 +21,7 @@ export const MyWorkPage: React.FC<{
     }[]
   >([])
   const [sessions, setSessions] = useState<
-    { session_id: string; project_id: string | null; model: string; started_at: string }[]
+    { session_id: string; project_id: string | null; model: string; started_at: string; title?: string; updated_at?: string }[]
   >([])
 
   const refresh = async () => {
@@ -223,9 +223,9 @@ export const MyWorkPage: React.FC<{
                 }}
               >
                 <div>
-                  <div style={{ fontWeight: 700 }}>{s.session_id}</div>
+                  <div style={{ fontWeight: 700 }}>{s.title || "Conversation"}</div>
                   <div style={{ fontSize: 12, color: colors.textMuted }}>
-                    {s.model || "default"} • {s.started_at || ""}
+                    {s.model || "default"} • {s.updated_at || s.started_at || ""}
                   </div>
                 </div>
               </div>

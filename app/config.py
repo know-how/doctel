@@ -4,6 +4,24 @@ from typing import List, Optional, Any
 from pydantic import BaseModel, Field
 from pathlib import Path
 
+
+def _strip_inline_env_comment(value: str) -> str:
+    in_single = False
+    in_double = False
+    previous = ""
+
+    for index, char in enumerate(value):
+        if char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "'" and not in_double:
+            in_single = not in_single
+        elif char == "#" and not in_single and not in_double:
+            if index == 0 or previous.isspace():
+                return value[:index].rstrip()
+        previous = char
+
+    return value.strip()
+
 def _load_dotenv() -> None:
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if not env_path.exists():
@@ -22,7 +40,7 @@ def _load_dotenv() -> None:
             continue
         key, val = s.split("=", 1)
         key = key.strip()
-        val = val.strip()
+        val = _strip_inline_env_comment(val)
         if not key or key in os.environ:
             continue
         if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
@@ -121,6 +139,11 @@ class Settings(BaseModel):
     embed_model: str = os.getenv("DOCINTEL_EMBED_MODEL", "nomic-embed-text")
     ollama_base_url: str = os.getenv("DOCINTEL_OLLAMA_BASE_URL", "http://localhost:11434")
 
+    # Gemini API (external, free tier – add GEMINI_API_KEY to your .env)
+    # Get a free key at: https://aistudio.google.com/apikey
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
     # Model routing
     enable_qwen_9b: bool = os.getenv("DOCINTEL_ENABLE_QWEN_9B", "false").lower() == "true"
     qwen_9b_model: str = os.getenv("DOCINTEL_QWEN_9B_MODEL", "qwen3.5:9b")
@@ -160,8 +183,11 @@ class Settings(BaseModel):
 
     # RAG parameters
     max_context_tokens: int = int(os.getenv("DOCINTEL_MAX_CONTEXT_TOKENS", "3000"))
+    # chunk_size is in CHARACTERS (not tokens). At ~4 chars/token, the default
+    # of 1000 chars ≈ 250 tokens – well within nomic-embed-text's 8192-token limit.
+    # Raise to 2000–4000 for larger documents; lower to 500 for high-precision retrieval.
     chunk_size: int = int(os.getenv("DOCINTEL_CHUNK_SIZE", "1000"))
-    chunk_overlap: int = int(os.getenv("DOCINTEL_CHUNK_OVERLAP", "150"))
+    chunk_overlap: int = int(os.getenv("DOCINTEL_CHUNK_OVERLAP", "150"))  # also chars
     top_k: int = int(os.getenv("DOCINTEL_TOP_K", "6"))
     use_mmr: bool = os.getenv("DOCINTEL_USE_MMR", "true").lower() == "true"
 

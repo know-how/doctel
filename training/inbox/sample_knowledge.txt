@@ -1,0 +1,2 @@
+ZETDC Substation Maintenance Protocol for 2026:
+All field technicians operating in the Harare Central District must perform a visual inspection of transformer oil levels before engaging any high-voltage circuit breakers. If the oil level is below 45%, District Command must be notified via the internal ZUMS application. The standard operating temperature for these transponders during peak load is 65°C. Anything above 85°C requires immediate load shedding.

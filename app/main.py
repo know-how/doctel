@@ -36,7 +36,7 @@ from app.services.auth_service import (
     verify_email_code,
     create_session,
 )
-from app.services.model_router import active as model_active, force_select as model_force
+from app.services.model_router import active as model_active, force_select as model_force, select_model_with_fallback
 from app.services.ingest_worker import start_worker, enqueue as enqueue_ingest
 from app.db.models import Document as DbDocument
 from app.db.models import Session as DbSession, Message as DbMessage
@@ -52,6 +52,7 @@ from app.services import auth_service
 
 _ask_inflight: dict[str, float] = {}
 _ask_lock = asyncio.Lock()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="DocIntel")
 
@@ -104,7 +105,19 @@ def _is_embedding_model(model: str) -> bool:
 def _is_generation_model(model: str) -> bool:
     if not model:
         return False
+    from app.services.gemini_service import GEMINI_MODEL_ID
+    if model == GEMINI_MODEL_ID:
+        return True
     return not _is_embedding_model(model)
+
+
+def _derive_session_title(text: str, fallback: str = "Conversation") -> str:
+    normalized = re.sub(r"\s+", " ", (text or "").strip())
+    if not normalized:
+        return fallback
+    if len(normalized) > 80:
+        return normalized[:77].rstrip() + "..."
+    return normalized
 
 async def _accessible_project_ids(user: User, db: AsyncSession) -> list[int]:
     if user.role == "admin":
@@ -114,6 +127,30 @@ async def _accessible_project_ids(user: User, db: AsyncSession) -> list[int]:
     member = await db.execute(select(ProjectMember.project_id).where(ProjectMember.user_id == user.id))
     ids = list(dict.fromkeys([*owned.scalars().all(), *member.scalars().all()]))
     return [int(x) for x in ids if x is not None]
+
+
+async def _searchable_project_ids(db: AsyncSession) -> list[int]:
+    res = await db.execute(select(Project.id))
+    return [int(x) for x in res.scalars().all() if x is not None]
+
+
+async def _can_view_document(doc: Document, user: User, db: AsyncSession) -> bool:
+    if user.role == "admin":
+        return True
+    owner_id = getattr(doc, "uploaded_by_user_id", None)
+    if owner_id is not None:
+        return int(owner_id) == int(user.id)
+    project_id = getattr(doc, "project_id", None)
+    if project_id is None:
+        return False
+    pres = await db.execute(select(Project.owner_user_id).where(Project.id == int(project_id)))
+    project_owner_id = pres.scalar_one_or_none()
+    return project_owner_id is not None and int(project_owner_id) == int(user.id)
+
+
+async def _assert_document_workspace_access(doc: Document, user: User, db: AsyncSession) -> None:
+    if not await _can_view_document(doc, user, db):
+        raise HTTPException(status_code=404, detail="Document not found")
 
 # Local-only: bind to localhost
 app.add_middleware(
@@ -143,6 +180,21 @@ async def startup():
     await start_worker()
     asyncio.create_task(run_bootstrap_scan())
     await start_watcher()
+
+    # Wire training-complete SSE broadcast into the training scheduler.
+    # The scheduler runs jobs in a background thread; capturing the event loop
+    # here lets it safely schedule the coroutine back onto it.
+    _event_loop = asyncio.get_event_loop()
+    from app.training.training_scheduler import scheduler as _training_scheduler
+
+    def _on_training_complete(adapter_id: str) -> None:
+        _event_loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(
+                _sse_broadcast("training.complete", {"adapter_id": adapter_id})
+            )
+        )
+
+    _training_scheduler.set_completion_callback(_on_training_complete)
 
 @app.get("/api/bootstrap/status")
 async def api_bootstrap_status(user: User = Depends(get_current_user)):
@@ -205,6 +257,15 @@ async def api_models_available():
     filtered_available = [m for m in merged if m in available_set or m in installed_set]
     filtered_installed = [m for m in filtered_installed if _is_generation_model(m)]
     filtered_available = [m for m in filtered_available if _is_generation_model(m)]
+
+    # Inject Gemini API entry when a key is configured so it appears in the UI
+    from app.services.gemini_service import GEMINI_MODEL_ID, is_configured as gemini_configured
+    if gemini_configured():
+        if GEMINI_MODEL_ID not in filtered_installed:
+            filtered_installed.append(GEMINI_MODEL_ID)
+        if GEMINI_MODEL_ID not in filtered_available:
+            filtered_available.append(GEMINI_MODEL_ID)
+
     return {
         "installed": filtered_installed,
         "available": filtered_available,
@@ -338,6 +399,38 @@ async def upload_documents(
         
     return {"documents": uploaded_docs}
 
+# Ingest retry (must be defined BEFORE /api/ingest/{doc_id} to avoid route shadowing)
+@app.post("/api/ingest/retry")
+async def ingest_retry(payload: dict = Body(...), user: User = Depends(require_role(["admin", "analyst"])), db: AsyncSession = Depends(get_db)):
+    doc_int = _parse_document_id(payload.get("document_id", ""))
+    result = await db.execute(select(DbDocument).where(DbDocument.id == doc_int))
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    await _assert_document_workspace_access(doc, user, db)
+    emb_ids_res = await db.execute(select(Chunk.embedding_id).where(Chunk.document_id == doc_int))
+    emb_ids = [int(x) for x in emb_ids_res.scalars().all() if x is not None]
+    await db.execute(delete(Chunk).where(Chunk.document_id == doc_int))
+    if emb_ids:
+        await db.execute(delete(Embedding).where(Embedding.id.in_(emb_ids)))
+    await db.execute(delete(SuggestedPrompt).where(SuggestedPrompt.document_id == doc_int))
+    await db.execute(delete(DocAnalysis).where(DocAnalysis.document_id == doc_int))
+    await db.commit()
+    try:
+        from app.utils.chroma_client import chroma
+        chroma.delete_where(str(doc.project_id), {"document_id": doc_int})
+    except Exception:
+        pass
+    doc.status = "uploaded"
+    doc.ingest_step = "uploaded"
+    doc.ingest_percent = 0
+    doc.ingest_message = "Retry queued"
+    doc.error_message = ""
+    db.add(doc)
+    await db.commit()
+    await enqueue_ingest(doc.id)
+    return {"ok": True}
+
 # Ingest (manual trigger)
 @app.post("/api/ingest/{doc_id}")
 async def trigger_ingestion(
@@ -349,14 +442,13 @@ async def trigger_ingestion(
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    await check_project_access(doc.project_id, user, db)
-    await ensure_project_membership(doc.project_id, user, db, role_in_project="analyst")
+    await _assert_document_workspace_access(doc, user, db)
     await enqueue_ingest(doc_id)
     return {"status": "queued"}
 
-# Ask (RAG)
-@app.post("/api/ask")
-async def ask_question(
+# Legacy stub kept only to avoid silent behavior changes for any old callers.
+@app.post("/api/ask-legacy")
+async def ask_question_legacy(
     project_id: int, 
     user_query: str, 
     session_id: Optional[int] = None,
@@ -365,7 +457,7 @@ async def ask_question(
 ):
     return JSONResponse(
         status_code=404,
-        content={"error": "Chat endpoint not found. Use POST /api/ask/{document_id} with JSON {question, project_id, session_id?}."},
+        content={"error": "legacy_endpoint_removed", "message": "Use POST /api/ask with JSON {question, scope?, session_id?, model?} or POST /api/ask/{document_id} for document chat."},
     )
 
 
@@ -390,10 +482,13 @@ async def create_chat_session(
             res = await db.execute(select(DbDocument).where(DbDocument.id == doc_int))
             doc = res.scalar_one_or_none()
             if doc:
+                await _assert_document_workspace_access(doc, user, db)
                 resolved_project_id = int(doc.project_id)
                 resolved_document_id = int(doc.id)
                 if not title:
                     title = (doc.filename or "").strip() or f"Document {doc_int}"
+        except HTTPException:
+            raise
         except Exception:
             resolved_project_id = None
     if project_id is not None:
@@ -542,8 +637,7 @@ async def ask_document(
     doc = result.scalar_one_or_none()
     if not doc:
         return JSONResponse(status_code=404, content={"error": "Document not found"})
-    await check_project_access(doc.project_id, user, db)
-    await ensure_project_membership(doc.project_id, user, db, role_in_project="analyst")
+    await _assert_document_workspace_access(doc, user, db)
 
     question = (payload.get("question") or "").strip()
     if not question:
@@ -594,6 +688,10 @@ async def ask_document(
         if not user_msg:
             user_msg = DbMessage(session_id=s.id, role="user", content=question, status="pending", citations_json="")
             db.add(user_msg)
+            await db.commit()
+        if not (s.title or "").strip() or (doc.filename and (s.title or "").strip() == (doc.filename or "").strip()):
+            s.title = _derive_session_title(question, fallback=(doc.filename or "Conversation"))
+            db.add(s)
             await db.commit()
 
         from app.utils.ollama_client import ollama
@@ -659,23 +757,50 @@ async def ask_document(
                 },
             )
 
-        try:
-            models = await ollama.list_models()
-            update_installed_models(models)
-        except Exception:
+        # Pre-compute chosen model so we can skip Ollama checks for Gemini
+        from app.services.gemini_service import (
+            GEMINI_MODEL_ID,
+            is_configured as gemini_configured,
+            generate as gemini_generate,
+        )
+        _session_model_pre = (s.model_name or "").strip() or None
+        _default_model_pre = (settings.default_model or settings.text_model).strip()
+        chosen_model = requested_model or _session_model_pre or _default_model_pre
+        _using_gemini = (chosen_model == GEMINI_MODEL_ID)
+
+        if _using_gemini and not gemini_configured():
             user_msg.status = "failed"
             db.add(user_msg)
             await db.commit()
             return JSONResponse(
                 status_code=503,
                 content={
-                    "error": "ollama_unreachable",
-                    "message": "Ollama is not reachable. Start Ollama (ollama serve) and retry.",
-                    "retry_after_ms": 4000,
+                    "error": "gemini_not_configured",
+                    "message": "GEMINI_API_KEY is not set. Add it to your .env file and restart.",
                     "session_id": session_uuid,
                 },
             )
-        if not models:
+
+        models: list[str] = []
+        try:
+            models = await ollama.list_models()
+            update_installed_models(models)
+        except Exception:
+            if not _using_gemini:
+                user_msg.status = "failed"
+                db.add(user_msg)
+                await db.commit()
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "ollama_unreachable",
+                        "message": "Ollama is not reachable. Start Ollama (ollama serve) and retry.",
+                        "retry_after_ms": 4000,
+                        "session_id": session_uuid,
+                    },
+                )
+            # Gemini selected – continue without Ollama (RAG context unavailable)
+        if not models and not _using_gemini:
             user_msg.status = "failed"
             db.add(user_msg)
             await db.commit()
@@ -692,9 +817,12 @@ async def ask_document(
         embed_available = settings.embed_model in present
 
         allowed = set(settings.available_models or []) | present
+        # Gemini is always allowed and virtually present when configured
+        if _using_gemini:
+            allowed.add(GEMINI_MODEL_ID)
+            present.add(GEMINI_MODEL_ID)
+
         session_model = (s.model_name or "").strip() or None
-        default_model = (settings.default_model or settings.text_model).strip()
-        chosen_model = requested_model or session_model or default_model
         if not _is_generation_model(chosen_model):
             user_msg.status = "failed"
             db.add(user_msg)
@@ -740,7 +868,7 @@ async def ask_document(
         project_ids = [int(doc.project_id)]
         document_filter = None
         if scope == "all":
-            project_ids = await _accessible_project_ids(user, db)
+            project_ids = await _searchable_project_ids(db)
         rag = None
         try:
             if embed_available:
@@ -757,7 +885,25 @@ async def ask_document(
             rag = None
         if not rag:
             sys_prompt = (settings.zetdc.system_prompt or "").strip() or None
-            answer_text = await ollama.generate(chosen_model, question, system=sys_prompt)
+            if _using_gemini:
+                answer_text = await gemini_generate(question, system=sys_prompt)
+            else:
+                # Fallback: try Ollama; if it fails and Gemini is configured, use Gemini
+                try:
+                    answer_text = await ollama.generate(chosen_model, question, system=sys_prompt)
+                except Exception as _ollama_err:
+                    if gemini_configured():
+                        logger.warning(
+                            "Local model %s failed (%s) – falling back to Gemini API",
+                            chosen_model,
+                            _ollama_err,
+                        )
+                        answer_text = await gemini_generate(
+                            question, system=sys_prompt
+                        )
+                        chosen_model = GEMINI_MODEL_ID
+                    else:
+                        raise
             rag = {"answer_text": answer_text, "citations": [], "cross_references": [], "used_model": chosen_model}
         user_msg.status = "done"
         db.add(user_msg)
@@ -821,9 +967,7 @@ async def ask_global(
         await ensure_project_membership(pid, user, db, role_in_project="analyst")
         project_ids = [pid]
     else:
-        project_ids = await _accessible_project_ids(user, db)
-        if not project_ids:
-            return JSONResponse(status_code=403, content={"error": "no_accessible_projects"})
+        project_ids = await _searchable_project_ids(db)
 
     session_uuid = (payload.get("session_id") or "").strip() or None
     if not session_uuid:
@@ -844,23 +988,52 @@ async def ask_global(
     user_msg = DbMessage(session_id=s.id, role="user", content=question, status="pending", citations_json="")
     db.add(user_msg)
     await db.commit()
+    if not (s.title or "").strip():
+        s.title = _derive_session_title(question)
+        db.add(s)
+        await db.commit()
 
     from app.utils.ollama_client import ollama
-    try:
-        models = await ollama.list_models()
-        update_installed_models(models)
-    except Exception:
+    from app.services.gemini_service import (
+        GEMINI_MODEL_ID,
+        is_configured as gemini_configured,
+        generate as gemini_generate,
+    )
+
+    # Pre-compute chosen model before Ollama check (needed for Gemini bypass)
+    _session_model_pre = (s.model_name or "").strip() or None
+    _default_model_pre = (settings.default_model or settings.text_model).strip()
+    chosen_model = requested_model or _session_model_pre or _default_model_pre
+    _using_gemini = (chosen_model == GEMINI_MODEL_ID)
+
+    if _using_gemini and not gemini_configured():
         user_msg.status = "failed"
         db.add(user_msg)
         await db.commit()
-        return JSONResponse(status_code=503, content={"error": "ollama_unreachable"})
-    present = set(models or [])
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "gemini_not_configured",
+                "message": "GEMINI_API_KEY is not set. Add it to your .env file and restart.",
+            },
+        )
+
+    ollama_models: list[str] = []
+    try:
+        ollama_models = await ollama.list_models()
+        update_installed_models(ollama_models)
+    except Exception:
+        ollama_models = []
+        # Continue without Ollama so teacher/web fallback can still answer.
+    present = set(ollama_models or [])
     embed_available = settings.embed_model in present
 
     allowed = set(settings.available_models or []) | present
+    if _using_gemini:
+        allowed.add(GEMINI_MODEL_ID)
+        present.add(GEMINI_MODEL_ID)
+
     session_model = (s.model_name or "").strip() or None
-    default_model = (settings.default_model or settings.text_model).strip()
-    chosen_model = requested_model or session_model or default_model
     if not _is_generation_model(chosen_model):
         user_msg.status = "failed"
         db.add(user_msg)
@@ -872,17 +1045,14 @@ async def ask_global(
         await db.commit()
         return JSONResponse(status_code=400, content={"error": "model_not_allowed", "model": chosen_model})
     if chosen_model not in present:
-        user_msg.status = "failed"
-        db.add(user_msg)
-        await db.commit()
-        return JSONResponse(status_code=400, content={"error": "model_not_available", "model": chosen_model})
-    if not session_model:
+        logger.info("Global chat model %s is not locally present; falling back to alternate tiers if needed", chosen_model)
+    if not session_model and chosen_model in present:
         s.model_name = chosen_model
         db.add(s)
         await db.commit()
 
     rag = None
-    if embed_available:
+    if embed_available and project_ids:
         try:
             rag = await get_rag_answer_scoped(
                 project_ids,
@@ -895,10 +1065,50 @@ async def ask_global(
             )
         except Exception:
             rag = None
-    if not rag:
+    if not rag or not rag.get("citations"):
         sys_prompt = (settings.zetdc.system_prompt or "").strip() or None
-        answer_text = await ollama.generate(chosen_model, question, system=sys_prompt)
-        rag = {"answer_text": answer_text, "citations": [], "cross_references": [], "used_model": chosen_model}
+        answer_text = None
+        fallback_source = None
+        try:
+            if _using_gemini:
+                answer_text = await gemini_generate(question, system=sys_prompt)
+            elif chosen_model in present:
+                answer_text = await ollama.generate(chosen_model, question, system=sys_prompt)
+        except Exception as _direct_err:
+            logger.warning("Direct global answer failed for %s (%s)", chosen_model, _direct_err)
+            answer_text = None
+
+        if not answer_text and gemini_configured() and not _using_gemini:
+            try:
+                answer_text = await gemini_generate(question, system=sys_prompt)
+                chosen_model = GEMINI_MODEL_ID
+                fallback_source = "gemini_api"
+            except Exception as _gemini_err:
+                logger.warning("Gemini global fallback failed (%s)", _gemini_err)
+                answer_text = None
+
+        if not answer_text:
+            try:
+                routed = await asyncio.wait_for(
+                    select_model_with_fallback(question, task_type="rag"),
+                    timeout=45.0,
+                )
+                answer_text = routed.get("answer") or ""
+                fallback_source = routed.get("tier") or "fallback"
+                chosen_model = routed.get("model") or chosen_model
+            except asyncio.TimeoutError:
+                logger.warning("Global fallback routing timed out")
+                answer_text = "I could not complete the fallback answer in time. Please try again."
+                fallback_source = "timeout"
+
+        rag = {
+            "answer_text": answer_text,
+            "citations": rag.get("citations", []) if rag else [],
+            "cross_references": (
+                rag.get("cross_references", []) if rag else []
+            ) + ([{"filename": str(fallback_source), "reason": "Fallback intelligence tier used"}] if fallback_source else []),
+            "used_model": chosen_model,
+        }
     user_msg.status = "done"
     db.add(user_msg)
     assistant = DbMessage(
@@ -930,7 +1140,7 @@ async def generate_policy(payload: dict = Body(...), user: User = Depends(get_cu
         return JSONResponse(status_code=400, content={"error": "missing_topic"})
     scope = (payload.get("scope") or "all").strip().lower()
     model = (payload.get("model") or "").strip() or None
-    project_ids = await _accessible_project_ids(user, db) if scope == "all" else []
+    project_ids = await _searchable_project_ids(db) if scope == "all" else []
     if scope == "project":
         pid = payload.get("project_id")
         if pid is None:
@@ -948,7 +1158,7 @@ async def generate_flowchart(payload: dict = Body(...), user: User = Depends(get
         return JSONResponse(status_code=400, content={"error": "missing_topic"})
     scope = (payload.get("scope") or "all").strip().lower()
     model = (payload.get("model") or "").strip() or None
-    project_ids = await _accessible_project_ids(user, db) if scope == "all" else []
+    project_ids = await _searchable_project_ids(db) if scope == "all" else []
     pid_int = None
     if scope == "project":
         pid = payload.get("project_id")
@@ -993,7 +1203,10 @@ async def list_projects(user: User = Depends(get_current_user), db: AsyncSession
         rows = result.scalars().all()
     items = []
     for p in rows:
-        c = await db.execute(select(func.count(Document.id)).where(Document.project_id == p.id))
+        count_query = select(func.count(Document.id)).where(Document.project_id == p.id)
+        if user.role != "admin":
+            count_query = count_query.where(Document.uploaded_by_user_id == user.id)
+        c = await db.execute(count_query)
         doc_count = int(c.scalar() or 0)
         items.append({"id": str(p.id), "name": p.name, "document_count": doc_count})
     return {"projects": items}
@@ -1005,6 +1218,8 @@ async def list_project_documents(project_id: int, user: User = Depends(get_curre
     docs = result.scalars().all()
     out = []
     for d in docs:
+        if not await _can_view_document(d, user, db):
+            continue
         out.append({"id": f"doc_{d.id}", "filename": d.filename, "mime_type": d.mime_type})
     return {"project_id": str(project_id), "documents": out}
 
@@ -1015,8 +1230,7 @@ async def download_document_file(document_id: str, user: User = Depends(get_curr
     doc = result.scalar_one_or_none()
     if not doc:
         return JSONResponse(status_code=404, content={"error": "Document not found"})
-    await check_project_access(int(doc.project_id), user, db)
-    await ensure_project_membership(int(doc.project_id), user, db, role_in_project="analyst")
+    await _assert_document_workspace_access(doc, user, db)
     path = Path(doc.path)
     if not path.exists():
         return JSONResponse(status_code=404, content={"error": "file_missing"})
@@ -1045,6 +1259,7 @@ async def override_document_project(
     doc = res.scalar_one_or_none()
     if not doc:
         return JSONResponse(status_code=404, content={"error": "Document not found"})
+    await _assert_document_workspace_access(doc, user, db)
     await check_project_access(pid_int, user, db)
     await ensure_project_membership(pid_int, user, db, role_in_project="analyst")
     doc.project_id = pid_int
@@ -1067,20 +1282,9 @@ async def my_projects(user: User = Depends(get_current_user), db: AsyncSession =
         return {"projects": [{"id": str(p.id), "name": p.name, "role": "admin"} for p in projects]}
     owned_res = await db.execute(select(Project).where(Project.owner_user_id == user.id))
     owned = list(owned_res.scalars().all())
-    member_res = await db.execute(select(ProjectMember).where(ProjectMember.user_id == user.id))
-    members = list(member_res.scalars().all())
     proj_map: dict[int, dict] = {}
     for p in owned:
         proj_map[int(p.id)] = {"id": str(p.id), "name": p.name, "role": "owner"}
-    if members:
-        mids = [int(m.project_id) for m in members if m.project_id is not None]
-        if mids:
-            pres = await db.execute(select(Project).where(Project.id.in_(mids)))
-            for p in pres.scalars().all():
-                if int(p.id) in proj_map:
-                    continue
-                role = next((m.role_in_project for m in members if int(m.project_id) == int(p.id)), "analyst")
-                proj_map[int(p.id)] = {"id": str(p.id), "name": p.name, "role": role}
     return {"projects": list(proj_map.values())}
 
 @app.get("/users/me/projects")
@@ -1259,8 +1463,7 @@ async def ingest_status(document_id: str, user: User = Depends(get_current_user)
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    await check_project_access(doc.project_id, user, db)
-    await ensure_project_membership(doc.project_id, user, db, role_in_project="analyst")
+    await _assert_document_workspace_access(doc, user, db)
     if doc.status == "ingesting" and (doc.updated_at or "").strip():
         try:
             ts = doc.updated_at.replace("Z", "+00:00")
@@ -1314,8 +1517,7 @@ async def ingest_stream(document_id: str, user: User = Depends(get_current_user)
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    await check_project_access(doc.project_id, user, db)
-    await ensure_project_membership(doc.project_id, user, db, role_in_project="analyst")
+    await _assert_document_workspace_access(doc, user, db)
 
     async def event_gen():
         last = None
@@ -1366,37 +1568,6 @@ async def ingest_stream(document_id: str, user: User = Depends(get_current_user)
             await asyncio.sleep(1.0)
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
-
-@app.post("/api/ingest/retry")
-async def ingest_retry(payload: dict = Body(...), user: User = Depends(require_role(["admin", "analyst"])), db: AsyncSession = Depends(get_db)):
-    doc_int = _parse_document_id(payload.get("document_id", ""))
-    result = await db.execute(select(DbDocument).where(DbDocument.id == doc_int))
-    doc = result.scalar_one_or_none()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    await check_project_access(doc.project_id, user, db)
-    emb_ids_res = await db.execute(select(Chunk.embedding_id).where(Chunk.document_id == doc_int))
-    emb_ids = [int(x) for x in emb_ids_res.scalars().all() if x is not None]
-    await db.execute(delete(Chunk).where(Chunk.document_id == doc_int))
-    if emb_ids:
-        await db.execute(delete(Embedding).where(Embedding.id.in_(emb_ids)))
-    await db.execute(delete(SuggestedPrompt).where(SuggestedPrompt.document_id == doc_int))
-    await db.execute(delete(DocAnalysis).where(DocAnalysis.document_id == doc_int))
-    await db.commit()
-    try:
-        from app.utils.chroma_client import chroma
-        chroma.delete_where(str(doc.project_id), {"document_id": doc_int})
-    except Exception:
-        pass
-    doc.status = "uploaded"
-    doc.ingest_step = "uploaded"
-    doc.ingest_percent = 0
-    doc.ingest_message = "Retry queued"
-    doc.error_message = ""
-    db.add(doc)
-    await db.commit()
-    await enqueue_ingest(doc.id)
-    return {"ok": True}
 
 # Vision
 @app.post("/api/vision/ask")
@@ -1508,18 +1679,7 @@ async def login(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
         "role": user.role,
     }
 
-@app.post("/auth/logout")
-async def logout(request: Request):
-    authz = request.headers.get("authorization") or ""
-    parts = authz.split(" ", 1)
-    if len(parts) == 2 and parts[0].lower() == "bearer":
-        token = parts[1].strip()
-        if token and not token.startswith("local-"):
-            try:
-                auth_service.revoke_token(token)
-            except Exception:
-                pass
-    return {"success": True}
+# Note: /auth/logout is defined later with SSE broadcast support (auth_logout_with_broadcast)
 
 @app.get("/users/me")
 async def users_me(user: User = Depends(get_current_user)):
@@ -1640,14 +1800,23 @@ async def get_document_analysis_compat(document_id: str, user: User = Depends(ge
     doc_row = doc_res.scalar_one_or_none()
     if not doc_row:
         raise HTTPException(status_code=404, detail="Document not found")
-    await check_project_access(doc_row.project_id, user, db)
-    await ensure_project_membership(doc_row.project_id, user, db, role_in_project="analyst")
+    await _assert_document_workspace_access(doc_row, user, db)
+    # Resolve project name
+    proj_name = ""
+    if doc_row.project_id:
+        proj_res = await db.execute(select(Project).where(Project.id == doc_row.project_id))
+        proj_row = proj_res.scalar_one_or_none()
+        proj_name = proj_row.name if proj_row else ""
     result = await db.execute(select(DocAnalysis).where(DocAnalysis.document_id == doc_int))
     row = result.scalar_one_or_none()
     if not row:
         status = doc_row.status
         return {
             "id": f"doc_{doc_int}",
+            "project_name": proj_name,
+            "filename": doc_row.filename or "",
+            "document_type": doc_row.doc_type or "",
+            "document_date": doc_row.doc_date or "",
             "executive_summary": "",
             "detailed_summary": [],
             "entities": [],
@@ -1660,6 +1829,10 @@ async def get_document_analysis_compat(document_id: str, user: User = Depends(ge
         }
     return {
         "id": f"doc_{doc_int}",
+        "project_name": proj_name,
+        "filename": doc_row.filename or "",
+        "document_type": doc_row.doc_type or "",
+        "document_date": doc_row.doc_date or "",
         "executive_summary": row.executive_summary or "",
         "detailed_summary": [p for p in (row.detailed_summary or "").split("\n") if p.strip()],
         "entities": (json.loads(row.entities_json) if row.entities_json else []),
@@ -1678,8 +1851,7 @@ async def get_document_prompts_compat(document_id: str, user: User = Depends(get
     doc_row = doc_res.scalar_one_or_none()
     if not doc_row:
         raise HTTPException(status_code=404, detail="Document not found")
-    await check_project_access(doc_row.project_id, user, db)
-    await ensure_project_membership(doc_row.project_id, user, db, role_in_project="analyst")
+    await _assert_document_workspace_access(doc_row, user, db)
     result = await db.execute(select(SuggestedPrompt).where(SuggestedPrompt.document_id == doc_int))
     rows = result.scalars().all()
     prompts = [r.prompt_text for r in rows][:5]
@@ -1711,10 +1883,9 @@ async def api_prompts_suggest(
         dres = await db.execute(select(DbDocument).where(DbDocument.id == doc_int))
         doc = dres.scalar_one_or_none()
         if doc:
+            await _assert_document_workspace_access(doc, user, db)
             resolved_project_id = int(doc.project_id)
             filename = doc.filename or ""
-            await check_project_access(resolved_project_id, user, db)
-            await ensure_project_membership(resolved_project_id, user, db, role_in_project="analyst")
             ares = await db.execute(select(DocAnalysis).where(DocAnalysis.document_id == doc_int))
             analysis = ares.scalar_one_or_none()
             sc = "document"
@@ -2228,5 +2399,412 @@ async def logs_tail(lines: int = 200, user: User = Depends(require_role(["admin"
         data = f.readlines()
     return {"lines": data[-n:]}
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Training Room API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/training/now")
+async def api_training_now(user: User = Depends(require_role(["admin"]))):
+    """Trigger an immediate training job using inbox documents."""
+    from app.training.training_scheduler import scheduler as _sched
+    return await _sched.train_now()
+
+
+@app.post("/api/training/idle")
+async def api_training_idle(user: User = Depends(require_role(["admin"]))):
+    """Trigger training only when sufficient RAM is available."""
+    from app.training.training_scheduler import scheduler as _sched
+    return await _sched.train_idle()
+
+
+@app.post("/api/training/batch")
+async def api_training_batch(
+    payload: dict = Body(None),
+    user: User = Depends(require_role(["admin"])),
+):
+    """
+    Trigger a training job on a specific folder.
+    Body: {"folder": "/absolute/path/to/folder"}  (optional; defaults to inbox)
+    """
+    from app.training.training_scheduler import scheduler as _sched
+    folder = None
+    if payload:
+        folder = (payload.get("folder") or "").strip() or None
+    return await _sched.train_batch(folder=folder)
+
+
+@app.get("/api/training/status")
+async def api_training_status(user: User = Depends(require_role(["admin"]))):
+    """Return current training job state."""
+    from app.training.training_scheduler import scheduler as _sched
+    return _sched.status()
+
+
+@app.get("/api/training/history")
+async def api_training_history(user: User = Depends(require_role(["admin"]))):
+    """Return list of completed LoRA adapters (from model_state/meta.json)."""
+    from app.training.training_scheduler import scheduler as _sched
+    return {"adapters": _sched.history()}
+
+
+@app.post("/api/training/inbox")
+async def api_training_inbox_upload(
+    file: UploadFile = File(...),
+    user: User = Depends(require_role(["admin"])),
+):
+    """Upload a document directly into the training inbox."""
+    from app.training.training_config import get_training_paths, TrainingSettings
+    paths = get_training_paths(settings.base_dir, TrainingSettings())
+    inbox = paths["inbox"]
+    safe_name = Path(file.filename).name
+    dest = inbox / safe_name
+    total = 0
+    with open(dest, "wb") as f:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 64 * 1024 * 1024:
+                f.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="File too large (max 64MB)")
+            f.write(chunk)
+    return {"ok": True, "filename": safe_name, "size_bytes": total, "inbox_path": str(dest)}
+
+
+@app.get("/api/training/inbox")
+async def api_training_inbox_list(user: User = Depends(require_role(["admin"]))):
+    """List files currently in the training inbox."""
+    from app.training.training_config import get_training_paths, TrainingSettings
+    from app.training.data_preparer import SUPPORTED_EXTENSIONS
+    paths = get_training_paths(settings.base_dir, TrainingSettings())
+    inbox = paths["inbox"]
+    files = []
+    for f in sorted(inbox.iterdir()) if inbox.exists() else []:
+        if f.is_file():
+            files.append({
+                "name": f.name,
+                "size_kb": round(f.stat().st_size / 1024, 1),
+                "supported": f.suffix.lower() in SUPPORTED_EXTENSIONS,
+            })
+    return {"inbox": str(inbox), "files": files}
+
+
+@app.post("/api/training/adapters/merge")
+async def api_training_merge_adapters(
+    payload: dict = Body(...),
+    user: User = Depends(require_role(["admin"])),
+):
+    """Merge multiple LoRA adapters into one."""
+    from app.training.training_config import get_training_paths, TrainingSettings
+    from app.training.checkpoint_manager import merge_adapters
+    adapter_ids = payload.get("adapter_ids") or []
+    merged_name = (payload.get("merged_name") or "").strip() or ""
+    if not adapter_ids:
+        raise HTTPException(status_code=400, detail="adapter_ids required")
+    paths = get_training_paths(settings.base_dir, TrainingSettings())
+    result = merge_adapters(paths["model_state"], adapter_ids, merged_name)
+    if result is None:
+        return {"ok": False, "reason": "merge_failed_or_peft_unavailable"}
+    return {"ok": True, "merged": result}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model Router Status API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/router/status")
+async def api_router_status(user: User = Depends(get_current_user)):
+    """Return which intelligence tiers are currently available."""
+    from app.services.model_router import get_router_status
+    return get_router_status()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SSE – Sync Event Stream (cross-platform logout + training events)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_sse_clients: set[asyncio.Queue] = set()
+
+
+async def _sse_broadcast(event_type: str, data: dict) -> None:
+    """Push an event to all connected SSE clients."""
+    payload = json.dumps({"event": event_type, "data": data})
+    dead = set()
+    for q in _sse_clients:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            dead.add(q)
+    _sse_clients.difference_update(dead)
+
+
+async def _sse_generator(queue: asyncio.Queue):
+    """Async generator that yields SSE-formatted events."""
+    try:
+        yield "data: {\"event\": \"connected\"}\n\n"
+        while True:
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=25.0)
+                yield f"data: {payload}\n\n"
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _sse_clients.discard(queue)
+
+
+@app.get("/api/sync/events")
+async def api_sync_events(user: User = Depends(get_current_user)):
+    """
+    Server-Sent Events stream for cross-platform sync.
+    Clients receive events like:
+      {"event": "session.logout", "data": {}}
+      {"event": "training.complete", "data": {"adapter_id": "..."}}
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    _sse_clients.add(queue)
+    return StreamingResponse(
+        _sse_generator(queue),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logout – revoke token + broadcast session.logout to SSE clients
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/auth/logout")
+async def auth_logout_with_broadcast(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Log out the current user: invalidate session token and broadcast logout
+    event to all connected SSE clients (web + mobile) for cross-platform sync.
+    Also cancels any pending ingestion jobs uploaded by this user and resets
+    the model-selection cache.
+    """
+    # Revoke the bearer token from the in-memory session store
+    try:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
+            if token and not token.startswith("local-"):
+                auth_service.revoke_token(token)
+    except Exception:
+        pass
+
+    # Cancel any queued ingestion jobs that belong to this user
+    try:
+        from app.services.ingest_worker import cancel_document_ids
+        from sqlalchemy import select as _select
+        from app.db.models import Document as _Document
+        pending_result = await db.execute(
+            _select(_Document.id).where(
+                _Document.uploaded_by_user_id == user.id,
+                _Document.status.in_(["uploaded", "ingesting"]),
+            )
+        )
+        pending_ids = [row[0] for row in pending_result.all()]
+        if pending_ids:
+            cancel_document_ids(pending_ids)
+    except Exception:
+        pass
+
+    # Reset model-selection cache so next user starts fresh
+    try:
+        from app.services.model_router import force_select
+        force_select(None)
+    except Exception:
+        pass
+
+    # Broadcast to all SSE subscribers (web + mobile)
+    await _sse_broadcast("session.logout", {"user_id": user.id, "ec_number": user.ec_number or ""})
+
+    return {"success": True, "broadcast": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Advanced Training API – Gemini + Transfer Learning
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/training/export-from-projects")
+async def api_training_export_from_projects(
+    payload: dict = Body(...),
+    user: User = Depends(require_role(["admin"])),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Export documents from specified projects as JSONL training data.
+    
+    Body: {
+        "project_ids": [1, 2, 3],
+        "output_dir": "/optional/path" (optional)
+    }
+    
+    Returns: {"ok": True, "batch_file": "/path/to/batch.jsonl", "sample_count": N}
+    """
+    project_ids = payload.get("project_ids") or []
+    output_dir = (payload.get("output_dir") or "").strip() or None
+    
+    if not project_ids:
+        raise HTTPException(status_code=400, detail="project_ids required")
+    
+    try:
+        from app.services.training_export_service import export_documents_for_training
+        
+        batch_file = await export_documents_for_training(
+            project_ids=project_ids,
+            output_dir=output_dir,
+            db=db,
+        )
+        
+        # Count lines in batch file
+        sample_count = 0
+        try:
+            with open(batch_file, "r", encoding="utf-8") as f:
+                sample_count = sum(1 for _ in f)
+        except Exception:
+            pass
+        
+        logger.info(f"Exported {sample_count} training samples from projects {project_ids}")
+        return {
+            "ok": True,
+            "batch_file": batch_file,
+            "sample_count": sample_count,
+        }
+    except Exception as e:
+        logger.exception("Training export failed")
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+@app.post("/api/training/train-all-models")
+async def api_training_train_all_models(
+    payload: dict = Body(...),
+    user: User = Depends(require_role(["admin"])),
+):
+    """
+    Train all configured base models (Llama 3.2, Qwen, etc.) on a JSONL batch.
+    
+    Body: {
+        "batch_file": "/path/to/training_batch.jsonl",
+        "sequential": True (optional, default: True for safety)
+    }
+    
+    Returns: {
+        "status": "training_started",
+        "models": ["llama3.2-3b", "llama3.2-8b", "qwen2.5-7b"],
+        "batch_file": "...",
+        "job_id": "..."  (for tracking progress)
+    }
+    """
+    batch_file = (payload.get("batch_file") or "").strip()
+    sequential = payload.get("sequential", True)
+    
+    if not batch_file:
+        raise HTTPException(status_code=400, detail="batch_file required")
+    
+    batch_path = Path(batch_file)
+    if not batch_path.exists():
+        raise HTTPException(status_code=404, detail=f"Batch file not found: {batch_file}")
+    
+    try:
+        from app.services.multi_model_trainer import MultiModelTrainer
+        from app.training.training_config import default_training_settings
+        
+        # Start training in background
+        async def _background_train():
+            try:
+                trainer = MultiModelTrainer()
+                results = await trainer.train_all_models(
+                    batch_path=batch_path,
+                    sequential=sequential,
+                )
+                logger.info(f"Multi-model training complete: {results}")
+                await _sse_broadcast("training.complete", {
+                    "results": {k: v for k, v in results.items() if isinstance(v, dict)},
+                })
+            except Exception as e:
+                logger.exception("Background training failed")
+                await _sse_broadcast("training.error", {"error": str(e)})
+        
+        # Dispatch background task
+        asyncio.create_task(_background_train())
+        
+        return {
+            "status": "training_started",
+            "models": default_training_settings.base_models,
+            "batch_file": batch_file,
+            "sequential": sequential,
+        }
+    except Exception as e:
+        logger.exception("Failed to start multi-model training")
+        raise HTTPException(status_code=500, detail=f"Training start failed: {str(e)}")
+
+
+@app.post("/api/training/train-from-projects")
+async def api_training_train_from_projects(
+    payload: dict = Body(...),
+    user: User = Depends(require_role(["admin"])),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Convenience endpoint: Export documents from projects AND train all models.
+    
+    This is the main workflow:
+    1. Export documents from specified projects
+    2. Train Llama 3.2 (3B + 8B) and Qwen models on the exported data
+    3. Adapters are saved for runtime use
+    
+    Body: {
+        "project_ids": [1, 2, 3],
+        "sequential": True (optional)
+    }
+    
+    Returns: {
+        "status": "complete" | "error",
+        "batch_file": "...",
+        "results": {
+            "meta-llama/Llama-3.2-3B-Instruct": {"ok": True, ...},
+            "Qwen/Qwen2.5-7B-Instruct": {"ok": False, "error": "..."},
+        }
+    }
+    """
+    project_ids = payload.get("project_ids") or []
+    sequential = payload.get("sequential", True)
+    
+    if not project_ids:
+        raise HTTPException(status_code=400, detail="project_ids required")
+    
+    try:
+        from app.services.multi_model_trainer import train_models_from_project
+        
+        # Run export + training
+        result = await train_models_from_project(
+            project_ids=project_ids,
+            db=db,
+        )
+        
+        # Broadcast success to SSE subscribers
+        await _sse_broadcast("training.complete", result)
+        
+        logger.info(f"Project-based training complete for projects {project_ids}")
+        return result
+    
+    except Exception as e:
+        logger.exception("Project-based training failed")
+        raise HTTPException(status_code=500, detail=f"Training failed: {str(e)}")
+
+
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host=settings.bind_host, port=settings.port, reload=True)
+

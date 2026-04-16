@@ -10,6 +10,7 @@ import {
   getDocumentPrompts,
   suggestPrompts,
   chatWithDocument,
+  chatGlobally,
   getSummaryHistory,
   uploadDocument,
   getProjects,
@@ -33,12 +34,25 @@ import {
 import { colors } from "../theme/colors"
 
 interface DocumentViewPageProps {
-  documentId: string
+  documentId: string | null
   isAuthenticated: boolean
   authEpoch: number
 }
 
-type UIChatMessage = Omit<ChatMessage, "id"> & { id: string | number }
+type UIMessageStatus = "idle" | "sending" | "waiting" | "success" | "error"
+type UIChatMessage = Omit<ChatMessage, "id"> & {
+  id: string | number
+  uiStatus?: UIMessageStatus
+  retryText?: string
+}
+
+const GLOBAL_CHAT_SESSION_KEY = "docintel_chat_session_global"
+const GLOBAL_SUGGESTED_PROMPTS = [
+  "What are the main ZETDC governance, compliance, and operational priorities I should know?",
+  "Summarize what internal knowledge says about this topic and note any conflicting guidance.",
+  "Search the web if needed and give me the latest external guidance in plain language.",
+  "Use transferred learning and organizational context to suggest the best next steps.",
+]
 
 function renderRichContent(apiBaseUrl: string, content: string) {
   const text = String(content || "")
@@ -125,6 +139,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const [prompts, setPrompts] = useState<string[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [chatMessages, setChatMessages] = useState<UIChatMessage[]>([])
+  const chatScrollRef = useRef<HTMLDivElement>(null)
   const [summaryHistory, setSummaryHistory] = useState<SummaryHistoryEntry[]>([])
   const [question, setQuestion] = useState("")
   const [loadingAnalysis, setLoadingAnalysis] = useState(false)
@@ -192,20 +207,36 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const [isMobile, setIsMobile] = useState(
     typeof window !== "undefined" ? window.innerWidth <= 768 : false,
   )
+  const sessionStorageKey = activeDocumentId
+    ? `docintel_chat_session_${activeDocumentId}`
+    : GLOBAL_CHAT_SESSION_KEY
+  const effectiveSearchScope: "project" | "all" = activeDocumentId ? searchScope : "all"
 
   useEffect(() => {
     setActiveDocumentId(documentId)
+    if (!documentId) {
+      setAnalysis(null)
+      setPrompts(GLOBAL_SUGGESTED_PROMPTS)
+      setSessionId(null)
+      setChatMessages([])
+      setSummaryHistory([])
+      setQuestion("")
+      setChatInfo(null)
+      setIngestStatus(null)
+      setError(null)
+      setLoadingAnalysis(false)
+      setLoadingChat(false)
+    }
   }, [documentId])
 
   useEffect(() => {
-    if (!activeDocumentId) return
-    const key = `docintel_chat_session_${activeDocumentId}`
+    const key = sessionStorageKey
     const stored =
       typeof window !== "undefined" ? window.localStorage.getItem(key) : null
     setSessionId(stored)
     setChatMessages([])
     setChatInfo(null)
-  }, [activeDocumentId])
+  }, [sessionStorageKey])
 
   const openHistory = async () => {
     try {
@@ -226,8 +257,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     setHistoryQuery("")
     setSessionId(sid)
     try {
-      const key = `docintel_chat_session_${activeDocumentId}`
-      window.localStorage.setItem(key, sid)
+      window.localStorage.setItem(sessionStorageKey, sid)
     } catch {
     }
     try {
@@ -426,18 +456,17 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
 
   useEffect(() => {
     const loadChat = async () => {
-      if (!activeDocumentId) return
       if (!isAuthenticated) return
       try {
         setChatInfo(null)
         let sid = sessionId
-        const storageKey = `docintel_chat_session_${activeDocumentId}`
         if (!sid) {
-          const created = await createChatSession(activeDocumentId)
+          if (!activeDocumentId) return
+          const created = await createChatSession(activeDocumentId, "document")
           sid = created.session_id
           setSessionId(sid)
           if (typeof window !== "undefined") {
-            window.localStorage.setItem(storageKey, sid)
+            window.localStorage.setItem(sessionStorageKey, sid)
           }
         }
         const history = await getChatMessages(sid, 100)
@@ -447,7 +476,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       }
     }
     loadChat()
-  }, [activeDocumentId, sessionId, isAuthenticated, authEpoch])
+  }, [activeDocumentId, sessionId, isAuthenticated, authEpoch, sessionStorageKey])
 
   useEffect(() => {
     const onRestored = async () => {
@@ -469,13 +498,29 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       }
     }
     window.addEventListener("docintel_auth_restored", onRestored as any)
-    return () => window.removeEventListener("docintel_auth_restored", onRestored as any)
-  }, [sessionId, activeDocumentId])
+
+    const onLogout = () => {
+      setChatMessages([])
+      setSessionId(null)
+      setAnalysis(null)
+      setSummaryHistory([])
+      setPrompts([])
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(sessionStorageKey)
+      }
+    }
+    window.addEventListener("docintel_logout", onLogout as any)
+
+    return () => {
+      window.removeEventListener("docintel_auth_restored", onRestored as any)
+      window.removeEventListener("docintel_logout", onLogout as any)
+    }
+  }, [sessionId, activeDocumentId, sessionStorageKey])
 
   useEffect(() => {
     const load = async () => {
       try {
-        if (!isAuthenticated) return
+        if (!isAuthenticated || !activeDocumentId) return
         setLoadingAnalysis(true)
         setError(null)
         const [analysisRes, promptsRes, summaryRes] = await Promise.all([
@@ -484,7 +529,14 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           getSummaryHistory(),
         ])
         setAnalysis(analysisRes)
-        setPrompts((promptsRes as any).prompts || [])
+        const rawPrompts: string[] = (promptsRes as any).prompts || []
+        setPrompts(rawPrompts.length > 0 ? rawPrompts : [
+          "Summarize this document in 10 sentences or less.",
+          "List the key topics and entities mentioned in this document.",
+          "List all action items and decisions mentioned in this document.",
+          "Generate a process flow diagram (Mermaid) based on this document.",
+          "What are the key requirements, deadlines, and responsibilities mentioned?",
+        ])
         setSummaryHistory(summaryRes.history)
         if (analysisRes.status !== "READY") {
           try {
@@ -547,7 +599,14 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       ])
       if (cancelled) return
       setAnalysis(analysisRes)
-      setPrompts((promptsRes as any).prompts || [])
+      const refreshedPrompts: string[] = (promptsRes as any).prompts || []
+      setPrompts(refreshedPrompts.length > 0 ? refreshedPrompts : [
+        "Summarize this document in 10 sentences or less.",
+        "List the key topics and entities mentioned in this document.",
+        "List all action items and decisions mentioned in this document.",
+        "Generate a process flow diagram (Mermaid) based on this document.",
+        "What are the key requirements, deadlines, and responsibilities mentioned?",
+      ])
       setIngestStatus(null)
     }
 
@@ -569,6 +628,12 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             stopAll()
           } else if (s.status === "failed") {
             setError(s.error_message || "Ingestion failed")
+            setChatMessages([])
+            setSessionId(null)
+            setLoadingChat(false)
+            if (typeof window !== "undefined") {
+              window.localStorage.removeItem(`docintel_chat_session_${activeDocumentId}`)
+            }
             stopAll()
           } else if (s.status === "uploaded" && s.ingestion_started === false) {
             setChatInfo("Ingestion has not started yet. You can retry ingestion.")
@@ -596,6 +661,12 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             stopAll()
           } else if (s.status === "failed") {
             setError(s.error_message || "Ingestion failed")
+            setChatMessages([])
+            setSessionId(null)
+            setLoadingChat(false)
+            if (typeof window !== "undefined") {
+              window.localStorage.removeItem(`docintel_chat_session_${activeDocumentId}`)
+            }
             stopAll()
           }
         } catch {
@@ -614,6 +685,37 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       stopAll()
     }
   }, [activeDocumentId, analysis?.status, apiBaseUrl, pollIngestMs, isAuthenticated, authEpoch])
+
+  // Inject CSS animation for typing indicator once
+  useEffect(() => {
+    const id = "doctel-chat-animations"
+    if (!document.getElementById(id)) {
+      const style = document.createElement("style")
+      style.id = id
+      style.textContent = [
+        "@keyframes thinking-dot-bounce {",
+        "  0%, 80%, 100% { transform: scale(0.3); opacity: 0.4; }",
+        "  40% { transform: scale(1); opacity: 1; }",
+        "}",
+        ".chat-thinking-dot {",
+        "  display: inline-block; width: 8px; height: 8px; border-radius: 50%;",
+        "  background-color: #94a3b8; margin: 0 3px;",
+        "  animation: thinking-dot-bounce 1.4s infinite ease-in-out both;",
+        "}",
+        ".chat-thinking-dot:nth-child(1) { animation-delay: 0s; }",
+        ".chat-thinking-dot:nth-child(2) { animation-delay: 0.2s; }",
+        ".chat-thinking-dot:nth-child(3) { animation-delay: 0.4s; }",
+      ].join("\n")
+      document.head.appendChild(style)
+    }
+    return () => { document.getElementById(id)?.remove() }
+  }, [])
+
+  // Auto-scroll chat to bottom on new messages
+  useEffect(() => {
+    if (!chatScrollRef.current) return
+    chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight
+  }, [chatMessages])
 
   const handleRetry = async () => {
     if (!activeDocumentId) return
@@ -642,8 +744,11 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     loadProjects()
   }, [isMetadataOpen])
 
+  const GEMINI_MODEL_ID = "gemini-api"
+
   const modelLabel = (m: string) => {
     const key = (m || "").toLowerCase()
+    if (key === GEMINI_MODEL_ID) return "Gemini 2.5 Flash (API)"
     if (key === "llama3.2:8b-instruct") return "Llama 3.2 — 8B Instruct"
     if (key === "llama3.2:3b-instruct") return "Llama 3.2 — 3B Instruct"
     if (key === "qwen3.5:9b") return "Qwen 3.5 — 9B"
@@ -773,86 +878,170 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     return () => window.clearInterval(interval)
   }, [pullStates, pullModel, isPullOpen, pollPullMs, isAuthenticated, authEpoch])
 
+  // True whenever we are waiting for the backend (blocks new submissions & form controls)
+  const isWaiting = loadingChat || chatMessages.some((m) => m.uiStatus === "waiting")
+
   const handleAsk = async (q: string) => {
     const text = q.trim()
-    if (!text) return
-    if (loadingChat) {
-      setChatInfo("Your previous question is still being answered…")
-      return
-    }
-    if (!isAuthenticated) {
-      setChatInfo("Session expired. Please sign in again. Your draft question is preserved.")
-      return
-    }
-    try {
-      setLoadingChat(true)
-      setError(null)
-      setChatInfo(null)
+    if (!text || isWaiting || !isAuthenticated) return
 
+    const ts = Date.now()
+    const userMsgId = `user_opt_${ts}`
+    const thinkingId = `thinking_${ts}`
+
+    // ── Optimistic update: show user bubble + typing indicator immediately ──
+    setQuestion("")
+    setError(null)
+    setChatInfo(null)
+    setLoadingChat(true)
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: userMsgId,
+        role: "user" as const,
+        content: text,
+        status: "pending" as const,
+        uiStatus: "sending" as UIMessageStatus,
+        citations: [],
+        created_at: "",
+      },
+      {
+        id: thinkingId,
+        role: "assistant" as const,
+        content: "",
+        status: "pending" as const,
+        uiStatus: "waiting" as UIMessageStatus,
+        citations: [],
+        created_at: "",
+      },
+    ])
+
+    const replaceWithError = (errMsg: string) => {
+      setChatMessages((prev) => [
+        ...prev
+          .filter((m) => m.id !== thinkingId)
+          .map((m) =>
+            m.id === userMsgId
+              ? ({ ...m, uiStatus: "error" as UIMessageStatus } as UIChatMessage)
+              : m,
+          ),
+        {
+          id: `err_${ts}`,
+          role: "system" as const,
+          content: `❌ ${errMsg}`,
+          status: "failed" as const,
+          uiStatus: "error" as UIMessageStatus,
+          citations: [],
+          created_at: "",
+          retryText: text,
+        },
+      ])
+    }
+
+    try {
       let sid = sessionId
-      const storageKey = `docintel_chat_session_${activeDocumentId}`
       if (!sid) {
-        const created = await createChatSession(activeDocumentId)
+        const created = activeDocumentId
+          ? await createChatSession(activeDocumentId, "document")
+          : await createChatSession(null, "global")
         sid = created.session_id
         setSessionId(sid)
         if (typeof window !== "undefined") {
-          window.localStorage.setItem(storageKey, sid)
+          window.localStorage.setItem(sessionStorageKey, sid)
         }
       }
 
-      const res = await chatWithDocument(activeDocumentId, {
+      const askPayload = {
         question: text,
         session_id: sid,
         model: selectedModel,
-        scope: searchScope,
-      })
+        scope: effectiveSearchScope,
+      }
+      const res = activeDocumentId
+        ? await chatWithDocument(activeDocumentId, askPayload)
+        : await chatGlobally(askPayload)
 
       if ("status" in res && (res.status === "queued" || res.status === "pending_analysis")) {
-        if (clearOnSend) setQuestion("")
-        const history = await getChatMessages(sid!, 100)
-        setChatMessages(history.messages)
-
-        window.setTimeout(async () => {
+        // Thinking indicator stays visible — polling removes it on resolve
+        let attempts = 0
+        const checkStatus = async () => {
           try {
+            if (!activeDocumentId) {
+              replaceWithError("Global chat could not complete. Try asking again.")
+              setLoadingChat(false)
+              return
+            }
             const status = await getIngestStatus(activeDocumentId)
-            if (status.status === "completed") {
+            if (status.status === "completed" || status.analysis_ready || status.ingestion_completed) {
               const answer = await chatWithDocument(activeDocumentId, {
                 question: text,
                 session_id: sid!,
-                pending_message_id: res.pending_message_id,
+                pending_message_id: (res as any).pending_message_id,
                 model: selectedModel,
-                scope: searchScope,
+                scope: effectiveSearchScope,
               } as any)
               if (!("status" in answer)) {
-                const history = await getChatMessages(sid!, 100)
-                setChatMessages(history.messages)
+                const historyFull = await getChatMessages(sid!, 100)
+                setChatMessages(historyFull.messages)
+              }
+              setLoadingChat(false)
+            } else if (status.status === "failed") {
+              replaceWithError("Ingestion failed. The document could not be processed.")
+              setSessionId(null)
+              if (typeof window !== "undefined") {
+                window.localStorage.removeItem(sessionStorageKey)
+              }
+              setLoadingChat(false)
+            } else {
+              if (attempts < 60) {
+                attempts++
+                window.setTimeout(checkStatus, 2000)
+              } else {
+                replaceWithError("Ingestion timed out. Try re-sending the question.")
+                setLoadingChat(false)
               }
             }
-          } catch (e: any) {
-            setChatInfo(e.message ?? "Retry failed")
+          } catch (pollErr: any) {
+            replaceWithError(pollErr?.message ?? "Failed while waiting for document analysis.")
+            setLoadingChat(false)
           }
-        }, res.retry_after_ms ?? 4000)
-
+        }
+        window.setTimeout(checkStatus, (res as any).retry_after_ms ?? 2000)
+        // finally runs here (sets loadingChat=false) but isWaiting stays true
+        // while the thinking bubble is present, blocking new submissions
         return
       }
 
-      if (clearOnSend) setQuestion("")
+      // Success: replace optimistic messages with real history from backend
       const history = await getChatMessages(sid, 100)
       setChatMessages(history.messages)
     } catch (e: any) {
-      const msg = e?.message ?? "Failed to get answer"
-      setQuestion(text)
-      const status = e instanceof ApiError ? e.status : null
+      const errStatus = e instanceof ApiError ? e.status : null
       const errCode = e instanceof ApiError ? e.data?.error : null
-      if (status === 401 || errCode === "token_expired") {
+      if (errStatus === 401 || errCode === "token_expired") {
         pendingAskRef.current = { documentId: activeDocumentId, text }
-        setChatInfo("Session expired. Please sign in again. Your draft question is preserved.")
+        setChatMessages((prev) => prev.filter((m) => m.id !== thinkingId))
+        setChatInfo("Session expired. Please sign in again. Your message is saved.")
       } else {
-        setError(msg)
+        replaceWithError(e?.message ?? "Failed to get a response. Try again.")
       }
     } finally {
       setLoadingChat(false)
     }
+  }
+
+  const handleRetryMessage = (retryText: string, errMsgId: string | number) => {
+    setChatMessages((prev) => {
+      const errIdx = prev.findIndex((m) => m.id === errMsgId)
+      if (errIdx < 0) return prev
+      return prev.filter((m, i) => {
+        if (m.id === errMsgId) return false
+        // Also remove the failed user bubble right before the error
+        if (i === errIdx - 1 && m.uiStatus === "error" && m.role === "user") return false
+        return true
+      })
+    })
+    void handleAsk(retryText)
   }
 
   const handleViewOriginal = async () => {
@@ -941,14 +1130,81 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           Analysis Dashboard
         </div>
         <div style={{ fontSize: 12, color: colors.textMuted }}>
-          {activeDocumentId}
+            {activeDocumentId || "No document selected"}
         </div>
       </div>
+
+        {!activeDocumentId && (
+          <div style={cardStyle}>
+            <div style={cardHeaderStyle}>
+              <span>Get Started</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <p style={{ ...bodyTextStyle, margin: 0 }}>
+                No document is selected for this account yet. Open one of your documents from My Work or upload a new document with the + button in the chat bar.
+              </p>
+              <div style={{ fontSize: 13, color: colors.textMuted }}>
+                Your workspace is user-specific, so documents uploaded by other users will not appear here.
+              </div>
+            </div>
+          </div>
+        )}
+
+      {/* Document Info card — always visible as soon as analysis is loaded */}
+      {analysis && (
+        <div style={cardStyle}>
+          <div style={cardHeaderStyle}>
+            <span>Document Info</span>
+            {analysis.status === "READY" && (
+              <span style={{ ...pillStyle, backgroundColor: "#16A34A" }}>Ready</span>
+            )}
+            {analysis.status !== "READY" && (
+              <span style={{ ...pillStyle, backgroundColor: colors.primary }}>{analysis.status}</span>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {analysis.project_name && (
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ ...sectionLabelStyle, minWidth: 90 }}>Project</span>
+                <span style={{ fontSize: 14, fontWeight: 600, color: colors.textPrimary }}>
+                  {analysis.project_name}
+                </span>
+              </div>
+            )}
+            {analysis.filename && (
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ ...sectionLabelStyle, minWidth: 90 }}>File</span>
+                <span style={{ fontSize: 13, color: colors.textPrimary, wordBreak: "break-all" }}>
+                  {analysis.filename}
+                </span>
+              </div>
+            )}
+            {analysis.document_type && (
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ ...sectionLabelStyle, minWidth: 90 }}>Type</span>
+                <span style={{ fontSize: 13, color: colors.textPrimary }}>{analysis.document_type}</span>
+              </div>
+            )}
+            {analysis.document_date && (
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ ...sectionLabelStyle, minWidth: 90 }}>Date</span>
+                <span style={{ fontSize: 13, color: colors.textPrimary }}>{analysis.document_date}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {loadingAnalysis && (
         <div style={{ color: colors.textMuted }}>Loading analysis…</div>
       )}
       {error && (
-        <div style={{ color: colors.danger, fontSize: 14 }}>{error}</div>
+        <div style={{ color: colors.danger, fontSize: 13, padding: "8px 12px", borderRadius: 8, backgroundColor: "#FFF0F0", border: "1px solid #FECACA" }}>
+          {/* Show a friendly message instead of raw JSON from exceptions */}
+          {error.startsWith("{") || error.includes("Server error")
+            ? "Analysis could not complete — the AI model returned an error. The document was still ingested and you can use the chat. Retry ingestion to attempt AI analysis again."
+            : error}
+        </div>
       )}
       {analysis && analysis.status !== "READY" && (
         <div style={cardStyle}>
@@ -977,7 +1233,9 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           </div>
           {ingestStatus?.error_message && (
             <div style={{ marginTop: 10, color: colors.danger, fontSize: 13 }}>
-              {ingestStatus.error_message}
+              {ingestStatus.error_message.startsWith("{") || ingestStatus.error_message.includes("Server error")
+                ? "AI model returned an error during analysis. Click Retry Ingestion to try again."
+                : ingestStatus.error_message}
             </div>
           )}
           {ingestStatus?.status === "failed" && (
@@ -1240,10 +1498,12 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             </div>
           </div>
           <p style={{ ...bodyTextStyle, marginBottom: 12 }}>
-            Click a prompt or ask a question about this document. Answers are grounded in this document only.
+            {activeDocumentId
+              ? "Click a prompt or ask a question about this document. Answers are grounded in this document only."
+              : "Ask general questions here. The assistant can use shared organizational knowledge, transferred learning, and web search fallback when needed."}
           </p>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {prompts.map((p) => (
+            {(prompts.length > 0 ? prompts : GLOBAL_SUGGESTED_PROMPTS).map((p) => (
               <button
                 key={p}
                 type="button"
@@ -1269,33 +1529,43 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           <span>Chat History</span>
         </div>
         <div
-        style={{
+          ref={chatScrollRef}
+          style={{
             flex: 1,
             overflowY: isMobile ? "visible" : "auto",
             display: "flex",
             flexDirection: "column",
             gap: 12,
+            scrollBehavior: "smooth",
           }}
         >
           {chatMessages.length === 0 && (
             <div style={{ color: colors.textMuted, fontSize: 13 }}>
-              No messages yet. Ask a question to start the chat.
+              {activeDocumentId
+                ? "No messages yet. Ask a question to start the chat."
+                : "No document selected yet. Ask a general question, or open one of your documents for document-grounded chat."}
             </div>
           )}
           {chatMessages.map((m) => {
             const isUser = m.role === "user"
             const isSystem = m.role === "system"
+            const isError = m.uiStatus === "error"
             const align = isSystem ? "center" : isUser ? "flex-end" : "flex-start"
             const maxWidth = isSystem ? "100%" : "80%"
-            const bg = isSystem
-              ? "rgba(148,163,184,0.14)"
-              : isUser
-                ? "linear-gradient(135deg, rgba(37,99,235,1), rgba(56,189,248,1))"
-                : "#FFFFFF"
+            const bg = isError && isSystem
+              ? "rgba(254,226,226,0.85)"
+              : isSystem
+                ? "rgba(148,163,184,0.14)"
+                : isError && isUser
+                  ? "linear-gradient(135deg, rgba(107,114,128,1), rgba(156,163,175,1))"
+                  : isUser
+                    ? "linear-gradient(135deg, rgba(37,99,235,1), rgba(56,189,248,1))"
+                    : "#FFFFFF"
             const color = isSystem ? colors.textPrimary : isUser ? "#FFFFFF" : colors.textPrimary
-            const border =
-              isSystem ? `1px solid rgba(148,163,184,0.25)` : isUser ? "none" : `1px solid ${colors.border}`
-            const opacity = m.status === "pending" ? 0.75 : 1
+            const border = isError && isSystem
+              ? "1px solid rgba(239,68,68,0.35)"
+              : isSystem ? `1px solid rgba(148,163,184,0.25)` : isUser ? "none" : `1px solid ${colors.border}`
+            const opacity = m.uiStatus === "waiting" ? 1 : m.status === "pending" ? 0.85 : 1
             return (
               <div key={String(m.id)} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <div
@@ -1312,11 +1582,39 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     boxShadow: isSystem ? "none" : "0 8px 24px rgba(15,23,42,0.10)",
                   }}
                 >
-                  {renderRichContent(apiBaseUrl, m.content)}
-                  {m.status === "pending" && (
-                    <div style={{ marginTop: 6, fontSize: 11, opacity: 0.85 }}>
-                      Sending…
+                  {m.uiStatus === "waiting" ? (
+                    <div style={{ padding: "4px 2px", display: "flex", alignItems: "center" }}>
+                      <span className="chat-thinking-dot" />
+                      <span className="chat-thinking-dot" />
+                      <span className="chat-thinking-dot" />
                     </div>
+                  ) : (
+                    renderRichContent(apiBaseUrl, m.content)
+                  )}
+                  {m.uiStatus === "sending" && (
+                    <div style={{ marginTop: 4, fontSize: 11, opacity: 0.7 }}>Sending…</div>
+                  )}
+                  {m.uiStatus === "error" && isUser && (
+                    <div style={{ marginTop: 4, fontSize: 11, color: "rgba(255,200,200,0.9)" }}>⚠ Not sent</div>
+                  )}
+                  {m.retryText && (
+                    <button
+                      type="button"
+                      onClick={() => handleRetryMessage(m.retryText!, m.id)}
+                      style={{
+                        marginTop: 8,
+                        display: "block",
+                        fontSize: 12,
+                        padding: "4px 12px",
+                        borderRadius: 999,
+                        border: "1px solid rgba(239,68,68,0.5)",
+                        backgroundColor: "transparent",
+                        color: "#dc2626",
+                        cursor: "pointer",
+                      }}
+                    >
+                      ↩ Retry
+                    </button>
                   )}
                 </div>
                 {m.created_at && (
@@ -1413,8 +1711,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             type="text"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder="Ask a question about this document…"
-            disabled={loadingChat || !isAuthenticated}
+            placeholder={activeDocumentId ? "Ask a question about this document…" : "Ask anything about the organization, prior learning, or the web…"}
+            disabled={isWaiting || !isAuthenticated}
             style={{
               flex: 1,
               minWidth: 0,
@@ -1431,7 +1729,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             <button
               type="button"
               onClick={() => setIsScopeMenuOpen((v) => !v)}
-              disabled={loadingChat}
+              disabled={isWaiting}
               title="Search scope"
               style={{
                 height: 38,
@@ -1448,7 +1746,13 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 gap: 8,
               }}
             >
-              <span>{searchScope === "all" ? "Scope: All projects" : "Scope: This project"}</span>
+              <span>
+                {!activeDocumentId
+                  ? "Scope: Org knowledge"
+                  : effectiveSearchScope === "all"
+                    ? "Scope: All projects"
+                    : "Scope: This project"}
+              </span>
               <span style={{ opacity: 0.8 }}>▾</span>
             </button>
             {isScopeMenuOpen && (
@@ -1475,14 +1779,16 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     setSearchScope("project")
                     setIsScopeMenuOpen(false)
                   }}
+                  disabled={!activeDocumentId}
                   style={{
                     width: "100%",
                     textAlign: "left",
                     padding: "10px 10px",
                     borderRadius: 10,
                     border: `1px solid ${colors.border}`,
-                    backgroundColor: searchScope === "project" ? "#E7F0FF" : "#FFFFFF",
-                    cursor: "pointer",
+                    backgroundColor: effectiveSearchScope === "project" ? "#E7F0FF" : "#FFFFFF",
+                    cursor: !activeDocumentId ? "default" : "pointer",
+                    opacity: !activeDocumentId ? 0.55 : 1,
                     fontSize: 13,
                   }}
                 >
@@ -1500,12 +1806,12 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     padding: "10px 10px",
                     borderRadius: 10,
                     border: `1px solid ${colors.border}`,
-                    backgroundColor: searchScope === "all" ? "#E7F0FF" : "#FFFFFF",
+                    backgroundColor: effectiveSearchScope === "all" ? "#E7F0FF" : "#FFFFFF",
                     cursor: "pointer",
                     fontSize: 13,
                   }}
                 >
-                  All projects
+                  {activeDocumentId ? "All projects" : "Organization knowledge + web"}
                 </button>
               </div>
             )}
@@ -1517,7 +1823,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 if (!isHistoryOpen) openHistory()
                 else setIsHistoryOpen(false)
               }}
-              disabled={loadingChat || !isAuthenticated}
+              disabled={isWaiting || !isAuthenticated}
               title="Past conversations"
               style={{
                 height: 38,
@@ -1527,8 +1833,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 color: "#FFFFFF",
                 fontSize: 12,
                 padding: "0 12px",
-                cursor: loadingChat || !isAuthenticated ? "default" : "pointer",
-                opacity: loadingChat || !isAuthenticated ? 0.7 : 1,
+                cursor: isWaiting || !isAuthenticated ? "default" : "pointer",
+                opacity: isWaiting || !isAuthenticated ? 0.7 : 1,
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 8,
@@ -1626,7 +1932,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             <button
               type="button"
               onClick={() => setIsModelMenuOpen((v) => !v)}
-              disabled={loadingChat || (modelsOffline && installedModels.length === 0)}
+              disabled={isWaiting || (modelsOffline && installedModels.length === 0)}
               title="Select model"
               style={{
                 height: 38,
@@ -1636,8 +1942,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 color: "#FFFFFF",
                 fontSize: 12,
                 padding: "0 12px",
-                cursor: loadingChat ? "default" : "pointer",
-                opacity: loadingChat ? 0.7 : 1,
+                cursor: isWaiting ? "default" : "pointer",
+                opacity: isWaiting ? 0.7 : 1,
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 8,
@@ -1680,28 +1986,34 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     Offline (installed models only)
                   </div>
                 )}
-                {(modelsOffline ? installedModels : availableModels).map((m) => {
+                {(modelsOffline
+                  ? [...installedModels, ...(installedModels.includes(GEMINI_MODEL_ID) ? [] : availableModels.filter(a => a === GEMINI_MODEL_ID))]
+                  : availableModels
+                ).map((m) => {
+                  const isGemini = m === GEMINI_MODEL_ID
                   const installed = installedModels.includes(m)
                   const ps = pullStates[m]
                   const isPulling =
                     ps && ps.state && !["success", "failed", "idle"].includes(String(ps.state)) && !installed
                   const percent = isPulling ? Number(ps.percent || 0) : 0
                   const badge =
-                    installed
-                      ? "Installed"
-                      : ps && ps.state === "pending"
-                        ? "Pending…"
-                        : ps && ps.state === "verifying"
-                          ? "Verifying…"
-                          : isPulling
-                            ? `Downloading… ${percent}%`
-                            : "Pull"
+                    isGemini
+                      ? "API"
+                      : installed
+                        ? "Installed"
+                        : ps && ps.state === "pending"
+                          ? "Pending…"
+                          : ps && ps.state === "verifying"
+                            ? "Verifying…"
+                            : isPulling
+                              ? `Downloading… ${percent}%`
+                              : "Pull"
                   return (
                     <button
                       key={m}
                       type="button"
                       onClick={() => {
-                        if (!installed) {
+                        if (!isGemini && !installed) {
                           openPullModal(m)
                           return
                         }
@@ -1729,9 +2041,9 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                           fontSize: 11,
                           padding: "2px 8px",
                           borderRadius: 999,
-                          border: `1px solid ${installed ? colors.primary : colors.border}`,
-                          backgroundColor: installed ? "#E7F0FF" : "#F4F6F8",
-                          color: installed ? colors.primaryDark : colors.textMuted,
+                          border: `1px solid ${isGemini ? "#1a73e8" : installed ? colors.primary : colors.border}`,
+                          backgroundColor: isGemini ? "#e8f0fe" : installed ? "#E7F0FF" : "#F4F6F8",
+                          color: isGemini ? "#1a73e8" : installed ? colors.primaryDark : colors.textMuted,
                         }}
                       >
                         {badge}
@@ -1744,7 +2056,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           </div>
           <button
             type="submit"
-            disabled={loadingChat || !isAuthenticated}
+            disabled={isWaiting || !isAuthenticated}
             style={{
               width: 38,
               height: 38,
@@ -1753,11 +2065,11 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               backgroundColor: "#2A2A2A",
               color: "#FFFFFF",
               fontSize: 16,
-              cursor: loadingChat || !isAuthenticated ? "default" : "pointer",
-              opacity: loadingChat || !isAuthenticated ? 0.7 : 1,
+              cursor: isWaiting || !isAuthenticated ? "default" : "pointer",
+              opacity: isWaiting || !isAuthenticated ? 0.7 : 1,
             }}
           >
-            {loadingChat ? "…" : "➤"}
+            {isWaiting ? "…" : "➤"}
           </button>
         </form>
         {isPullOpen && (

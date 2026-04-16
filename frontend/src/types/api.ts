@@ -14,6 +14,10 @@ export interface DocumentCreateResponse {
 
 export interface DocumentAnalysisResponse {
   id: string
+  project_name?: string
+  filename?: string
+  document_type?: string
+  document_date?: string
   executive_summary: string
   detailed_summary: string[]
   entities: string[]

@@ -1,17 +1,19 @@
-import React, { useEffect, useState } from "react"
+import React, { useCallback, useEffect, useState } from "react"
 import { AppShell } from "./components/layout/AppShell"
 import { IntroOverlay } from "./components/IntroOverlay"
 import { DocumentViewPage } from "./pages/DocumentViewPage"
 import { MyWorkPage } from "./pages/MyWorkPage"
 import { AdminSettingsPage } from "./pages/AdminSettingsPage"
+import { TrainingRoomPage } from "./pages/TrainingRoomPage"
 import { useEcNumber } from "./hooks/useEcNumber"
+import { useSyncEvents } from "./hooks/useSyncEvents"
 import { colors } from "./theme/colors"
 import { login, setAuthToken, requestEmailOtp, verifyEmailOtp, logout, clearAuthToken, getMe, getUiSettings } from "./api/client"
 import zetdcLogo from "./assets/zetdc-logo.png"
 
 export const App: React.FC = () => {
-  const [documentId, setDocumentId] = useState("doc_1")
-  const [page, setPage] = useState<"copilot" | "mywork" | "admin">("copilot")
+  const [documentId, setDocumentId] = useState<string | null>(null)
+  const [page, setPage] = useState<"copilot" | "mywork" | "admin" | "training">("copilot")
   const { ecNumber, setEcNumber } = useEcNumber()
   const [inputValue, setInputValue] = useState(ecNumber)
   const [password, setPassword] = useState("")
@@ -63,6 +65,8 @@ export const App: React.FC = () => {
       setAuthEpoch((v) => v + 1)
       setHasToken(false)
       setUserRole("")
+      setDocumentId(null)
+      setPage("copilot")
     }
     window.addEventListener("docintel_logout", onLogout as any)
     return () => window.removeEventListener("docintel_logout", onLogout as any)
@@ -97,7 +101,7 @@ export const App: React.FC = () => {
     loadUi()
   }, [hasToken, authEpoch])
 
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     try {
       await logout()
     } catch {
@@ -105,6 +109,7 @@ export const App: React.FC = () => {
       clearAuthToken()
       setEcNumber("")
       setInputValue("")
+      setDocumentId(null)
       setPassword("")
       setEmail("")
       setEmailCode("")
@@ -114,8 +119,36 @@ export const App: React.FC = () => {
       setDisplayName("")
       setAuthEpoch((v) => v + 1)
       window.dispatchEvent(new CustomEvent("docintel_logout"))
+      // Cross-tab sync via BroadcastChannel
+      try {
+        const bc = new BroadcastChannel("doctel_sync")
+        bc.postMessage({ event: "session.logout" })
+        bc.close()
+      } catch {
+        // BroadcastChannel not supported – ignore
+      }
     }
-  }
+  }, [setEcNumber])
+
+  // Cross-tab logout listener (BroadcastChannel – same browser, multiple tabs)
+  useEffect(() => {
+    let bc: BroadcastChannel | null = null
+    try {
+      bc = new BroadcastChannel("doctel_sync")
+      bc.onmessage = (e) => {
+        if (e.data?.event === "session.logout") handleLogout()
+      }
+    } catch {
+      // ignore
+    }
+    return () => { bc?.close() }
+  }, [handleLogout])
+
+  // SSE cross-platform logout (web → mobile and vice-versa via server)
+  useSyncEvents({
+    enabled: isAuthenticated,
+    onLogout: () => handleLogout(),
+  })
 
   return (
     <AppShell
@@ -152,21 +185,38 @@ export const App: React.FC = () => {
             My Work
           </button>
           {userRole === "admin" && (
-            <button
-              type="button"
-              onClick={() => setPage("admin")}
-              style={{
-                padding: "6px 10px",
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.6)",
-                backgroundColor: page === "admin" ? "rgba(255,255,255,0.25)" : "transparent",
-                color: "#FFFFFF",
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
-              Admin
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => setPage("admin")}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.6)",
+                  backgroundColor: page === "admin" ? "rgba(255,255,255,0.25)" : "transparent",
+                  color: "#FFFFFF",
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                Admin
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage("training")}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.6)",
+                  backgroundColor: page === "training" ? "rgba(255,255,255,0.25)" : "transparent",
+                  color: "#FFFFFF",
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                🧠 Training
+              </button>
+            </>
           )}
           {isAuthenticated && (
             <button
@@ -321,6 +371,8 @@ export const App: React.FC = () => {
                     setEcNumber(res.ec_number)
                     setAuthToken(res.access_token)
                     setHasToken(true)
+                    setDocumentId(null)
+                    setPage("mywork")
                     if ((res as any).role) setUserRole((res as any).role)
                     if ((res as any).display_name) setDisplayName((res as any).display_name)
                     try {
@@ -354,6 +406,8 @@ export const App: React.FC = () => {
                     setEcNumber(res.ec_number)
                     setAuthToken(res.access_token)
                     setHasToken(true)
+                    setDocumentId(null)
+                    setPage("mywork")
                     if ((res as any).role) setUserRole((res as any).role)
                     if ((res as any).display_name) setDisplayName((res as any).display_name)
                     try {
@@ -623,6 +677,7 @@ export const App: React.FC = () => {
         />
       )}
       {isAuthenticated && userRole === "admin" && page === "admin" && <AdminSettingsPage />}
+      {isAuthenticated && userRole === "admin" && page === "training" && <TrainingRoomPage />}
     </AppShell>
   )
 }

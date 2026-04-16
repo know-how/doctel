@@ -1,0 +1,21 @@
+{
+  "installed": [
+    "llama3.2:latest",
+    "nomic-embed-text:latest",
+    "qwen3:4b",
+    "qwen3:8b"
+  ],
+  "updated_at": 1776321885,
+  "pulls": {
+    "llama3.2:3b-instruct": {
+      "state": "in_progress",
+      "updated_at": 1776262594,
+      "last_line": "attempt 1"
+    },
+    "llama3.2:latest": {
+      "state": "complete",
+      "updated_at": 1776262600,
+      "last_line": "{\"status\":\"success\"}"
+    }
+  }
+}

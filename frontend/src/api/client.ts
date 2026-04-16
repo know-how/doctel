@@ -72,7 +72,10 @@ async function handleResponse<T>(res: Response): Promise<T> {
       }
       if (typeof err === "string" && err.trim()) throw new ApiError(err, res.status, parsed)
       throw new ApiError(text || res.statusText, res.status, parsed)
-    } catch {
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error
+      }
       throw new ApiError(text || res.statusText, res.status, null)
     }
   }
@@ -351,14 +354,32 @@ export async function chatWithDocument(
   return handleResponse<ChatResponse>(res)
 }
 
-export async function createChatSession(documentId: string): Promise<ChatSessionCreateResponse> {
+export async function chatGlobally(payload: ChatRequest): Promise<ChatResponse> {
+  const res = await fetch(`${BASE_URL}/api/ask`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildAuthHeaders(),
+    },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<ChatResponse>(res)
+}
+
+export async function createChatSession(
+  documentId?: string | null,
+  scope?: "global" | "project" | "document",
+): Promise<ChatSessionCreateResponse> {
+  const body: Record<string, any> = {}
+  if (documentId) body.document_id = documentId
+  if (scope) body.scope = scope
   const res = await fetch(`${BASE_URL}/api/chat/sessions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...buildAuthHeaders(),
     },
-    body: JSON.stringify({ document_id: documentId }),
+    body: JSON.stringify(body),
   })
   return handleResponse<ChatSessionCreateResponse>(res)
 }

@@ -144,6 +144,18 @@ temp/
 .tmp/
 
 # ======================
+# Large AI / Model files
+# ======================
+local_llm/
+*.gguf
+*.ggml
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# ======================
 # Misc
 # ======================
 .gemini/

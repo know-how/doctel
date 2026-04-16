@@ -82,23 +82,7 @@ async def check_project_access(project_id: int, user: User, db: AsyncSession):
     )
     if member.first():
         return True
-
-    try:
-        db.add(ProjectMember(project_id=project_id, user_id=user.id, role_in_project="analyst"))
-        await db.commit()
-        return True
-    except IntegrityError:
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-        return True
-    except Exception:
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-        raise HTTPException(status_code=403, detail="Access to project denied")
+    raise HTTPException(status_code=403, detail="Access to project denied")
 
 
 async def assert_project_access(user_id: int, project_id: int, db: AsyncSession) -> None:

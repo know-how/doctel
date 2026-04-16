@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from "react"
+import React, { useCallback, useEffect, useState } from "react"
 import { SafeAreaView, View, Text, Pressable, Modal, TextInput, Image } from "react-native"
 import AsyncStorage from "@react-native-async-storage/async-storage"
 import { DocumentUploadScreen } from "./src/screens/DocumentUploadScreen"
 import { ChatScreen } from "./src/screens/ChatScreen"
 import { useEcNumber } from "./src/hooks/useEcNumber"
+import { useSyncEvents } from "./src/hooks/useSyncEvents"
 import { colors } from "./src/theme/colors"
 import { login, setAuthToken, requestEmailOtp, verifyEmailOtp } from "./src/api/client"
 import zetdcLogo from "./src/assets/zetdc-logo.png"
@@ -42,6 +43,40 @@ export default function App() {
     loadToken()
   }, [])
 
+  // ── Logout ────────────────────────────────────────────────────────────────
+  const handleLogout = useCallback(async () => {
+    try {
+      const token = await AsyncStorage.getItem("docintel_auth_token")
+      if (token) {
+        // Best-effort server logout (triggers SSE broadcast)
+        const BASE = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+        await fetch(`${BASE}/auth/logout`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => { /* ignore network errors */ })
+      }
+    } catch {
+      // ignore
+    } finally {
+      await AsyncStorage.removeItem("docintel_auth_token")
+      await setEcNumber("")
+      setHasToken(false)
+      setInputValue("")
+      setPassword("")
+      setEmail("")
+      setEmailCode("")
+      setEmailSent(false)
+      setTouched(false)
+      setAuthError("")
+    }
+  }, [setEcNumber])
+
+  // SSE cross-platform sync – if server broadcasts a logout, also log out here
+  useSyncEvents({
+    enabled: isAuthenticated,
+    onLogout: () => handleLogout(),
+  })
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
       <View
@@ -52,23 +87,36 @@ export default function App() {
           borderBottomColor: colors.secondary,
         }}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-          <Image
-            source={zetdcLogo}
-            resizeMode="contain"
-            style={{
-              width: 36,
-              height: 36,
-            }}
-          />
-          <View>
-            <Text style={{ color: "#FFFFFF", fontSize: 18, fontWeight: "700" }}>
-              ZETDC DocIntel
-            </Text>
-            <Text style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>
-              Internal Document AI
-            </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+            <Image
+              source={zetdcLogo}
+              resizeMode="contain"
+              style={{ width: 36, height: 36 }}
+            />
+            <View>
+              <Text style={{ color: "#FFFFFF", fontSize: 18, fontWeight: "700" }}>
+                ZETDC DocIntel
+              </Text>
+              <Text style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>
+                Internal Document AI
+              </Text>
+            </View>
           </View>
+          {isAuthenticated && (
+            <Pressable
+              onPress={handleLogout}
+              style={{
+                paddingHorizontal: 12,
+                paddingVertical: 6,
+                borderRadius: 999,
+                borderWidth: 1,
+                borderColor: "rgba(255,255,255,0.6)",
+              }}
+            >
+              <Text style={{ color: "#FFFFFF", fontSize: 12, fontWeight: "600" }}>Logout</Text>
+            </Pressable>
+          )}
         </View>
       </View>
 

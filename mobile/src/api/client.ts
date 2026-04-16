@@ -7,13 +7,25 @@ import {
   ProjectCreateRequest,
   ProjectResponse,
   ProjectListResponse,
-  UserHistoryResponse,
   LoginRequest,
   LoginResponse,
   EmailOtpRequest,
   EmailOtpVerifyRequest,
   EmailOtpRequestResponse,
   SummaryHistoryResponse,
+  IngestStatusResponse,
+  ChatSessionCreateResponse,
+  ChatMessagesResponse,
+  ModelsAvailableResponse,
+  ModelPullStatusResponse,
+  BootstrapStatusResponse,
+  MyProjectsResponse,
+  MyDocumentsResponse,
+  ChatSessionsListResponse,
+  UserMeResponse,
+  AdminSettingsResponse,
+  AdminSettingsPatchResponse,
+  AdminSettingsAuditResponse,
 } from "../types/api"
 import AsyncStorage from "@react-native-async-storage/async-storage"
 
@@ -21,14 +33,50 @@ const BASE_URL =
   process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
 const AUTH_TOKEN_KEY = "docintel_auth_token"
 
+export class ApiError extends Error {
+  status: number
+  data: any
+  constructor(message: string, status: number, data: any) {
+    super(message)
+    this.status = status
+    this.data = data
+  }
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     if (res.status === 401) {
       await clearAuthToken()
-      throw new Error("Session expired. Please sign in again.")
+      throw new ApiError("Session expired. Please sign in again.", 401, { error: "token_expired" })
     }
     const text = await res.text().catch(() => "")
-    throw new Error(text || res.statusText)
+    try {
+      const parsed = JSON.parse(text)
+      if (res.status === 403) {
+        const detail = parsed?.detail ?? parsed?.message ?? ""
+        const err = parsed?.error ?? ""
+        const msg = String(detail || err || "").toLowerCase()
+        if (msg.includes("access to project denied")) {
+          throw new ApiError(
+            "You don't have access to this project. Please request access or contact the admin.",
+            403,
+            parsed,
+          )
+        }
+      }
+      const msg = parsed?.message ?? parsed?.detail?.message ?? null
+      const err = parsed?.error ?? parsed?.detail?.error ?? parsed?.detail ?? null
+      if (typeof msg === "string" && msg.trim()) {
+        throw new ApiError(msg, res.status, parsed)
+      }
+      if (typeof err === "string" && err.trim()) throw new ApiError(err, res.status, parsed)
+      throw new ApiError(text || res.statusText, res.status, parsed)
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error
+      }
+      throw new ApiError(text || res.statusText, res.status, null)
+    }
   }
   return (await res.json()) as T
 }
@@ -137,6 +185,16 @@ export async function getDocumentPrompts(
   return handleResponse<PromptListResponse>(res)
 }
 
+export async function getIngestStatus(
+  documentId: string,
+): Promise<any> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/api/ingest/status?document_id=${encodeURIComponent(documentId)}`, {
+    headers: authHeaders,
+  })
+  return handleResponse<any>(res)
+}
+
 export async function chatWithDocument(
   documentId: string,
   payload: ChatRequest,
@@ -211,4 +269,68 @@ export async function getProjects(): Promise<ProjectListResponse> {
     headers: authHeaders,
   })
   return handleResponse<ProjectListResponse>(res)
+}
+
+export async function getMe(): Promise<UserMeResponse> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/users/me`, {
+    headers: authHeaders,
+  })
+  return handleResponse<UserMeResponse>(res)
+}
+
+export async function logout(): Promise<void> {
+  try {
+    const authHeaders = await buildAuthHeaders()
+    await fetch(`${BASE_URL}/auth/logout`, {
+      method: "POST",
+      headers: authHeaders,
+    }).catch(() => {})
+  } finally {
+    await clearAuthToken()
+  }
+}
+
+export async function getUiSettings(): Promise<any> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/admin/settings`, {
+    headers: authHeaders,
+  })
+  const data = await handleResponse<AdminSettingsResponse>(res)
+  return data?.settings ?? {}
+}
+
+export async function getMyDocuments(): Promise<MyDocumentsResponse> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/users/me/documents`, {
+    headers: authHeaders,
+  })
+  return handleResponse<MyDocumentsResponse>(res)
+}
+
+export async function getChatSessions(): Promise<ChatSessionsListResponse> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/sessions`, {
+    headers: authHeaders,
+  })
+  return handleResponse<ChatSessionsListResponse>(res)
+}
+
+export async function createChatSession(documentId?: string): Promise<ChatSessionCreateResponse> {
+  const authHeaders = await buildAuthHeaders()
+  const body = documentId ? { document_id: documentId } : {}
+  const res = await fetch(`${BASE_URL}/sessions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders,
+    },
+    body: JSON.stringify(body),
+  })
+  return handleResponse<ChatSessionCreateResponse>(res)
+}
+
+export async function getAvailableModels(): Promise<ModelsAvailableResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/available`)
+  return handleResponse<ModelsAvailableResponse>(res)
 }

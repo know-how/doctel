@@ -201,4 +201,5 @@ def validate_token(token: str) -> Dict[str, Any] | None:
 
 
 def revoke_token(token: str) -> bool:
+    """Remove a session token, effectively logging the user out."""
     return _session_store.pop(token, None) is not None

@@ -22,8 +22,12 @@ class OllamaClient:
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     response = await client.post(url, json=payload)
-                    response.raise_for_status()
+                    if response.status_code >= 400:
+                        # HTTP errors are definitive — don't retry, surface immediately
+                        response.raise_for_status()
                     return response
+            except httpx.HTTPStatusError:
+                raise  # surface 4xx/5xx immediately, no retry
             except Exception as e:
                 last_exc = e
         raise last_exc  # type: ignore[misc]
@@ -51,10 +55,13 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
+        # Merge caller options; always set num_ctx to prevent OOM on large prompts
+        merged_options = {"num_ctx": 4096}
         if options:
-            payload["options"] = options
+            merged_options.update(options)
+        payload["options"] = merged_options
 
-        timeout = self._timeout(read_seconds=90.0)
+        timeout = self._timeout(read_seconds=180.0)  # analysis can take up to 3 min on CPU
         try:
             response = await self._post_with_retries(url, payload, timeout)
             return response.json().get("response", "")
@@ -62,21 +69,32 @@ class OllamaClient:
             logger.error(f"Ollama generate error: {e}")
             raise
 
+    @staticmethod
+    def _extract_embedding(body: dict) -> list[float]:
+        embedding = []
+        if "embedding" in body:
+            embedding = body.get("embedding", [])
+        elif "embeddings" in body and isinstance(body["embeddings"], list) and body["embeddings"]:
+            embedding = body["embeddings"][0] or []
+        elif "data" in body and isinstance(body["data"], list) and body["data"]:
+            embedding = body["data"][0].get("embedding", [])
+        return embedding if isinstance(embedding, list) else []
+
     async def embed(self, model: str, input: str) -> list[float]:
-        url = f"{self.base_url}/api/embeddings"
         payload = {
             "model": model,
             "input": input
         }
         timeout = self._timeout(read_seconds=30.0)
         try:
-            response = await self._post_with_retries(url, payload, timeout)
-            body = response.json()
-            if "embedding" in body:
-                return body.get("embedding", [])
-            if "data" in body and isinstance(body["data"], list) and body["data"]:
-                return body["data"][0].get("embedding", [])
-            return []
+            for endpoint in ("/api/embeddings", "/api/embed"):
+                response = await self._post_with_retries(f"{self.base_url}{endpoint}", payload, timeout)
+                embedding = self._extract_embedding(response.json())
+                if embedding:
+                    return embedding
+            raise RuntimeError(
+                f"Ollama returned empty embedding for model {model} on /api/embeddings and /api/embed"
+            )
         except Exception as e:
             logger.error(f"Ollama embedding error: {e}")
             raise

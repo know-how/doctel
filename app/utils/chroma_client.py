@@ -13,6 +13,22 @@ class ChromaClient:
 
     def upsert(self, project_id: str, ids: list[str], documents: list[str], embeddings: list[list[float]], metadatas: list[dict] = None):
         collection = self.get_collection(project_id)
+        # Filter out entries with empty or inconsistent embeddings
+        if embeddings:
+            expected_dim = len(embeddings[0]) if embeddings[0] else 0
+            valid = []
+            for i in range(len(ids)):
+                emb = embeddings[i] if i < len(embeddings) else []
+                if emb and len(emb) == expected_dim:
+                    valid.append(i)
+            if len(valid) < len(ids):
+                ids = [ids[i] for i in valid]
+                documents = [documents[i] for i in valid]
+                embeddings = [embeddings[i] for i in valid]
+                if metadatas:
+                    metadatas = [metadatas[i] for i in valid]
+        if not ids:
+            return
         collection.upsert(
             ids=ids,
             documents=documents,

@@ -9,6 +9,12 @@ from app.services.ingestion_service import ingest_document
 _queue: "asyncio.Queue[int]" = asyncio.Queue()
 _worker_task: Optional[asyncio.Task] = None
 _semaphore = asyncio.Semaphore(1)
+_cancelled_doc_ids: set[int] = set()
+
+
+def cancel_document_ids(doc_ids: list[int]) -> None:
+    """Mark document IDs as cancelled so the worker skips them when dequeued."""
+    _cancelled_doc_ids.update(doc_ids)
 
 
 async def enqueue(document_id: int) -> None:
@@ -26,6 +32,9 @@ async def _run() -> None:
     while True:
         doc_id = await _queue.get()
         try:
+            if doc_id in _cancelled_doc_ids:
+                _cancelled_doc_ids.discard(doc_id)
+                continue
             async with _semaphore:
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(select(Document).where(Document.id == doc_id))
