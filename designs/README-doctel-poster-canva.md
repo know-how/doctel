@@ -1,0 +1,1 @@
+Doctel poster (Canva-ready) SVG placed in designs/doctel-poster-canva.svg. Replace the QR placeholder with a generated QR and adjust any text in Canva. For high-quality print replace logo with the original SVG if available.
