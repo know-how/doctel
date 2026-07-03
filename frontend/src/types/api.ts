@@ -9,6 +9,7 @@ export interface DocumentCreateResponse {
   id: string
   filename: string
   status: string
+  is_public?: boolean
   metadata?: DocumentMetadata | null
 }
 
@@ -108,14 +109,35 @@ export interface ChatMessagesResponse {
   messages: ChatMessage[]
 }
 
+export interface OllamaModelDetail {
+  name: string
+  size: number
+  size_human: string
+  family: string
+  parameter_size: string
+  quantization_level: string
+  modified_at: string
+  digest: string
+  ready: boolean
+  capabilities?: string[]
+  display_category?: string
+  // Cloud/API model metadata (present when size_human === "Cloud")
+  vision?: boolean
+  tool_calling?: boolean
+  max_input_tokens?: number
+  max_output_tokens?: number
+}
+
 export interface ModelsAvailableResponse {
   installed?: string[]
   available?: string[]
-  models?: string[]
+  models?: OllamaModelDetail[]
   default_model?: string
   offline?: boolean
   embed_model?: string
   vision_model?: string
+  ollama_healthy?: boolean
+  defaults?: Record<string, string>
 }
 
 export interface ModelPullStatusResponse {
@@ -153,6 +175,7 @@ export interface MyDocumentsResponse {
     project_id: string | null
     project_name: string
     status: string
+    is_public?: boolean
     created_at: string
     download_url: string
     view_url: string
@@ -172,6 +195,9 @@ export interface ChatSessionsListResponse {
     started_at: string
     updated_at?: string
   }[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface LoginRequest {
@@ -208,6 +234,78 @@ export interface AdminSettingsPatchResponse {
   restart_recommended: Record<string, boolean>
   effective: any
   sources: Record<string, "default" | "file" | "db">
+}
+
+/* ───── Model Registry types ───── */
+
+export interface RegistryModelEntry {
+  id: string
+  name: string
+  vision?: boolean
+  toolCalling?: boolean
+  context_window?: number
+  capabilities?: string[]
+}
+
+export interface RegistryProvider {
+  id: string
+  name: string
+  vendor?: string
+  base_url?: string
+  api_key_env?: string
+  models: RegistryModelEntry[]
+}
+
+export interface RegistryListResponse {
+  providers: RegistryProvider[]
+}
+
+export interface RegistryFlatModel {
+  id: string
+  name: string
+  provider_id: string
+  provider_name: string
+  vendor?: string
+  vision?: boolean
+  toolCalling?: boolean
+  context_window?: number
+  capabilities?: string[]
+}
+
+export interface RegistryFlatResponse {
+  models: RegistryFlatModel[]
+}
+
+export interface RegistryProviderResponse {
+  provider: RegistryProvider
+}
+
+export interface RegistryModelResponse {
+  model: RegistryModelEntry
+}
+
+export interface AddRegistryProviderPayload {
+  name: string
+  vendor?: string
+  base_url?: string
+  api_key_env?: string
+  models?: Partial<RegistryModelEntry>[]
+}
+
+export interface UpdateRegistryProviderPayload {
+  name?: string
+  vendor?: string
+  base_url?: string
+  api_key_env?: string
+}
+
+export interface AddRegistryModelPayload {
+  id: string
+  name: string
+  vision?: boolean
+  toolCalling?: boolean
+  context_window?: number
+  capabilities?: string[]
 }
 
 export interface AdminSettingsAuditResponse {
@@ -264,4 +362,143 @@ export interface IngestStatusResponse {
   ingestion_completed?: boolean
   ingestion_failed?: boolean
   updated_at: string
+}
+
+/* ───── Model Management v2 Types (GitHub Copilot-style) ───── */
+
+export interface V2ModelMetadata {
+  id: string
+  name: string
+  contextWindow: number
+  supportsChat: boolean
+  supportsVision: boolean
+  supportsTools: boolean
+  supportsCode: boolean
+  supportsEmbedding: boolean
+  supportsReasoning: boolean
+  supportsRag: boolean
+  supportsClassification: boolean
+  supportsSummary: boolean
+  supportsExtraction: boolean
+  enabled: boolean
+  visibleToUsers: boolean
+  isDefault: boolean
+  allowedRoles: string[]
+  departmentRestrictions: string[]
+  state: string
+  pricingTier: string
+  license: string
+  forTasks?: string[]
+  capabilities?: string[]
+  health?: V2HealthSummary
+}
+
+export interface V2Provider {
+  id: string
+  name: string
+  vendor: string
+  base_url: string
+  api_key_env: string
+  status: string
+  description: string
+  icon: string
+  order: number
+  models: V2ModelMetadata[]
+  health?: V2HealthSummary
+}
+
+export interface V2HealthSummary {
+  label: string
+  status: "healthy" | "degraded" | "unhealthy" | "unknown"
+  totalRequests: number
+  successCount: number
+  errorCount: number
+  successRate: number
+  avgLatencyMs: number | null
+  p95LatencyMs: number | null
+  totalTokens: number
+  lastChecked: string | null
+  recentErrors: { timestamp: string; latency_ms?: number }[]
+}
+
+export interface V2CatalogResponse {
+  providers: V2Provider[]
+  taskMapping: Record<string, { providerId: string; modelId: string; modelName?: string; providerName?: string }>
+  automaticRouting: boolean
+  taskTypes: string[]
+  validRoles: string[]
+  validDepartments: string[]
+  validCapabilities: string[]
+  automaticRoutingRules: Record<string, { description: string; priority_capabilities: string[]; preferred_family: string | null }>
+  marketplace: V2MarketplaceItem[]
+}
+
+export interface V2MarketplaceItem {
+  modelId: string
+  modelName: string
+  providerId: string
+  providerName: string
+  contextWindow: number
+  capabilities: string[]
+  pricingTier: string
+  license: string
+  state: string
+}
+
+export interface V2ProviderListResponse {
+  providers: V2Provider[]
+}
+
+export interface V2ProviderResponse {
+  provider: V2Provider
+}
+
+export interface V2ModelListResponse {
+  models: V2ModelMetadata[]
+}
+
+export interface V2ModelResponse {
+  model: V2ModelMetadata
+}
+
+export interface V2TaskMappingResponse {
+  taskMapping: Record<string, { providerId: string; modelId: string }>
+  taskTypes: string[]
+}
+
+export interface V2VisibleChatModelsResponse {
+  models: (V2ModelMetadata & { provider_name: string; provider_id: string })[]
+}
+
+export interface V2HealthResponse {
+  providers: Record<string, V2HealthSummary>
+  models: Record<string, V2HealthSummary>
+  system: V2HealthSummary
+}
+
+export interface V2AuditEntry {
+  id: string
+  timestamp: string
+  action: string
+  entityType: string
+  entityId: string
+  details: Record<string, any>
+  userId: string
+  userName: string
+}
+
+export interface V2AuditResponse {
+  audit: V2AuditEntry[]
+  total: number
+}
+
+export interface V2RoutingStatusResponse {
+  automaticRouting: boolean
+}
+
+export interface V2ReferenceResponse {
+  taskTypes: string[]
+  validRoles: string[]
+  validDepartments: string[]
+  modelStates: string[]
 }

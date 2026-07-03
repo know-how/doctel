@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 import os
 import json
@@ -104,6 +105,30 @@ def _read_docx_text(path: Path) -> str:
     return _clean_extracted_text("\n".join(parts))
 
 
+def _read_image_text(path: Path) -> str:
+    try:
+        from app.services.gemini_service import analyze_image, is_configured as gemini_configured
+        if gemini_configured():
+            import asyncio
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    result = pool.submit(asyncio.run, analyze_image(str(path), "Extract and transcribe all visible text from this image. Describe the image content in detail.")).result()
+                return _clean_extracted_text(result)
+            else:
+                result = asyncio.run(analyze_image(str(path), "Extract and transcribe all visible text from this image. Describe the image content in detail."))
+                return _clean_extracted_text(result)
+    except Exception as e:
+        logger.warning("Gemini vision analysis failed for %s: %s", path, e)
+    fallback = f"[Image: {path.name}] OCR requires Gemini API key for image text extraction."
+    return fallback
+
+
 def _read_document_text(document_id: str) -> str:
     storage_path = get_document_storage_path(document_id)
     if not storage_path:
@@ -118,6 +143,9 @@ def _read_document_text(document_id: str) -> str:
         return _read_pdf_text(path)
     if suffix == ".docx":
         return _read_docx_text(path)
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+    if suffix in image_exts:
+        return _read_image_text(path)
     return ""
 
 
@@ -267,15 +295,25 @@ def _maybe_generate_analysis_structured(document_id: str) -> dict[str, Any] | No
     if not context:
         return None
     prompt = (
-        "Return a JSON object only (no markdown) with keys:\n"
-        "- executive_summary: string (<=10 sentences)\n"
-        "- detailed_summary: array of bullet strings\n"
+        "You are a professional document analyst for ZETDC (Zimbabwe Electricity Transmission and Distribution Company). "
+        "Return a JSON object only (no markdown, no asterisks) with keys:\n"
+        "- executive_summary: string — a professional narrative summary in flowing prose (max 10 sentences). "
+        "Do NOT use asterisks, bold markdown, numbered lists, or bullet points. Write as well-structured paragraphs. "
+        "Begin with a clear statement of the document's purpose and scope. Organise logically: context, then findings, then implications.\n"
+        "- detailed_summary: array of strings — each string must be a complete narrative sentence, not a bullet point or fragment. "
+        "Present key findings as professional prose, categorised by theme.\n"
         "- sentiment: one of Positive, Neutral, Negative, Urgent\n"
         "- topics: array of short strings\n"
         "- entities: array of strings\n"
         "- key_entities: object with arrays people, dates, locations\n"
-        "- action_items: array of strings\n"
-        "- decisions: array of strings\n\n"
+        "- action_items: array of strings — each as a complete professional sentence\n"
+        "- decisions: array of strings — each as a complete professional sentence\n\n"
+        "SUMMARY WRITING RULES:\n"
+        "- NEVER use asterisks or markdown formatting for emphasis\n"
+        "- NEVER use numbered or bulleted lists in executive_summary; write in narrative paragraphs\n"
+        "- Each detailed_summary entry must be a complete, well-formed sentence\n"
+        "- Maintain a formal, professional tone suitable for ZETDC leadership and staff\n"
+        "- Use precise ZETDC terminology where applicable\n\n"
         "Use ONLY the document content. If something is not present, return an empty array.\n\n"
         f"Document:\n{_llm_context(context)}"
     )
@@ -671,12 +709,37 @@ async def upload_document(
     document_type: str | None = None,
     document_date: str | None = None,
 ) -> DocumentCreateResponse:
-    if file.content_type not in (
+    allowed_content_types = (
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "text/plain",
-    ):
-        raise HTTPException(status_code=400, detail="Unsupported file type")
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/webp",
+        "image/gif",
+        "image/bmp",
+        "audio/wav",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/ogg",
+        "audio/webm",
+        "audio/flac",
+        "audio/x-m4a",
+        "video/mp4",
+        "video/avi",
+        "video/quicktime",
+        "video/x-msvideo",
+    )
+    if file.content_type not in allowed_content_types:
+        ext = Path(file.filename or "file").suffix.lower() if file.filename else ""
+        allowed_exts = {
+            ".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+            ".wav", ".mp3", ".m4a", ".ogg", ".webm", ".flac", ".aac",
+            ".mp4", ".avi", ".mov", ".mkv",
+        }
+        if ext not in allowed_exts:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type or ext}. Allowed: PDF, DOCX, TXT, images, audio, video")
 
     resolved_project_id = project_id
     resolved_project_name = project_name

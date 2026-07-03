@@ -14,6 +14,7 @@ import {
   InboxFile,
   RouterStatusResponse,
 } from "../api/training"
+import { distillFromCloud } from "../api/client"
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,8 @@ export const TrainingRoomPage: React.FC = () => {
   const [uploadMsg, setUploadMsg] = useState("")
   const [actionMsg, setActionMsg] = useState("")
   const [actionError, setActionError] = useState("")
+  const [distilling, setDistilling] = useState(false)
+  const [distillResult, setDistillResult] = useState<string>("")
   const dropRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -345,6 +348,28 @@ export const TrainingRoomPage: React.FC = () => {
           >
             📦 Batch Train
           </button>
+          <button
+            style={btn("primary")}
+            disabled={distilling || isRunning}
+            onClick={async () => {
+              setDistilling(true)
+              setDistillResult("")
+              try {
+                const res = await distillFromCloud({ auto_train: true })
+                setDistillResult(
+                  `Distilled ${res.total_samples} samples (${res.gemini_samples} Gemini, ${res.deepseek_samples} DeepSeek) across ${res.topics_covered} topics${res.training_triggered ? " — training triggered" : ""}`
+                )
+                loadAll()
+              } catch (e: any) {
+                setDistillResult(`Distillation failed: ${e.message ?? e}`)
+              } finally {
+                setDistilling(false)
+              }
+            }}
+            title="Query Gemini/DeepSeek with ZETDC topics and capture training data"
+          >
+            {distilling ? "⏳ Distilling..." : "🧠 Distill ZETDC Knowledge"}
+          </button>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input
@@ -367,6 +392,11 @@ export const TrainingRoomPage: React.FC = () => {
         )}
         {actionError && (
           <div style={{ marginTop: 10, color: colors.danger, fontSize: 13 }}>⚠️ {actionError}</div>
+        )}
+        {distillResult && (
+          <div style={{ marginTop: 10, fontSize: 13, color: distillResult.includes("failed") ? colors.danger : "#2e7d32" }}>
+            {distillResult.includes("failed") ? "⚠️" : "✅"} {distillResult}
+          </div>
         )}
         <div style={{ marginTop: 12, fontSize: 12, color: colors.textMuted }}>
           <code style={{ fontSize: 11 }}>train.now()</code> · <code style={{ fontSize: 11 }}>train.idle()</code> ·{" "}

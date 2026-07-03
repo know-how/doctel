@@ -1,29 +1,129 @@
 import React, { useCallback, useEffect, useState } from "react"
-import { SafeAreaView, View, Text, Pressable, Modal, TextInput, Image } from "react-native"
+import { View, Text, Pressable, Modal, TextInput, Image, ScrollView, useWindowDimensions, ActivityIndicator } from "react-native"
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context"
 import AsyncStorage from "@react-native-async-storage/async-storage"
+import { DashboardScreen } from "./src/screens/DashboardScreen"
 import { DocumentUploadScreen } from "./src/screens/DocumentUploadScreen"
 import { ChatScreen } from "./src/screens/ChatScreen"
+import { GlobalChatScreen } from "./src/screens/GlobalChatScreen"
+import { ModelSelectorScreen } from "./src/screens/ModelSelectorScreen"
+import { ProjectsScreen } from "./src/screens/ProjectsScreen"
+import { ChatSessionsScreen } from "./src/screens/ChatSessionsScreen"
+import { SystemStatusScreen } from "./src/screens/SystemStatusScreen"
 import { useEcNumber } from "./src/hooks/useEcNumber"
 import { useSyncEvents } from "./src/hooks/useSyncEvents"
-import { colors } from "./src/theme/colors"
-import { login, setAuthToken, requestEmailOtp, verifyEmailOtp } from "./src/api/client"
+import { useConnectionMonitor } from "./src/hooks/useConnectionMonitor"
+import ConnectionToast from "./src/components/ConnectionToast"
+import { login, setAuthToken, requestEmailOtp, verifyEmailOtp, logout } from "./src/api/client"
 import zetdcLogo from "./src/assets/zetdc-logo.png"
+import { DocChatAnimation } from "./src/components/DocChatAnimation"
+import { ThemeProvider, useTheme } from "./src/context/ThemeContext"
+import { ModelProvider } from "./src/context/ModelContext"
+import { SidebarDrawer } from "./src/navigation/SidebarDrawer"
+import { InlineSidebar } from "./src/navigation/InlineSidebar"
+import { DocumentLibraryScreen } from "./src/screens/DocumentLibraryScreen"
+import { DocumentAddScreen } from "./src/screens/DocumentAddScreen"
+import { WorkspacesScreen } from "./src/screens/WorkspacesScreen"
+import { ProcessingStatusScreen } from "./src/screens/ProcessingStatusScreen"
+import { AnalyzeChatScreen } from "./src/screens/AnalyzeChatScreen"
+import { AnalyzeExtractionScreen } from "./src/screens/AnalyzeExtractionScreen"
+import { AnalyzeSummariesScreen } from "./src/screens/AnalyzeSummariesScreen"
+import { AnalyzeCompareScreen } from "./src/screens/AnalyzeCompareScreen"
+import { AnalyzeClassificationScreen } from "./src/screens/AnalyzeClassificationScreen"
+import { OutputsHistoryScreen } from "./src/screens/OutputsHistoryScreen"
+import { AdminModelsScreen } from "./src/screens/AdminModelsScreen"
+import { AdminPromptsScreen } from "./src/screens/AdminPromptsScreen"
+import { SettingsProfileScreen } from "./src/screens/SettingsProfileScreen"
+import { CollaborationTeamScreen } from "./src/screens/CollaborationTeamScreen"
+import { NewChatScreen } from "./src/screens/NewChatScreen"
 
-export default function App() {
+type ScreenType = "main" | "chat" | "upload" | "global-chat" | "models" | "projects" | "sessions" | "status"
+
+const navTabs: Array<{ id: ScreenType; label: string; icon: string }> = [
+  { id: "main", label: "Home", icon: "🏠" },
+  { id: "upload", label: "Upload", icon: "⬆️" },
+  { id: "chat", label: "Copilot", icon: "✦" },
+  { id: "global-chat", label: "Global", icon: "🌍" },
+  { id: "projects", label: "Repos", icon: "🗂️" },
+  { id: "sessions", label: "History", icon: "📋" },
+  { id: "models", label: "Models", icon: "🤖" },
+  { id: "status", label: "Status", icon: "🔧" },
+]
+
+function getPageTitle(path: string): string {
+  const titles: Record<string, string> = {
+    "/documents/library": "Document Library",
+    "/documents/add": "Add Document",
+    "/documents/workspaces": "Workspaces",
+    "/documents/status": "Processing Status",
+    "/chat": "New Chat",
+    "/analyze/chat": "Ask Documents",
+    "/analyze/extraction": "Extraction",
+    "/analyze/summaries": "Summaries",
+    "/analyze/compare": "Compare",
+    "/analyze/classification": "Classification",
+    "/outputs/history": "Output History",
+    "/outputs/exports": "Exports",
+    "/outputs/reports": "Reports",
+    "/admin/models": "Models",
+    "/admin/prompts": "Prompts",
+    "/admin/context": "Context & Tokens",
+    "/admin/integrations": "Integrations",
+    "/settings/profile": "Profile",
+    "/settings/security": "Security",
+    "/settings/billing": "Billing",
+    "/team": "Team",
+    "/workspaces/shared": "Shared Workspaces",
+    "/activity": "Activity",
+  }
+  return titles[path] || "Documents"
+}
+
+function PlaceholderPage({ title, emoji }: { title: string; emoji?: string }) {
+  const { tokens: t } = useTheme()
+  return (
+    <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: t.colors.bg, padding: t.spacing.lg }}>
+      <Text style={{ fontSize: 48, marginBottom: t.spacing.md }}>{emoji || "🚧"}</Text>
+      <Text style={{ fontSize: 18, fontWeight: "700", color: t.colors.text, marginBottom: t.spacing.xs, textAlign: "center" }}>{title}</Text>
+      <Text style={{ fontSize: 13, color: t.colors.textMuted, textAlign: "center" }}>This page is under construction and will be available soon.</Text>
+    </View>
+  )
+}
+
+function AppContent() {
+  const { tokens: t, isDark } = useTheme()
+  const { width: windowWidth } = useWindowDimensions()
+  const isTablet = windowWidth >= 768
   const [documentId, setDocumentId] = useState("doc_1")
   const { ecNumber, setEcNumber } = useEcNumber()
-  const [activeTab, setActiveTab] = useState<"chat" | "upload">("chat")
+  const [activeTab, setActiveTab] = useState<ScreenType>("main")
   const [inputValue, setInputValue] = useState(ecNumber)
   const [password, setPassword] = useState("")
   const [email, setEmail] = useState("")
   const [emailCode, setEmailCode] = useState("")
   const [emailSent, setEmailSent] = useState(false)
-  const [loginMode, setLoginMode] = useState<"ec" | "email">("ec")
+  const [loginMode, setLoginMode] = useState<"ec" | "email">("email")
   const [touched, setTouched] = useState(false)
   const [loading, setLoading] = useState(false)
   const [authError, setAuthError] = useState("")
   const [hasToken, setHasToken] = useState(false)
   const [checkingToken, setCheckingToken] = useState(true)
+  const [drawerVisible, setDrawerVisible] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [currentPath, setCurrentPath] = useState("/chat")
+  const [userRole, setUserRole] = useState("")
+  const [displayName, setDisplayName] = useState("")
+  const [workspaceProjectId, setWorkspaceProjectId] = useState<string | null>(null)
+
+  // ── Backend connection check (live monitor) ─────────────────
+  const {
+    checked: connectionChecked,
+    ok: connectionOk,
+    initialChecking: connectionChecking,
+    liveChecking,
+    error: connectionError,
+    recheck,
+  } = useConnectionMonitor()
 
   const hasEc = !!ecNumber
   const showError = touched && !inputValue.trim()
@@ -43,22 +143,11 @@ export default function App() {
     loadToken()
   }, [])
 
-  // ── Logout ────────────────────────────────────────────────────────────────
   const handleLogout = useCallback(async () => {
     try {
-      const token = await AsyncStorage.getItem("docintel_auth_token")
-      if (token) {
-        // Best-effort server logout (triggers SSE broadcast)
-        const BASE = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
-        await fetch(`${BASE}/auth/logout`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        }).catch(() => { /* ignore network errors */ })
-      }
+      await logout()
     } catch {
-      // ignore
     } finally {
-      await AsyncStorage.removeItem("docintel_auth_token")
       await setEcNumber("")
       setHasToken(false)
       setInputValue("")
@@ -68,172 +157,240 @@ export default function App() {
       setEmailSent(false)
       setTouched(false)
       setAuthError("")
+      setUserRole("")
+      setDisplayName("")
     }
   }, [setEcNumber])
 
-  // SSE cross-platform sync – if server broadcasts a logout, also log out here
   useSyncEvents({
     enabled: isAuthenticated,
     onLogout: () => handleLogout(),
   })
 
+  function renderPage() {
+    const isAdmin = userRole === "admin"
+    switch (currentPath) {
+      case "/chat":
+        return <NewChatScreen />
+      case "/documents/library":
+        return <DocumentLibraryScreen key={workspaceProjectId || "all"} onSelectDocument={(doc) => { setDocumentId(doc.id); setCurrentPath("/analyze/chat"); }} initialProjectId={workspaceProjectId} />
+      case "/documents/add":
+        return <DocumentAddScreen onUploaded={(id) => { setDocumentId(id); setCurrentPath("/documents/library"); }} />
+      case "/documents/workspaces":
+        return <WorkspacesScreen onSelectProject={(proj) => { setWorkspaceProjectId(proj.id); setCurrentPath("/documents/library"); }} />
+      case "/documents/status":
+        return <ProcessingStatusScreen />
+      case "/analyze/chat":
+        return <AnalyzeChatScreen key={documentId} documentId={documentId} />
+      case "/analyze/extraction":
+        return <AnalyzeExtractionScreen />
+      case "/analyze/summaries":
+        return <AnalyzeSummariesScreen />
+      case "/analyze/compare":
+        return <AnalyzeCompareScreen />
+      case "/analyze/classification":
+        return <AnalyzeClassificationScreen />
+      case "/outputs/history":
+        return <OutputsHistoryScreen />
+      case "/outputs/exports":
+        return <PlaceholderPage title="Exports" emoji="📥" />
+      case "/outputs/reports":
+        return <PlaceholderPage title="Reports" emoji="📊" />
+      case "/admin/models":
+        return isAdmin ? <AdminModelsScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/prompts":
+        return isAdmin ? <AdminPromptsScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/context":
+        return isAdmin ? <PlaceholderPage title="Context & Tokens" emoji="🔢" /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/integrations":
+        return isAdmin ? <PlaceholderPage title="Integrations" emoji="🔌" /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/settings/profile":
+        return <SettingsProfileScreen />
+      case "/settings/security":
+        return <PlaceholderPage title="Security Settings" emoji="🔒" />
+      case "/settings/billing":
+        return <PlaceholderPage title="Billing" emoji="💳" />
+      case "/team":
+        return <CollaborationTeamScreen />
+      case "/workspaces/shared":
+        return <WorkspacesScreen onSelectProject={(proj) => { setCurrentPath("/documents/library"); }} />
+      case "/activity":
+        return <CollaborationTeamScreen />
+      default:
+        return <DocumentLibraryScreen onSelectDocument={() => {}} />
+    }
+  }
+
+  const handleNavigate = useCallback((path: string) => {
+    setCurrentPath(path)
+    setDrawerVisible(false)
+  }, [])
+
+  // ── Connection check gate screens ─────────────────────────────
+  if (connectionChecking) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#070B14" }}>
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 20 }}>
+          <ActivityIndicator size="large" color="#5B88FF" />
+          <Text style={{ fontSize: 15, fontWeight: "500", color: "rgba(255,255,255,0.7)" }}>
+            Connecting to server…
+          </Text>
+        </View>
+      </SafeAreaView>
+    )
+  }
+
+  if (!connectionOk) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#070B14" }}>
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 16, padding: 32 }}>
+          <Text style={{ fontSize: 48, lineHeight: 52 }}>⚠️</Text>
+          <Text style={{ fontSize: 18, fontWeight: "700", color: "#FFFFFF" }}>
+            Unable to Connect
+          </Text>
+          <Text style={{
+            fontSize: 13, color: "rgba(255,255,255,0.55)",
+            textAlign: "center", maxWidth: 400, lineHeight: 20,
+          }}>
+            {connectionError || "The backend server is not reachable. Please ensure the server is running and try again."}
+          </Text>
+          <Pressable
+            onPress={recheck}
+            style={{
+              marginTop: 12,
+              paddingVertical: 12,
+              paddingHorizontal: 32,
+              borderRadius: 10,
+              backgroundColor: "#5B88FF",
+            }}
+          >
+            <Text style={{ color: "#FFFFFF", fontSize: 14, fontWeight: "600" }}>
+              Retry Connection
+            </Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    )
+  }
+
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
-      <View
-        style={{
-          padding: 16,
-          backgroundColor: colors.primary,
-          borderBottomWidth: 2,
-          borderBottomColor: colors.secondary,
-        }}
-      >
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-            <Image
-              source={zetdcLogo}
-              resizeMode="contain"
-              style={{ width: 36, height: 36 }}
+    <SafeAreaView style={{ flex: 1, backgroundColor: t.colors.bg }}>
+      {isAuthenticated ? (
+        <View style={{ flex: 1, flexDirection: isTablet ? "row" : "column", backgroundColor: t.colors.bg }}>
+          {isTablet ? (
+            <InlineSidebar
+              collapsed={sidebarCollapsed}
+              onToggleCollapse={() => setSidebarCollapsed((p) => !p)}
+              onNavigate={handleNavigate}
+              onLogout={handleLogout}
+              currentPath={currentPath}
+              userRole={userRole || ""}
+              displayName={displayName}
             />
-            <View>
-              <Text style={{ color: "#FFFFFF", fontSize: 18, fontWeight: "700" }}>
-                ZETDC DocIntel
-              </Text>
-              <Text style={{ color: "rgba(255,255,255,0.8)", fontSize: 12 }}>
-                Internal Document AI
-              </Text>
-            </View>
-          </View>
-          {isAuthenticated && (
-            <Pressable
-              onPress={handleLogout}
+          ) : (
+            <View
               style={{
-                paddingHorizontal: 12,
-                paddingVertical: 6,
-                borderRadius: 999,
-                borderWidth: 1,
-                borderColor: "rgba(255,255,255,0.6)",
+                height: 56,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                paddingHorizontal: 16,
+            backgroundColor: isDark ? "#070B14" : t.colors.bg,
+                borderBottomWidth: 1,
+                borderBottomColor: t.colors.border,
               }}
             >
-              <Text style={{ color: "#FFFFFF", fontSize: 12, fontWeight: "600" }}>Logout</Text>
-            </Pressable>
+              <Pressable onPress={() => setDrawerVisible(true)}>
+                <Text style={{ fontSize: 22, color: t.colors.text }}>☰</Text>
+              </Pressable>
+              <Text style={{ fontSize: 16, fontWeight: "700", color: t.colors.text }}>
+                {getPageTitle(currentPath)}
+              </Text>
+              <View style={{ width: 40 }} />
+            </View>
+          )}
+          <View style={{ flex: 1, minWidth: 0 }}>
+            {renderPage()}
+          </View>
+          {!isTablet && (
+            <SidebarDrawer
+              visible={drawerVisible}
+              onClose={() => setDrawerVisible(false)}
+              onNavigate={handleNavigate}
+              onLogout={handleLogout}
+              userRole={userRole || ""}
+              displayName={displayName}
+            />
           )}
         </View>
-      </View>
+      ) : (
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, justifyContent: "center" }}>
+          <View style={{ gap: 8 }}>
+            <Text style={{ fontSize: 16, fontWeight: "600", color: t.colors.text }}>
+              Sign in to access all features
+            </Text>
+            <Text style={{ fontSize: 13, color: t.colors.textMuted }}>
+              Upload documents, chat, manage models, and more.
+            </Text>
+          </View>
+        </ScrollView>
+      )}
 
-      <View style={{ flexDirection: "row", gap: 8, padding: 16 }}>
-        <Pressable
-          onPress={() => setActiveTab("chat")}
-          style={[
-            tabStyle,
-            activeTab === "chat" ? activeTabStyle : inactiveTabStyle,
-          ]}
-        >
-          <Text style={activeTab === "chat" ? activeTabText : inactiveTabText}>
-            Chat
-          </Text>
-        </Pressable>
-        <Pressable
-          onPress={() => setActiveTab("upload")}
-          style={[
-            tabStyle,
-            activeTab === "upload" ? activeTabStyle : inactiveTabStyle,
-          ]}
-        >
-          <Text style={activeTab === "upload" ? activeTabText : inactiveTabText}>
-            Upload
-          </Text>
-        </Pressable>
-      </View>
-
-      <View style={{ flex: 1, padding: 16 }}>
-        {activeTab === "chat" ? (
-          isAuthenticated ? (
-            <ChatScreen documentId={documentId} />
-          ) : (
-            <View style={{ gap: 8 }}>
-              <Text style={{ fontSize: 16, fontWeight: "600", color: colors.textPrimary }}>
-                Sign in to start chatting
-              </Text>
-              <Text style={{ fontSize: 13, color: colors.textMuted }}>
-                Upload a document and verify your account to unlock insights.
-              </Text>
-            </View>
-          )
-        ) : (
-          <DocumentUploadScreen
-            onUploaded={(id) => {
-              setDocumentId(id)
-              setActiveTab("chat")
-            }}
-          />
-        )}
-      </View>
+      <ConnectionToast connected={connectionOk} liveChecking={liveChecking} />
 
       <Modal visible={!isAuthenticated} transparent animationType="fade">
-        <View style={overlayStyle}>
-          <View style={modalStyle}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 10 }}>
-              <Image
-                source={zetdcLogo}
-                resizeMode="contain"
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: t.colors.bg,
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+          }}
+        >
+          <View style={modalStyle(t)}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 20 }}>
+              <View
                 style={{
-                  width: 44,
-                  height: 44,
+                  width: 52,
+                  height: 52,
+                  borderRadius: 14,
+                  backgroundColor: t.colors.surfaceActive,
+                  borderWidth: 1,
+                  borderColor: t.colors.borderFocus,
+                  alignItems: "center",
+                  justifyContent: "center",
                 }}
-              />
+              >
+                <Image source={zetdcLogo} resizeMode="contain" style={{ width: 32, height: 32 }} />
+              </View>
               <View>
-                <Text style={{ fontSize: 12, color: colors.textMuted, fontWeight: "600" }}>
-                  Zimbabwe Electricity Transmission & Distribution
+                <Text style={{ fontSize: 10, color: t.colors.textMuted, fontWeight: "700", letterSpacing: 1.2 }}>
+                  ZIMBABWE ELECTRICITY TRANSMISSION
                 </Text>
-                <Text style={{ fontSize: 18, fontWeight: "700", color: colors.textPrimary }}>
-                  DocIntel Portal
+                <Text
+                  style={{
+                    fontSize: 16,
+                    fontWeight: "800",
+                    color: t.colors.text,
+                    letterSpacing: 0.3,
+                  }}
+                >
+                  DOCTEL LARGE LANGUAGE MODEL
+                </Text>
+                <Text style={{ fontSize: 9, color: t.colors.primary, fontWeight: "700", letterSpacing: 1.5 }}>
+                  & DISTRIBUTION COMPANY
                 </Text>
               </View>
             </View>
-            <Text style={{ fontSize: 18, fontWeight: "600", color: colors.textPrimary }}>
+            <DocChatAnimation />
+            <Text style={{ fontSize: 16, fontWeight: "700", color: t.colors.text, marginBottom: 4 }}>
               Sign in to continue
             </Text>
-            <Text style={{ fontSize: 13, color: colors.textMuted, marginTop: 6 }}>
-              Use your EC number or ZETDC email. Your history will be saved.
-            </Text>
             {checkingToken ? (
-              <Text style={{ marginTop: 12, color: colors.textMuted }}>Checking session...</Text>
+              <Text style={{ marginTop: 12, color: t.colors.textMuted }}>Checking session...</Text>
             ) : (
               <>
-                <View style={{ flexDirection: "row", gap: 8, marginTop: 12, marginBottom: 8 }}>
-                  <Pressable
-                    onPress={() => {
-                      setLoginMode("ec")
-                      setAuthError("")
-                      setTouched(false)
-                      setEmailSent(false)
-                      setEmailCode("")
-                    }}
-                    style={[
-                      toggleButtonStyle,
-                      loginMode === "ec" ? toggleActiveStyle : toggleInactiveStyle,
-                    ]}
-                  >
-                    <Text style={loginMode === "ec" ? toggleActiveText : toggleInactiveText}>
-                      EC + Password
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => {
-                      setLoginMode("email")
-                      setAuthError("")
-                      setTouched(false)
-                    }}
-                    style={[
-                      toggleButtonStyle,
-                      loginMode === "email" ? toggleActiveStyle : toggleInactiveStyle,
-                    ]}
-                  >
-                    <Text style={loginMode === "email" ? toggleActiveText : toggleInactiveText}>
-                      ZETDC Email
-                    </Text>
-                  </Pressable>
-                </View>
                 {loginMode === "ec" ? (
                   <>
                     <TextInput
@@ -241,10 +398,10 @@ export default function App() {
                       onChangeText={setInputValue}
                       onBlur={() => setTouched(true)}
                       placeholder="EC12345"
-                      style={inputStyle}
+                      style={inputStyle(t)}
                     />
                     {showError ? (
-                      <Text style={{ color: colors.danger, marginBottom: 8 }}>
+                      <Text style={{ color: t.colors.error, marginBottom: 8 }}>
                         EC number is required.
                       </Text>
                     ) : null}
@@ -254,10 +411,10 @@ export default function App() {
                       onBlur={() => setTouched(true)}
                       placeholder="Password"
                       secureTextEntry
-                      style={inputStyle}
+                      style={inputStyle(t)}
                     />
                     {showPasswordError ? (
-                      <Text style={{ color: colors.danger, marginBottom: 8 }}>
+                      <Text style={{ color: t.colors.error, marginBottom: 8 }}>
                         Password is required.
                       </Text>
                     ) : null}
@@ -270,10 +427,10 @@ export default function App() {
                       onBlur={() => setTouched(true)}
                       placeholder="name@zetdc.co.zw"
                       autoCapitalize="none"
-                      style={inputStyle}
+                      style={inputStyle(t)}
                     />
                     {(showEmailError || (touched && !isValidZetdcEmail)) ? (
-                      <Text style={{ color: colors.danger, marginBottom: 8 }}>
+                      <Text style={{ color: t.colors.error, marginBottom: 8 }}>
                         Enter a valid ZETDC email.
                       </Text>
                     ) : null}
@@ -285,10 +442,10 @@ export default function App() {
                           onBlur={() => setTouched(true)}
                           placeholder="6-digit code"
                           keyboardType="number-pad"
-                          style={inputStyle}
+                          style={inputStyle(t)}
                         />
                         {showEmailCodeError ? (
-                          <Text style={{ color: colors.danger, marginBottom: 8 }}>
+                          <Text style={{ color: t.colors.error, marginBottom: 8 }}>
                             Code is required.
                           </Text>
                         ) : null}
@@ -303,10 +460,10 @@ export default function App() {
                               setLoading(false)
                             }
                           }}
-                          style={secondaryButtonStyle}
+                          style={secondaryButtonStyle(t)}
                           disabled={loading}
                         >
-                          <Text style={{ color: colors.primary }}>
+                          <Text style={{ color: t.colors.primary }}>
                             Resend Code
                           </Text>
                         </Pressable>
@@ -315,7 +472,7 @@ export default function App() {
                   </>
                 )}
                 {authError ? (
-                  <Text style={{ color: colors.danger, marginBottom: 8 }}>{authError}</Text>
+                  <Text style={{ color: t.colors.error, marginBottom: 8 }}>{authError}</Text>
                 ) : null}
                 <Pressable
                   onPress={async () => {
@@ -332,6 +489,8 @@ export default function App() {
                         await setEcNumber(res.ec_number)
                         await setAuthToken(res.access_token)
                         setHasToken(true)
+                        setDisplayName(res.display_name || res.ec_number)
+                        setUserRole(res.role || "")
                         setPassword("")
                       } else {
                         if (!email.trim() || !isValidZetdcEmail) return
@@ -347,6 +506,8 @@ export default function App() {
                           await setEcNumber(res.ec_number)
                           await setAuthToken(res.access_token)
                           setHasToken(true)
+                          setDisplayName(res.display_name || res.ec_number)
+                          setUserRole(res.role || "")
                           setEmailCode("")
                         }
                       }
@@ -357,7 +518,7 @@ export default function App() {
                     }
                   }}
                   style={[
-                    primaryButtonStyle,
+                    primaryButtonStyle(t),
                     loading ? { opacity: 0.8 } : null,
                   ]}
                   disabled={loading}
@@ -381,109 +542,68 @@ export default function App() {
   )
 }
 
-const tabStyle = {
-  flex: 1,
-  paddingVertical: 10,
-  borderRadius: 8,
-  alignItems: "center",
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <ModelProvider>
+          <AppContent />
+        </ModelProvider>
+      </ThemeProvider>
+    </SafeAreaProvider>
+  )
+}
+
+
+
+const modalStyle = (t: ReturnType<typeof useTheme>["tokens"]) => ({
+  backgroundColor: t.colors.bgSecondary,
+  borderRadius: 20,
+  padding: 24,
+  width: "100%",
+  maxWidth: 420,
   borderWidth: 1,
-  borderColor: colors.border,
-} as const
+  borderColor: t.colors.borderFocus,
+  shadowColor: t.colors.primary,
+  shadowOpacity: 0.25,
+  shadowRadius: 24,
+  shadowOffset: { width: 0, height: 8 },
+  elevation: 10,
+}) as const
 
-const activeTabStyle = {
-  backgroundColor: colors.primary,
-} as const
-
-const inactiveTabStyle = {
-  backgroundColor: "#E7F0FF",
-} as const
-
-const activeTabText = {
-  color: "#FFFFFF",
-  fontWeight: "600",
-} as const
-
-const inactiveTabText = {
-  color: colors.primaryDark,
-  fontWeight: "600",
-} as const
-
-const toggleButtonStyle = {
-  flex: 1,
-  paddingVertical: 8,
-  borderRadius: 999,
-  alignItems: "center",
-} as const
-
-const toggleActiveStyle = {
-  backgroundColor: "#E7F0FF",
+const inputStyle = (t: ReturnType<typeof useTheme>["tokens"]) => ({
   borderWidth: 1,
-  borderColor: colors.primary,
-} as const
-
-const toggleInactiveStyle = {
-  backgroundColor: "#FFFFFF",
-  borderWidth: 1,
-  borderColor: colors.border,
-} as const
-
-const toggleActiveText = {
-  color: colors.textPrimary,
-  fontWeight: "600",
-  fontSize: 12,
-} as const
-
-const toggleInactiveText = {
-  color: colors.textMuted,
-  fontWeight: "600",
-  fontSize: 12,
-} as const
-
-const overlayStyle = {
-  flex: 1,
-  backgroundColor: "rgba(11,78,162,0.35)",
-  alignItems: "center",
-  justifyContent: "center",
-} as const
-
-const modalStyle = {
-  backgroundColor: "#FFFFFF",
+  borderColor: t.colors.border,
   borderRadius: 12,
-  padding: 20,
-  width: "85%",
-  borderWidth: 1,
-  borderColor: colors.border,
-  shadowColor: "#0B4EA2",
-  shadowOpacity: 0.2,
-  shadowRadius: 12,
-  shadowOffset: { width: 0, height: 6 },
-  elevation: 6,
-} as const
-
-const inputStyle = {
-  borderWidth: 1,
-  borderColor: colors.border,
-  borderRadius: 8,
-  paddingHorizontal: 12,
-  paddingVertical: 8,
-  marginTop: 12,
-  marginBottom: 8,
-  backgroundColor: "#FFFFFF",
-} as const
-
-const primaryButtonStyle = {
-  backgroundColor: colors.primary,
+  paddingHorizontal: 14,
   paddingVertical: 12,
-  borderRadius: 8,
-  alignItems: "center",
-} as const
+  marginTop: 10,
+  marginBottom: 8,
+  backgroundColor: t.colors.inputBg,
+  color: t.colors.text,
+  fontSize: 14,
+}) as const
 
-const secondaryButtonStyle = {
+const primaryButtonStyle = (t: ReturnType<typeof useTheme>["tokens"]) => ({
+  background: "transparent",
+  backgroundColor: t.colors.primary,
+  paddingVertical: 14,
+  borderRadius: 14,
+  alignItems: "center",
+  marginTop: 4,
+  shadowColor: t.colors.primary,
+  shadowOpacity: 0.4,
+  shadowRadius: 12,
+  shadowOffset: { width: 0, height: 4 },
+  elevation: 6,
+}) as const
+
+const secondaryButtonStyle = (t: ReturnType<typeof useTheme>["tokens"]) => ({
   marginTop: 8,
   borderWidth: 1,
-  borderColor: colors.primary,
+  borderColor: t.colors.borderFocus,
   paddingVertical: 10,
-  borderRadius: 8,
+  borderRadius: 12,
   alignItems: "center",
-  backgroundColor: "#FFFFFF",
-} as const
+  backgroundColor: t.colors.surfaceActive,
+}) as const

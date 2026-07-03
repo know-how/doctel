@@ -12,7 +12,7 @@ export const API_ENDPOINTS = {
 
   // Users
   USERS_ME: "/users/me",
-  USERS_ME_HISTORY: "/users/me/history",
+  USERS_ME_HISTORY: "/users/me/summary-history",
   USERS_ME_SUMMARY_HISTORY: "/users/me/summary-history",
   USERS_ME_DOCUMENTS: "/users/me/documents",
 

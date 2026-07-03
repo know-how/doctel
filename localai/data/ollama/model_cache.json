@@ -1,11 +1,11 @@
 {
   "installed": [
     "llama3.2:latest",
-    "nomic-embed-text:latest",
+    "qwen3:8b",
     "qwen3:4b",
-    "qwen3:8b"
+    "nomic-embed-text:latest"
   ],
-  "updated_at": 1776321885,
+  "updated_at": 1783067205,
   "pulls": {
     "llama3.2:3b-instruct": {
       "state": "in_progress",
@@ -14,7 +14,17 @@
     },
     "llama3.2:latest": {
       "state": "complete",
-      "updated_at": 1776262600,
+      "updated_at": 1783000876,
+      "last_line": "{\"status\":\"success\"}"
+    },
+    "qwen3:4b": {
+      "state": "complete",
+      "updated_at": 1783000860,
+      "last_line": "{\"status\":\"success\"}"
+    },
+    "qwen3:8b": {
+      "state": "complete",
+      "updated_at": 1783000865,
       "last_line": "{\"status\":\"success\"}"
     }
   }

@@ -120,3 +120,106 @@ class SummaryHistoryResponse(BaseModel):
     ec_number: str
     history: List[SummaryHistoryEntry]
 
+
+# Ask Response Models
+class Citation(BaseModel):
+    """Citation source for answer"""
+    document_id: str | None = None
+    snippet: str | None = None
+    page: int | None = None
+
+
+class CrossReference(BaseModel):
+    """Cross reference to a document"""
+    filename: str
+    reason: str = "Used as retrieval context"
+
+
+class AskResponse(BaseModel):
+    """Response from ask endpoints"""
+    answer: str
+    citations: List[Citation] = Field(default_factory=list)
+    cross_references: List[CrossReference] = Field(default_factory=list)
+    used_model: str | None = None
+    session_id: str | None = None
+
+
+class UploadedDocument(BaseModel):
+    """Uploaded document info"""
+    id: str
+    filename: str
+    status: str
+    detected_type: str | None = None
+    is_public: bool = False
+
+
+class UploadResponse(BaseModel):
+    """Response from document upload"""
+    documents: List[UploadedDocument]
+
+
+class ProjectInfo(BaseModel):
+    """Basic project information"""
+    id: str
+    name: str
+    document_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+    last_activity: str = ""
+
+
+class ProjectsListResponse(BaseModel):
+    """Response for projects list"""
+    projects: List[ProjectInfo]
+
+
+class BasicResponse(BaseModel):
+    """Simple ok/error response"""
+    ok: bool
+    error: str | None = None
+
+
+class HealthResponse(BaseModel):
+    """Health check response"""
+    status: str
+    reason: str | None = None
+    message: str | None = None
+
+
+class OllamaModelDetail(BaseModel):
+    """Detail about an Ollama model"""
+    name: str
+    size: int = 0
+    size_human: str = ""
+    family: str = ""
+    parameter_size: str = ""
+    quantization_level: str = ""
+    modified_at: str = ""
+    digest: str = ""
+    ready: bool = False
+    capabilities: List[str] = Field(default_factory=list, description="Modality capability flags: text, vision, audio, code, reasoning, embedding, fast, large")
+    display_category: str = ""
+    # Cloud/API model metadata (not used by Ollama but present for cloud models)
+    vision: bool = False
+    tool_calling: bool = False
+    max_input_tokens: int = 128000
+    max_output_tokens: int = 16000
+
+
+class ModelsAvailableResponse(BaseModel):
+    """Available models response"""
+    installed: List[str]
+    available: List[str]
+    offline: bool = False
+    default_model: str | None = None
+    embed_model: str | None = None
+    vision_model: str | None = None
+    models: List[OllamaModelDetail] = Field(default_factory=list)
+    ollama_healthy: bool = True
+    defaults: Dict[str, str] = Field(default_factory=dict)
+
+
+class ModelLabelsResponse(BaseModel):
+    """Model display labels"""
+    labels: Dict[str, str] = Field(default_factory=dict)
+

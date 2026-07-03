@@ -1,6 +1,7 @@
 import json
+import logging
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 import yaml
 from sqlalchemy import select
@@ -8,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, settings
 from app.db.models import SystemSetting
+from app.services.cache_service import cache, CacheTags
+
+logger = logging.getLogger(__name__)
 
 
 def _deep_get(d: dict, path: str) -> Any:
@@ -140,3 +144,111 @@ def restart_recommended_for_keys(keys: list[str]) -> dict[str, bool]:
     for k in keys:
         out[k] = any(k == p or k.startswith(p) for p in disruptive_prefixes)
     return out
+
+
+# ── Cache-Aware Settings Helpers ────────────────────────────────────────────
+
+
+async def get_effective_settings_cached(
+    db: AsyncSession, use_cache: bool = True
+) -> Tuple[dict, dict]:
+    """Get effective settings, using cache if available."""
+    CACHE_KEY = "effective_settings"
+    CACHE_TTL = 60  # 60 seconds
+
+    if use_cache:
+        cached = await cache.get(CACHE_KEY)
+        if cached is not None:
+            return cached["effective"], cached["sources"]
+
+    effective, sources = await get_effective_settings(db)
+    await cache.set(
+        CACHE_KEY,
+        {"effective": effective, "sources": sources},
+        ttl_seconds=CACHE_TTL,
+        tags=[CacheTags.SETTINGS],
+    )
+    return effective, sources
+
+
+async def invalidate_settings_cache() -> None:
+    """Invalidate the settings cache when settings are updated."""
+    await cache.invalidate_by_tag(CacheTags.SETTINGS)
+    logger.debug("Settings cache invalidated")
+
+
+async def save_settings_with_verification(
+    db: AsyncSession,
+    patch_flat: dict,
+    user_id: int,
+) -> Tuple[bool, Optional[str], dict]:
+    """
+    Save settings with full DB transaction verification.
+
+    Returns:
+        (success, error_message, changed_keys)
+    """
+    from app.db.database import AsyncSessionLocal
+
+    changed_keys = list(patch_flat.keys())
+    effective_before, _ = await get_effective_settings(db)
+
+    try:
+        for key, value in patch_flat.items():
+            from app.config import _deep_get_value as dgv
+            old_value = dgv(effective_before, key)
+
+            # Upsert SystemSetting row
+            res = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+            row = res.scalar_one_or_none()
+            if not row:
+                row = SystemSetting(
+                    key=key,
+                    value_json=json.dumps(value),
+                    updated_by_user_id=user_id,
+                )
+            else:
+                row.value_json = json.dumps(value)
+                row.updated_by_user_id = user_id
+            db.add(row)
+
+            # Create audit record
+            from app.db.models import SettingsAudit
+            audit = SettingsAudit(
+                key=key,
+                old_value_json=json.dumps(old_value),
+                new_value_json=json.dumps(value),
+                changed_by_user_id=user_id,
+            )
+            db.add(audit)
+
+        # Commit transaction
+        await db.commit()
+
+        # Verify the write by reading back
+        verify_ok = True
+        for key in changed_keys:
+            res = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+            row = res.scalar_one_or_none()
+            if row is None:
+                verify_ok = False
+                break
+
+        if not verify_ok:
+            # Rollback verification failed — this shouldn't happen with proper SQL
+            logger.error("Write verification failed for settings keys: %s", changed_keys)
+            return False, "Write verification failed — database did not persist changes", {}
+
+        # Invalidate cache so next read picks up changes
+        await invalidate_settings_cache()
+
+        # Apply live
+        effective_after, sources = await get_effective_settings(db)
+        apply_live_settings(effective_after)
+
+        return True, None, {"changed_keys": changed_keys, "sources": sources}
+
+    except Exception as e:
+        await db.rollback()
+        logger.error("Settings save failed (rolled back): %s", e)
+        return False, f"Database transaction failed: {e}", {}

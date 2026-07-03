@@ -133,8 +133,8 @@ class Settings(BaseModel):
     port: int = int(os.getenv("DOCINTEL_PORT", "8000"))
 
     # LLM (Ollama based)
-    text_model: str = os.getenv("DOCINTEL_TEXT_MODEL", "llama3.2:8b-instruct")
-    fallback_text_model: str = os.getenv("DOCINTEL_FALLBACK_TEXT_MODEL", "llama3.2:3b-instruct")
+    text_model: str = os.getenv("DOCINTEL_TEXT_MODEL", "qwen3:4b")
+    fallback_text_model: str = os.getenv("DOCINTEL_FALLBACK_TEXT_MODEL", "qwen3:4b")
     vision_model: str = os.getenv("DOCINTEL_VISION_MODEL", "llava:7b")
     embed_model: str = os.getenv("DOCINTEL_EMBED_MODEL", "nomic-embed-text")
     ollama_base_url: str = os.getenv("DOCINTEL_OLLAMA_BASE_URL", "http://localhost:11434")
@@ -144,9 +144,14 @@ class Settings(BaseModel):
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
+    # DeepSeek API (using OpenCode Go proxy)
+    deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
+    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash-free")
+    deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://opencode.ai/go/v1")
+
     # Model routing
     enable_qwen_9b: bool = os.getenv("DOCINTEL_ENABLE_QWEN_9B", "false").lower() == "true"
-    qwen_9b_model: str = os.getenv("DOCINTEL_QWEN_9B_MODEL", "qwen3.5:9b")
+    qwen_9b_model: str = os.getenv("DOCINTEL_QWEN_9B_MODEL", "qwen3:8b")
     automatic_switching: bool = os.getenv("DOCINTEL_AUTOMATIC_SWITCHING", "true").lower() == "true"
     min_free_ram_for_8b_mb: int = int(os.getenv("DOCINTEL_MIN_FREE_RAM_FOR_8B_MB", "6000"))
     min_free_ram_for_qwen9b_mb: int = int(os.getenv("DOCINTEL_MIN_FREE_RAM_FOR_QWEN9B_MB", "7000"))
@@ -199,8 +204,14 @@ class Settings(BaseModel):
     performance_targets: PerformanceTargets = Field(default_factory=PerformanceTargets)
 
     # Database
+    database_url: str = os.getenv("DOCINTEL_DATABASE_URL", "")
+    
     @property
     def db_url(self) -> str:
+        # If MySQL is configured via environment variable, use it
+        if self.database_url:
+            return self.database_url
+        # Otherwise fallback to SQLite
         db_path = Path(self.base_dir) / "db" / "app.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return f"sqlite+aiosqlite:///{db_path}"

@@ -4,16 +4,20 @@ import {
   DocumentAnalysisResponse,
   ChatMessage,
   SummaryHistoryEntry,
+  OllamaModelDetail,
 } from "../types/api"
 import {
   getDocumentAnalysis,
   getDocumentPrompts,
   suggestPrompts,
   chatWithDocument,
+  chatWithDocumentStream,
   chatGlobally,
+  chatGloballyStream,
   getSummaryHistory,
   uploadDocument,
   getProjects,
+  getMyDocuments,
   downloadDocumentFile,
   getIngestStatus,
   retryIngest,
@@ -26,12 +30,20 @@ import {
   getModelPullStatus,
   getBootstrapStatus,
   getUiSettings,
+  getModelLabels,
+  getModelCapabilities,
   ApiError,
   flowchartGenerate,
   chartsAnalyze,
   chartsBuild,
+  transcribeAudio,
 } from "../api/client"
+import { isCloudModel } from "../utils/modelUtils"
 import { colors } from "../theme/colors"
+import { useTheme } from "../context/ThemeContext"
+import { getTokens } from "../theme/themeTokens"
+import { RobotSearching } from "../components/RobotSearching"
+import { UserIcon } from "../components/UserIcon"
 
 interface DocumentViewPageProps {
   documentId: string | null
@@ -39,7 +51,7 @@ interface DocumentViewPageProps {
   authEpoch: number
 }
 
-type UIMessageStatus = "idle" | "sending" | "waiting" | "success" | "error"
+type UIMessageStatus = "idle" | "sending" | "waiting" | "streaming" | "success" | "done" | "error"
 type UIChatMessage = Omit<ChatMessage, "id"> & {
   id: string | number
   uiStatus?: UIMessageStatus
@@ -132,8 +144,24 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   isAuthenticated,
   authEpoch,
 }) => {
-  const apiBaseUrl =
-    (import.meta as any).env.VITE_API_BASE_URL ?? "http://localhost:8000"
+  const apiBaseUrl = (() => {
+    const raw = (import.meta as any).env.VITE_API_BASE_URL
+    if (typeof raw === "string" && raw.trim()) return raw.trim().replace(/\/+$/, "")
+    return ""
+  })()
+  const { isDark, theme: themeName } = useTheme()
+  const t = getTokens(themeName)
+  const c = t.colors
+  
+  // Refs for click-outside detection
+  const modelMenuRef = useRef<HTMLDivElement>(null)
+  const scopeMenuRef = useRef<HTMLDivElement>(null)
+  const historyMenuRef = useRef<HTMLDivElement>(null)
+  const diagramMenuRef = useRef<HTMLDivElement>(null)
+  const chartMenuRef = useRef<HTMLDivElement>(null)
+  const pullMenuRef = useRef<HTMLDivElement>(null)
+  const refDocMenuRef = useRef<HTMLDivElement>(null)
+  
   const [activeDocumentId, setActiveDocumentId] = useState(documentId)
   const [analysis, setAnalysis] = useState<DocumentAnalysisResponse | null>(null)
   const [prompts, setPrompts] = useState<string[]>([])
@@ -147,8 +175,11 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const [chatInfo, setChatInfo] = useState<string | null>(null)
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [installedModels, setInstalledModels] = useState<string[]>([])
+  const [modelDetails, setModelDetails] = useState<OllamaModelDetail[]>([])
   const [modelsOffline, setModelsOffline] = useState(false)
   const [selectedModel, setSelectedModel] = useState<string>("")
+  const [modelLabels, setModelLabels] = useState<Record<string, string>>({})
+  const [capabilityMap, setCapabilityMap] = useState<Record<string, string[]>>({})
   const [searchScope, setSearchScope] = useState<"project" | "all">("project")
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const [isScopeMenuOpen, setIsScopeMenuOpen] = useState(false)
@@ -178,6 +209,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const [pullAttempts, setPullAttempts] = useState(0)
   const [pullPercent, setPullPercent] = useState(0)
   const [pullEta, setPullEta] = useState<number | null>(null)
+  const [isRefDocOpen, setIsRefDocOpen] = useState(false)
+  const [selectedRefDocuments, setSelectedRefDocuments] = useState<string[]>([])
   const [pullStates, setPullStates] = useState<Record<string, any>>({})
   const [pollIngestMs, setPollIngestMs] = useState(1500)
   const [pollPullMs, setPollPullMs] = useState(800)
@@ -198,6 +231,26 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const [projects, setProjects] = useState<
     { id: string; name: string; document_count: number }[]
   >([])
+  const [documents, setDocuments] = useState<
+    {
+      id: string
+      filename: string
+      project_id: string | null
+      project_name: string
+      status: string
+      created_at: string
+      download_url: string
+      view_url: string
+    }[]
+  >([])
+  const [recentDocuments, setRecentDocuments] = useState<
+    {
+      id: string
+      filename: string
+      created_at: string
+      status: string
+    }[]
+  >([])
   const [selectedProjectId, setSelectedProjectId] = useState("")
   const [newProjectName, setNewProjectName] = useState("")
   const [metadataDocumentType, setMetadataDocumentType] = useState("")
@@ -212,9 +265,41 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     : GLOBAL_CHAT_SESSION_KEY
   const effectiveSearchScope: "project" | "all" = activeDocumentId ? searchScope : "all"
 
+  // Auto-load and auto-select the most recent document when authenticated
   useEffect(() => {
-    setActiveDocumentId(documentId)
-    if (!documentId) {
+    const autoLoadRecentDocs = async () => {
+      if (!isAuthenticated) return
+      try {
+        const res = await getMyDocuments()
+        const docs = res.documents || []
+        const sorted = docs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        setRecentDocuments(sorted.slice(0, 5))
+        // Auto-select the most recent document if no document is currently selected
+        // and no activeDocumentId is set yet (only on first load)
+        if (!documentId && sorted.length > 0) {
+          setActiveDocumentId(sorted[0].id)
+        }
+      } catch (e: any) {
+        console.warn("Failed to load recent documents:", e.message)
+      }
+    }
+    autoLoadRecentDocs()
+  }, [isAuthenticated, authEpoch])
+
+  useEffect(() => {
+    // Only update if documentId explicitly changes from parent
+    if (documentId) {
+      setActiveDocumentId(documentId)
+    } else if (documentId === null && activeDocumentId) {
+      // Parent explicitly cleared the document (e.g., on navigation)
+      // But don't immediately clear - let auto-select work first
+      return
+    }
+  }, [documentId])
+
+  useEffect(() => {
+    // When activeDocumentId changes, handle analysis/prompts/chat reset
+    if (!activeDocumentId) {
       setAnalysis(null)
       setPrompts(GLOBAL_SUGGESTED_PROMPTS)
       setSessionId(null)
@@ -227,7 +312,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       setLoadingAnalysis(false)
       setLoadingChat(false)
     }
-  }, [documentId])
+  }, [activeDocumentId])
 
   useEffect(() => {
     const key = sessionStorageKey
@@ -255,6 +340,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     if (!sid) return
     setIsHistoryOpen(false)
     setHistoryQuery("")
+    setChatInfo(null)
+    setError(null)
     setSessionId(sid)
     try {
       window.localStorage.setItem(sessionStorageKey, sid)
@@ -262,9 +349,19 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     }
     try {
       const history = await getChatMessages(sid, 1000)
-      setChatMessages(history.messages)
+      if (history && history.messages) {
+        setChatMessages(history.messages)
+        if (history.messages.length === 0) {
+          setChatInfo("No messages in this conversation yet.")
+        }
+      } else {
+        setChatInfo("No conversation data received from server.")
+        console.warn("Unexpected response format:", history)
+      }
     } catch (e: any) {
-      setChatInfo(e.message ?? "Failed to load conversation")
+      const errMsg = e instanceof ApiError ? `Error ${e.status}: ${e.message}` : (e?.message ?? "Failed to load conversation")
+      setChatInfo(errMsg)
+      console.error("Failed to load conversation:", e)
     }
   }
 
@@ -280,14 +377,19 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const buildDiagram = async () => {
     try {
       setError(null)
-      const res = await flowchartGenerate({ text: diagramText })
+      setLoadingChat(true)
+      const res = await flowchartGenerate({ 
+        text: diagramText,
+        model: selectedModel || undefined,
+        diagram_type: "flowchart"
+      })
       setDiagramMermaid(res.mermaid)
       setChatMessages((prev) => [
         ...prev,
         {
           id: `assistant_${Date.now()}`,
           role: "assistant",
-          content: res.mermaid,
+          content: `\`\`\`mermaid\n${res.mermaid}\n\`\`\``,
           status: "done",
           citations: [],
           created_at: "",
@@ -295,6 +397,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       ])
     } catch (e: any) {
       setError(e.message ?? "Failed to generate diagram")
+    } finally {
+      setLoadingChat(false)
     }
   }
 
@@ -386,6 +490,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         const installed = (res.installed ?? []) as string[]
         setAvailableModels(models)
         setInstalledModels(installed)
+        setModelDetails(res.models || [])
         const offline = Boolean(res.offline)
         setModelsOffline(offline)
         const stored =
@@ -394,12 +499,15 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             : null
         const fallback = res.default_model || models[0] || ""
         const allowed = offline ? installed : models
+        const chatDefault = res.defaults?.["chat"]
         const selected =
-          stored && allowed.includes(stored)
-            ? stored
-            : allowed.includes(fallback)
-              ? fallback
-              : allowed[0] || fallback
+          chatDefault && allowed.includes(chatDefault)
+            ? chatDefault
+            : stored && allowed.includes(stored)
+              ? stored
+              : allowed.includes(fallback)
+                ? fallback
+                : allowed[0] || fallback
         setSelectedModel(selected)
         if (selected && typeof window !== "undefined") {
           window.localStorage.setItem("docintel_model_preference", selected)
@@ -409,6 +517,33 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       }
     }
     loadModels()
+  }, [isAuthenticated, authEpoch])
+
+  useEffect(() => {
+    if (!isAuthenticated) return
+    const loadLabels = async () => {
+      try {
+        const res = await getModelLabels()
+        setModelLabels(res.labels || {})
+      } catch (e: any) {
+        // Silently fail, labels are optional
+        console.warn("Failed to load model labels:", e)
+      }
+    }
+    loadLabels()
+  }, [isAuthenticated, authEpoch])
+
+  useEffect(() => {
+    if (!isAuthenticated) return
+    const loadCaps = async () => {
+      try {
+        const res = await getModelCapabilities()
+        setCapabilityMap(res.capabilities || {})
+      } catch {
+        // Non-critical; capabilities are optional display
+      }
+    }
+    loadCaps()
   }, [isAuthenticated, authEpoch])
 
   useEffect(() => {
@@ -555,7 +690,22 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           setIngestStatus(null)
         }
       } catch (e: any) {
-        setError(e.message ?? "Failed to load document")
+        const errStatus = e instanceof ApiError ? e.status : null
+        const errCode = e instanceof ApiError ? e.data?.error : null
+        if (errStatus === 404 || errCode === "document_not_found" || (e?.message ?? "").toLowerCase().includes("document not found")) {
+          // Stale document ID – clear everything and let auto-select pick a valid doc
+          try {
+            if (typeof window !== "undefined" && sessionStorageKey) {
+              window.localStorage.removeItem(sessionStorageKey)
+            }
+          } catch {}
+          setSessionId(null)
+          setActiveDocumentId(null)
+          setAnalysis(null)
+          setIngestStatus(null)
+        } else {
+          setError(e.message ?? "Failed to load document")
+        }
       } finally {
         setLoadingAnalysis(false)
       }
@@ -705,6 +855,10 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         ".chat-thinking-dot:nth-child(1) { animation-delay: 0s; }",
         ".chat-thinking-dot:nth-child(2) { animation-delay: 0.2s; }",
         ".chat-thinking-dot:nth-child(3) { animation-delay: 0.4s; }",
+        "@keyframes pulse {",
+        "  0%, 100% { transform: scale(1); opacity: 1; }",
+        "  50% { transform: scale(1.05); opacity: 0.7; }",
+        "}",
       ].join("\n")
       document.head.appendChild(style)
     }
@@ -744,17 +898,21 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     loadProjects()
   }, [isMetadataOpen])
 
-  const GEMINI_MODEL_ID = "gemini-api"
+  useEffect(() => {
+    if (!isRefDocOpen) return
+    const loadDocuments = async () => {
+      try {
+        const res = await getMyDocuments()
+        setDocuments(res.documents || [])
+      } catch (e: any) {
+        setError(e.message ?? "Failed to load documents")
+      }
+    }
+    loadDocuments()
+  }, [isRefDocOpen])
 
-  const modelLabel = (m: string) => {
-    const key = (m || "").toLowerCase()
-    if (key === GEMINI_MODEL_ID) return "Gemini 2.5 Flash (API)"
-    if (key === "llama3.2:8b-instruct") return "Llama 3.2 — 8B Instruct"
-    if (key === "llama3.2:3b-instruct") return "Llama 3.2 — 3B Instruct"
-    if (key === "qwen3.5:9b") return "Qwen 3.5 — 9B"
-    if (key === "mistral:7b-instruct") return "Mistral 7B Instruct"
-    if (key === "llava:7b") return "LLaVA 7B (vision)"
-    return m
+  const modelLabel = (m: string): string => {
+    return modelLabels[m] || m
   }
 
   const handleModelChange = async (nextModel: string) => {
@@ -881,6 +1039,61 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   // True whenever we are waiting for the backend (blocks new submissions & form controls)
   const isWaiting = loadingChat || chatMessages.some((m) => m.uiStatus === "waiting")
 
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" })
+      audioChunksRef.current = []
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data)
+      }
+      mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop())
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" })
+        await transcribeRecording(blob)
+      }
+      mediaRecorderRef.current = mediaRecorder
+      mediaRecorder.start()
+      setIsRecording(true)
+    } catch {
+      setIsRecording(false)
+    }
+  }
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
+    }
+  }
+
+  const transcribeRecording = async (blob: Blob) => {
+    setIsTranscribing(true)
+    try {
+      const result = await transcribeAudio(blob)
+      const text = result.text?.trim()
+      if (text) {
+        setQuestion(text)
+      }
+    } catch {
+    } finally {
+      setIsTranscribing(false)
+    }
+  }
+
+  const toggleRecording = () => {
+    if (isRecording) {
+      stopRecording()
+    } else {
+      startRecording()
+    }
+  }
+
   const handleAsk = async (q: string) => {
     const text = q.trim()
     if (!text || isWaiting || !isAuthenticated) return
@@ -957,6 +1170,56 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         model: selectedModel,
         scope: effectiveSearchScope,
       }
+
+      const cloudModel = isCloudModel(selectedModel, modelDetails)
+
+      if (cloudModel) {
+        const streamCallbacks = {
+          onChunk: (chunk: string, _model: string, streamSid: string) => {
+            setChatMessages((prev) =>
+              prev.map((m) =>
+                m.id === thinkingId
+                  ? { ...m, content: (m.content || "") + chunk, uiStatus: "streaming" as UIMessageStatus }
+                  : m,
+              ),
+            )
+            if (streamSid && !sessionId) {
+              setSessionId(streamSid)
+              if (typeof window !== "undefined") {
+                window.localStorage.setItem(sessionStorageKey, streamSid)
+              }
+            }
+          },
+          onDone: (_fullText: string, _model: string, _streamSid: string) => {
+            setChatMessages((prev) =>
+              prev.map((m) =>
+                m.id === thinkingId
+                  ? { ...m, uiStatus: "done" as UIMessageStatus }
+                  : m,
+              ),
+            )
+            setLoadingChat(false)
+          },
+          onError: (error: string) => {
+            setChatMessages((prev) =>
+              prev.map((m) =>
+                m.id === thinkingId
+                  ? { ...m, content: `Error: ${error}`, uiStatus: "error" as UIMessageStatus }
+                  : m,
+              ),
+            )
+            setLoadingChat(false)
+          },
+        }
+
+        if (activeDocumentId) {
+          await chatWithDocumentStream(activeDocumentId, askPayload, streamCallbacks)
+        } else {
+          await chatGloballyStream(askPayload, streamCallbacks)
+        }
+        return
+      }
+
       const res = activeDocumentId
         ? await chatWithDocument(activeDocumentId, askPayload)
         : await chatGlobally(askPayload)
@@ -1019,9 +1282,23 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       const errStatus = e instanceof ApiError ? e.status : null
       const errCode = e instanceof ApiError ? e.data?.error : null
       if (errStatus === 401 || errCode === "token_expired") {
-        pendingAskRef.current = { documentId: activeDocumentId, text }
+        pendingAskRef.current = { documentId: activeDocumentId ?? "", text }
         setChatMessages((prev) => prev.filter((m) => m.id !== thinkingId))
         setChatInfo("Session expired. Please sign in again. Your message is saved.")
+      } else if (errStatus === 404 || errCode === "document_not_found" || (e?.message ?? "").toLowerCase().includes("document not found")) {
+        // Stale document ID in localStorage — clear it and prompt user to reselect
+        try {
+          if (typeof window !== "undefined" && sessionStorageKey) {
+            window.localStorage.removeItem(sessionStorageKey)
+          }
+        } catch {}
+        setSessionId(null)
+        setActiveDocumentId(null)
+        setChatMessages([])
+        replaceWithError(
+          "The document could not be found — it may have been deleted or re-uploaded. " +
+          "Please select the document again from the sidebar to continue."
+        )
       } else {
         replaceWithError(e?.message ?? "Failed to get a response. Try again.")
       }
@@ -1047,7 +1324,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const handleViewOriginal = async () => {
     try {
       setError(null)
-      const blob = await downloadDocumentFile(activeDocumentId)
+      const blob = await downloadDocumentFile(activeDocumentId!)
       const url = window.URL.createObjectURL(blob)
       window.open(url, "_blank", "noopener,noreferrer")
       window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000)
@@ -1109,6 +1386,86 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     }
   }
 
+  // Click-outside handlers for all menus and modals
+  useEffect(() => {
+    if (!isModelMenuOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
+        setIsModelMenuOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [isModelMenuOpen])
+
+  useEffect(() => {
+    if (!isScopeMenuOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (scopeMenuRef.current && !scopeMenuRef.current.contains(e.target as Node)) {
+        setIsScopeMenuOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [isScopeMenuOpen])
+
+  useEffect(() => {
+    if (!isHistoryOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node)) {
+        setIsHistoryOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [isHistoryOpen])
+
+  useEffect(() => {
+    if (!isDiagramOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (diagramMenuRef.current && !diagramMenuRef.current.contains(e.target as Node)) {
+        setIsDiagramOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [isDiagramOpen])
+
+  useEffect(() => {
+    if (!isChartOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (chartMenuRef.current && !chartMenuRef.current.contains(e.target as Node)) {
+        setIsChartOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [isChartOpen])
+
+  useEffect(() => {
+    if (!isPullOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (pullMenuRef.current && !pullMenuRef.current.contains(e.target as Node)) {
+        setIsPullOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [isPullOpen])
+
+  useEffect(() => {
+    if (!isRefDocOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (refDocMenuRef.current && !refDocMenuRef.current.contains(e.target as Node)) {
+        setIsRefDocOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [isRefDocOpen])
+
+  const [showAnalysisDrawer, setShowAnalysisDrawer] = React.useState(false)
+
   const analysisPanel = (
     <div
       style={{
@@ -1126,10 +1483,10 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           gap: 12,
         }}
       >
-        <div style={{ fontWeight: 700, color: colors.textPrimary }}>
+        <div style={{ fontWeight: 700, color: c.textPrimary }}>
           Analysis Dashboard
         </div>
-        <div style={{ fontSize: 12, color: colors.textMuted }}>
+        <div style={{ fontSize: 12, color: c.textMuted }}>
             {activeDocumentId || "No document selected"}
         </div>
       </div>
@@ -1143,7 +1500,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               <p style={{ ...bodyTextStyle, margin: 0 }}>
                 No document is selected for this account yet. Open one of your documents from My Work or upload a new document with the + button in the chat bar.
               </p>
-              <div style={{ fontSize: 13, color: colors.textMuted }}>
+              <div style={{ fontSize: 13, color: c.textMuted }}>
                 Your workspace is user-specific, so documents uploaded by other users will not appear here.
               </div>
             </div>
@@ -1159,14 +1516,14 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               <span style={{ ...pillStyle, backgroundColor: "#16A34A" }}>Ready</span>
             )}
             {analysis.status !== "READY" && (
-              <span style={{ ...pillStyle, backgroundColor: colors.primary }}>{analysis.status}</span>
+              <span style={{ ...pillStyle, backgroundColor: c.primary }}>{analysis.status}</span>
             )}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {analysis.project_name && (
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                <span style={{ ...sectionLabelStyle, minWidth: 90 }}>Project</span>
-                <span style={{ fontSize: 14, fontWeight: 600, color: colors.textPrimary }}>
+                <span style={{ ...sectionLabelStyle, minWidth: 90 }}>Repository</span>
+                <span style={{ fontSize: 14, fontWeight: 600, color: c.textPrimary }}>
                   {analysis.project_name}
                 </span>
               </div>
@@ -1174,7 +1531,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             {analysis.filename && (
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 <span style={{ ...sectionLabelStyle, minWidth: 90 }}>File</span>
-                <span style={{ fontSize: 13, color: colors.textPrimary, wordBreak: "break-all" }}>
+                <span style={{ fontSize: 13, color: c.textPrimary, wordBreak: "break-all" }}>
                   {analysis.filename}
                 </span>
               </div>
@@ -1182,13 +1539,13 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             {analysis.document_type && (
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 <span style={{ ...sectionLabelStyle, minWidth: 90 }}>Type</span>
-                <span style={{ fontSize: 13, color: colors.textPrimary }}>{analysis.document_type}</span>
+                <span style={{ fontSize: 13, color: c.textPrimary }}>{analysis.document_type}</span>
               </div>
             )}
             {analysis.document_date && (
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 <span style={{ ...sectionLabelStyle, minWidth: 90 }}>Date</span>
-                <span style={{ fontSize: 13, color: colors.textPrimary }}>{analysis.document_date}</span>
+                <span style={{ fontSize: 13, color: c.textPrimary }}>{analysis.document_date}</span>
               </div>
             )}
           </div>
@@ -1196,10 +1553,10 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       )}
 
       {loadingAnalysis && (
-        <div style={{ color: colors.textMuted }}>Loading analysis…</div>
+        <div style={{ color: c.textMuted }}>Loading analysis…</div>
       )}
       {error && (
-        <div style={{ color: colors.danger, fontSize: 13, padding: "8px 12px", borderRadius: 8, backgroundColor: "#FFF0F0", border: "1px solid #FECACA" }}>
+        <div style={{ color: c.danger, fontSize: 13, padding: "8px 12px", borderRadius: 8, backgroundColor: "#FFF0F0", border: "1px solid #FECACA" }}>
           {/* Show a friendly message instead of raw JSON from exceptions */}
           {error.startsWith("{") || error.includes("Server error")
             ? "Analysis could not complete — the AI model returned an error. The document was still ingested and you can use the chat. Retry ingestion to attempt AI analysis again."
@@ -1219,7 +1576,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             style={{
               height: 10,
               borderRadius: 999,
-              backgroundColor: colors.border,
+              backgroundColor: c.border,
               overflow: "hidden",
             }}
           >
@@ -1227,12 +1584,12 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               style={{
                 width: `${Math.min(100, Math.max(0, ingestStatus?.percent ?? 0))}%`,
                 height: "100%",
-                backgroundColor: colors.primary,
+                backgroundColor: c.primary,
               }}
             />
           </div>
           {ingestStatus?.error_message && (
-            <div style={{ marginTop: 10, color: colors.danger, fontSize: 13 }}>
+            <div style={{ marginTop: 10, color: c.danger, fontSize: 13 }}>
               {ingestStatus.error_message.startsWith("{") || ingestStatus.error_message.includes("Server error")
                 ? "AI model returned an error during analysis. Click Retry Ingestion to try again."
                 : ingestStatus.error_message}
@@ -1246,7 +1603,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 marginTop: 12,
                 padding: "8px 12px",
                 borderRadius: 999,
-                border: `1px solid ${colors.border}`,
+                border: `1px solid ${c.border}`,
                 backgroundColor: "#FFFFFF",
                 fontSize: 13,
                 cursor: "pointer",
@@ -1270,7 +1627,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 style={{
                   padding: "8px 12px",
                   borderRadius: 999,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${c.border}`,
                   backgroundColor: "#FFFFFF",
                   fontSize: 13,
                   cursor: "pointer",
@@ -1285,7 +1642,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   style={{
                     padding: "8px 12px",
                     borderRadius: 999,
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: "#FFFFFF",
                     fontSize: 13,
                     cursor: "pointer",
@@ -1306,13 +1663,13 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   <div
                     key={`${entry.document_id}-${idx}`}
                     style={{
-                      border: `1px solid ${colors.border}`,
+                      border: `1px solid ${c.border}`,
                       borderRadius: 10,
                       padding: 10,
                       backgroundColor: "#FFFFFF",
                     }}
                   >
-                    <div style={{ fontSize: 12, color: colors.textMuted }}>
+                    <div style={{ fontSize: 12, color: c.textMuted }}>
                       {entry.document_id} • {new Date(entry.created_at).toLocaleString()}
                     </div>
                     <div style={{ marginTop: 6, ...bodyTextStyle }}>
@@ -1424,8 +1781,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     backgroundColor:
                       analysis.sentiment.toLowerCase() === "negative" ||
                       analysis.sentiment.toLowerCase() === "urgent"
-                        ? colors.danger
-                        : colors.primary,
+                        ? c.danger
+                        : c.primary,
                   }}
                 >
                   {analysis.sentiment}
@@ -1454,8 +1811,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           gap: 12,
         }}
       >
-        <div style={{ fontWeight: 700, color: colors.textPrimary }}>Copilot</div>
-        <div style={{ fontSize: 12, color: colors.textMuted }}>
+        <div style={{ fontWeight: 700, color: c.textPrimary }}>Copilot</div>
+        <div style={{ fontSize: 12, color: c.textMuted }}>
           Suggested prompts and chat
         </div>
       </div>
@@ -1470,7 +1827,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 style={{
                   padding: "6px 10px",
                   borderRadius: 10,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${c.border}`,
                   backgroundColor: "#FFFFFF",
                   cursor: !isAuthenticated ? "default" : "pointer",
                   opacity: !isAuthenticated ? 0.6 : 1,
@@ -1486,7 +1843,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 style={{
                   padding: "6px 10px",
                   borderRadius: 10,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${c.border}`,
                   backgroundColor: "#FFFFFF",
                   cursor: !isAuthenticated ? "default" : "pointer",
                   opacity: !isAuthenticated ? 0.6 : 1,
@@ -1532,17 +1889,48 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           ref={chatScrollRef}
           style={{
             flex: 1,
-            overflowY: isMobile ? "visible" : "auto",
+            height: "100%",
+            maxHeight: "calc(100vh - 450px)",
+            overflowY: "auto",
             display: "flex",
             flexDirection: "column",
             gap: 12,
             scrollBehavior: "smooth",
+            paddingRight: "8px",
           }}
         >
+          {/* Recently Uploaded Documents Summary */}
+          {activeDocumentId && recentDocuments.length > 0 && chatMessages.length === 0 && (
+            <div
+              style={{
+                backgroundColor: "rgba(59, 130, 246, 0.08)",
+                border: "1px solid rgba(59, 130, 246, 0.2)",
+                borderRadius: 12,
+                padding: 12,
+                marginBottom: 8,
+              }}
+            >
+              <div style={{ fontSize: 12, fontWeight: 600, color: c.textPrimary, marginBottom: 8 }}>
+                📄 Recently Uploaded Document
+              </div>
+              <div style={{ fontSize: 13, color: c.textPrimary, marginBottom: 6 }}>
+                <strong>{recentDocuments[0]?.filename}</strong>
+              </div>
+              <div style={{ fontSize: 12, color: c.textMuted }}>
+                Uploaded: {new Date(recentDocuments[0]?.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+              </div>
+              {recentDocuments[0]?.status !== 'completed' && (
+                <div style={{ fontSize: 11, color: c.textMuted, marginTop: 6, fontStyle: 'italic' }}>
+                  Status: {recentDocuments[0]?.status}
+                </div>
+              )}
+            </div>
+          )}
+
           {chatMessages.length === 0 && (
-            <div style={{ color: colors.textMuted, fontSize: 13 }}>
+            <div style={{ color: c.textMuted, fontSize: 13 }}>
               {activeDocumentId
-                ? "No messages yet. Ask a question to start the chat."
+                ? "No messages yet. Ask a question about this document using the suggested prompts or ask your own question."
                 : "No document selected yet. Ask a general question, or open one of your documents for document-grounded chat."}
             </div>
           )}
@@ -1550,105 +1938,163 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             const isUser = m.role === "user"
             const isSystem = m.role === "system"
             const isError = m.uiStatus === "error"
-            const align = isSystem ? "center" : isUser ? "flex-end" : "flex-start"
-            const maxWidth = isSystem ? "100%" : "80%"
-            const bg = isError && isSystem
-              ? "rgba(254,226,226,0.85)"
-              : isSystem
-                ? "rgba(148,163,184,0.14)"
-                : isError && isUser
-                  ? "linear-gradient(135deg, rgba(107,114,128,1), rgba(156,163,175,1))"
-                  : isUser
-                    ? "linear-gradient(135deg, rgba(37,99,235,1), rgba(56,189,248,1))"
-                    : "#FFFFFF"
-            const color = isSystem ? colors.textPrimary : isUser ? "#FFFFFF" : colors.textPrimary
-            const border = isError && isSystem
-              ? "1px solid rgba(239,68,68,0.35)"
-              : isSystem ? `1px solid rgba(148,163,184,0.25)` : isUser ? "none" : `1px solid ${colors.border}`
-            const opacity = m.uiStatus === "waiting" ? 1 : m.status === "pending" ? 0.85 : 1
+            const opacity = m.uiStatus === "waiting" ? 1 : m.status === "pending" ? 0.88 : 1
             return (
-              <div key={String(m.id)} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div
+                key={String(m.id)}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 4,
+                  alignItems: isSystem ? "center" : isUser ? "flex-end" : "flex-start",
+                  opacity,
+                }}
+              >
+                {/* Avatar + bubble row */}
                 <div
                   style={{
-                    alignSelf: align as any,
-                    maxWidth,
-                    background: bg,
-                    color,
-                    border,
-                    padding: "8px 12px",
-                    borderRadius: 16,
-                    fontSize: 14,
-                    opacity,
-                    boxShadow: isSystem ? "none" : "0 8px 24px rgba(15,23,42,0.10)",
+                    display: "flex",
+                    alignItems: "flex-end",
+                    gap: 8,
+                    flexDirection: isUser ? "row-reverse" : "row",
+                    maxWidth: isSystem ? "90%" : "82%",
                   }}
                 >
-                  {m.uiStatus === "waiting" ? (
-                    <div style={{ padding: "4px 2px", display: "flex", alignItems: "center" }}>
-                      <span className="chat-thinking-dot" />
-                      <span className="chat-thinking-dot" />
-                      <span className="chat-thinking-dot" />
-                    </div>
-                  ) : (
-                    renderRichContent(apiBaseUrl, m.content)
-                  )}
-                  {m.uiStatus === "sending" && (
-                    <div style={{ marginTop: 4, fontSize: 11, opacity: 0.7 }}>Sending…</div>
-                  )}
-                  {m.uiStatus === "error" && isUser && (
-                    <div style={{ marginTop: 4, fontSize: 11, color: "rgba(255,200,200,0.9)" }}>⚠ Not sent</div>
-                  )}
-                  {m.retryText && (
-                    <button
-                      type="button"
-                      onClick={() => handleRetryMessage(m.retryText!, m.id)}
+                  {/* Avatar */}
+                  {!isSystem && (
+                    <div
                       style={{
-                        marginTop: 8,
-                        display: "block",
-                        fontSize: 12,
-                        padding: "4px 12px",
-                        borderRadius: 999,
-                        border: "1px solid rgba(239,68,68,0.5)",
-                        backgroundColor: "transparent",
-                        color: "#dc2626",
-                        cursor: "pointer",
+                        width: 28,
+                        height: 28,
+                        borderRadius: "50%",
+                        background: isUser
+                          ? "linear-gradient(135deg, #5B88FF, #1FE7FF)"
+                          : "linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.06))",
+                        border: isUser ? "none" : "1px solid rgba(255,255,255,0.12)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: 13,
+                        flexShrink: 0,
+                        color: isUser ? "#fff" : "rgba(255,255,255,0.7)",
+                        fontWeight: 700,
+                        boxShadow: isUser ? "0 2px 8px rgba(91,136,255,0.3)" : "none",
                       }}
                     >
-                      ↩ Retry
-                    </button>
+                      {isUser ? <UserIcon /> : "AI"[0]}
+                    </div>
                   )}
-                </div>
-                {m.created_at && (
+
+                  {/* Bubble */}
                   <div
                     style={{
-                      alignSelf: align as any,
-                      maxWidth,
-                      fontSize: 11,
-                      color: colors.textMuted,
-                      opacity: 0.75,
-                      padding: isSystem ? "0" : "0 10px",
-                      textAlign: isSystem ? "center" : isUser ? "right" : "left",
+                      padding: isSystem ? "8px 14px" : "12px 16px",
+                      borderRadius: isUser ? "18px 18px 4px 18px" : isSystem ? 10 : "4px 18px 18px 18px",
+                      background: isError && isSystem
+                        ? "rgba(239,68,68,0.12)"
+                        : isSystem
+                          ? "rgba(255,255,255,0.05)"
+                          : isError && isUser
+                            ? "rgba(107,114,128,0.5)"
+                            : isUser
+                              ? "linear-gradient(135deg, #3B6FE8 0%, #5B88FF 100%)"
+                              : "rgba(255,255,255,0.07)",
+                      border: isError && isSystem
+                        ? "1px solid rgba(239,68,68,0.25)"
+                        : isSystem
+                          ? "1px solid rgba(255,255,255,0.08)"
+                          : isUser
+                            ? "none"
+                            : "1px solid rgba(255,255,255,0.1)",
+                      color: isSystem ? "rgba(255,255,255,0.55)" : isUser ? "#FFFFFF" : "#E5E7EB",
+                      fontSize: isSystem ? 12 : 14,
+                      lineHeight: 1.6,
+                      backdropFilter: isUser ? "none" : "blur(8px)",
+                      boxShadow: isUser
+                        ? "0 4px 16px rgba(59,111,232,0.35)"
+                        : isSystem
+                          ? "none"
+                          : "0 2px 12px rgba(0,0,0,0.25)",
+                      maxWidth: "100%",
+                      wordBreak: "break-word" as const,
                     }}
                   >
-                    {m.created_at}
+                    {m.uiStatus === "waiting" ? (
+                      <RobotSearching />
+                    ) : m.uiStatus === "streaming" ? (
+                      <>
+                        {renderRichContent(apiBaseUrl, m.content)}
+                        <span style={{ display: "inline-block", width: 2, height: "1em", backgroundColor: c.primary, marginLeft: 2, animation: "streaming-blink 1s step-end infinite", verticalAlign: "text-bottom" }} />
+                      </>
+                    ) : (
+                      renderRichContent(apiBaseUrl, m.content)
+                    )}
+                    {m.uiStatus === "sending" && (
+                      <div style={{ marginTop: 4, fontSize: 11, opacity: 0.6 }}>Sending…</div>
+                    )}
+                    {m.uiStatus === "error" && isUser && (
+                      <div style={{ marginTop: 4, fontSize: 11, color: "rgba(255,200,200,0.8)" }}>⚠ Not sent</div>
+                    )}
+                    {m.retryText && (
+                      <button
+                        type="button"
+                        onClick={() => handleRetryMessage(m.retryText!, m.id)}
+                        style={{
+                          marginTop: 8,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          fontSize: 12,
+                          padding: "4px 12px",
+                          borderRadius: 999,
+                          border: "1px solid rgba(239,68,68,0.4)",
+                          background: "rgba(239,68,68,0.08)",
+                          color: "#F87171",
+                          cursor: "pointer",
+                          fontFamily: "inherit",
+                        }}
+                      >
+                        ↩ Retry
+                      </button>
+                    )}
                   </div>
-                )}
+                </div>
+
+                {/* Citations */}
                 {!isUser && !isSystem && (m.citations?.length ?? 0) > 0 && (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5, paddingLeft: 36 }}>
                     {m.citations.map((c, cidx) => (
                       <span
                         key={`${c.filename}-${c.chunk_index}-${cidx}`}
                         title={c.text}
                         style={{
                           fontSize: 11,
-                          padding: "2px 6px",
-                          borderRadius: 10,
-                          border: `1px solid ${colors.secondary}`,
-                          backgroundColor: "#FFF5D6",
+                          padding: "3px 8px",
+                          borderRadius: 8,
+                          border: "1px solid rgba(91,136,255,0.25)",
+                          background: "rgba(91,136,255,0.08)",
+                          color: "rgba(91,136,255,0.9)",
+                          cursor: "default",
                         }}
                       >
-                        Doc: {c.filename}, chunk {c.chunk_index}
+                        📄 {c.filename.length > 22 ? c.filename.slice(0, 22) + "…" : c.filename}
                       </span>
                     ))}
+                  </div>
+                )}
+
+                {/* Timestamp */}
+                {m.created_at && (
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "rgba(255,255,255,0.2)",
+                      paddingLeft: isUser ? 0 : 36,
+                      paddingRight: isUser ? 36 : 0,
+                      textAlign: isSystem ? "center" : isUser ? "right" : "left",
+                    }}
+                  >
+                    {m.created_at}
                   </div>
                 )}
               </div>
@@ -1657,15 +2103,286 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         </div>
 
         {chatInfo && (
-          <div style={{ marginTop: 10, fontSize: 12, color: colors.textMuted }}>
+          <div style={{ marginTop: 10, fontSize: 12, color: c.textMuted }}>
             {chatInfo}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            type="button"
+            onClick={() => setIsRefDocOpen(!isRefDocOpen)}
+            title="Reference documents from projects"
+            style={{
+              padding: "6px 12px",
+              borderRadius: 8,
+              border: `1px solid ${selectedRefDocuments.length > 0 ? c.accent : "rgba(255,255,255,0.12)"}`,
+              backgroundColor: selectedRefDocuments.length > 0 ? "rgba(37,99,235,0.15)" : "transparent",
+              color: selectedRefDocuments.length > 0 ? c.accent : "#999999",
+              fontSize: 12,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <span>📎 Refs</span>
+            {selectedRefDocuments.length > 0 && (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 18,
+                  height: 18,
+                  borderRadius: "50%",
+                  backgroundColor: c.accent,
+                  color: "#FFFFFF",
+                  fontSize: 10,
+                  fontWeight: "600",
+                }}
+              >
+                {selectedRefDocuments.length}
+              </span>
+            )}
+          </button>
+          {selectedRefDocuments.length > 0 && (
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", flex: 1 }}>
+              {selectedRefDocuments.map((doc) => (
+                <div
+                  key={doc}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    padding: "4px 8px",
+                    borderRadius: 6,
+                    backgroundColor: "rgba(37,99,235,0.1)",
+                    border: `1px solid ${c.accent}`,
+                    fontSize: 11,
+                    color: c.accent,
+                  }}
+                >
+                  <span>{doc.length > 20 ? doc.substring(0, 20) + "…" : doc}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedRefDocuments(selectedRefDocuments.filter((d) => d !== doc))}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      color: c.accent,
+                      cursor: "pointer",
+                      fontSize: 12,
+                      padding: 0,
+                      height: 16,
+                      width: 16,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {isRefDocOpen && (
+          <div
+            ref={refDocMenuRef}
+            style={{
+              marginBottom: 8,
+              padding: 12,
+              borderRadius: 8,
+              border: `2px solid ${c.accent}`,
+              backgroundColor: isDark ? c.bgSecondary : "#FFFFFF",
+              maxHeight: "380px",
+              overflowY: "auto",
+              boxShadow: isDark ? "0 4px 12px rgba(0,0,0,0.4)" : "0 4px 12px rgba(0,0,0,0.15)",
+            }}
+          >
+            <div style={{ fontSize: 13, color: c.text, marginBottom: 12, fontWeight: 700 }}>
+              {documents && documents.length > 0
+                ? `📁 Repositories & Documents (${documents.length} available)`
+                : "No repositories or documents available. Upload a document first."}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {documents && documents.length > 0 ? (
+                Array.from(
+                  documents.reduce((acc, doc) => {
+                    const projName = doc.project_name || "📁 Uncategorized"
+                    if (!acc.has(projName)) {
+                      acc.set(projName, [])
+                    }
+                    acc.get(projName)!.push(doc)
+                    return acc
+                  }, new Map<string, typeof documents>())
+                )
+                  .sort((a, b) => a[0].localeCompare(b[0]))
+                  .map(([projectName, projectDocs]) => {
+                    const projectSelected = projectDocs.every((d) =>
+                      selectedRefDocuments.includes(d.filename)
+                    )
+                    const projectIndeterminate =
+                      projectDocs.some((d) => selectedRefDocuments.includes(d.filename)) &&
+                      !projectSelected
+                    return (
+                      <div key={projectName} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            padding: "10px 8px",
+                            borderRadius: 6,
+                            cursor: "pointer",
+                            backgroundColor:
+                              projectSelected || projectIndeterminate
+                                ? c.surfaceActive
+                                : "transparent",
+                            fontWeight: 700,
+                            fontSize: 13,
+                            color: c.text,
+                            border: projectSelected || projectIndeterminate ? `1px solid ${c.accent}` : "1px solid transparent",
+                            transition: "all 0.15s ease",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={projectSelected}
+                            ref={(el) => {
+                              if (el) el.indeterminate = projectIndeterminate
+                            }}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedRefDocuments([
+                                  ...selectedRefDocuments,
+                                  ...projectDocs
+                                    .map((d) => d.filename)
+                                    .filter((f) => !selectedRefDocuments.includes(f)),
+                                ])
+                              } else {
+                                setSelectedRefDocuments(
+                                  selectedRefDocuments.filter(
+                                    (f) => !projectDocs.map((d) => d.filename).includes(f)
+                                  )
+                                )
+                              }
+                            }}
+                            style={{
+                              width: 14,
+                              height: 14,
+                              cursor: "pointer",
+                              accentColor: c.accent,
+                            }}
+                          />
+                          <span style={{ fontWeight: 600 }}>{projectName}</span>
+                          <span style={{ fontSize: 11, opacity: 0.7, marginLeft: "auto", color: c.textMuted, fontWeight: 500 }}>
+                            {projectDocs.length} doc{projectDocs.length !== 1 ? "s" : ""}
+                          </span>
+                        </label>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginLeft: 24 }}>
+                          {projectDocs
+                            .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                            .map((doc) => {
+                              const docDate = new Date(doc.created_at)
+                              const dateStr = docDate.toLocaleDateString()
+                              return (
+                                <label
+                                  key={doc.id}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 8,
+                                    padding: "7px 8px",
+                                    borderRadius: 4,
+                                    cursor: "pointer",
+                                    backgroundColor: selectedRefDocuments.includes(doc.filename)
+                                      ? c.surfaceActive
+                                      : (isDark ? "transparent" : "#F9F9F9"),
+                                    fontSize: 12,
+                                    color: c.text,
+                                    border: selectedRefDocuments.includes(doc.filename)
+                                      ? `1px solid ${c.accent}`
+                                      : `1px solid ${c.border}`,
+                                    transition: "all 0.15s ease",
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedRefDocuments.includes(doc.filename)}
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setSelectedRefDocuments([
+                                          ...selectedRefDocuments,
+                                          doc.filename,
+                                        ])
+                                      } else {
+                                        setSelectedRefDocuments(
+                                          selectedRefDocuments.filter(
+                                            (d) => d !== doc.filename
+                                          )
+                                        )
+                                      }
+                                    }}
+                                    style={{
+                                      width: 16,
+                                      height: 16,
+                                      cursor: "pointer",
+                                      accentColor: c.accent,
+                                      flexShrink: 0,
+                                    }}
+                                  />
+                                  <span
+                                    style={{
+                                      flex: 1,
+                                      minWidth: 0,
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                      fontWeight: 500,
+                                    }}
+                                  >
+                                    📄 {doc.filename}
+                                  </span>
+                                  <span
+                                    style={{
+                                      opacity: 0.75,
+                                      whiteSpace: "nowrap",
+                                      fontSize: 11,
+                                      color: c.textMuted,
+                                      fontWeight: 400,
+                                    }}
+                                  >
+                                    {dateStr}
+                                  </span>
+                                </label>
+                              )
+                            })}
+                        </div>
+                      </div>
+                    )
+                  })
+              ) : (
+                <div style={{ fontSize: 13, color: "#666666", padding: "12px", textAlign: "center", fontWeight: 500 }}>
+                  ℹ️ No projects or documents found. Create a project and upload documents to get started.
+                </div>
+              )}
+            </div>
           </div>
         )}
 
         <form
           onSubmit={(e) => {
             e.preventDefault()
-            handleAsk(question)
+            let questionWithRefs = question
+            if (selectedRefDocuments.length > 0) {
+              questionWithRefs = `[Referencing: ${selectedRefDocuments.join(", ")}]\n\n${question}`
+            }
+            handleAsk(questionWithRefs)
           }}
           style={{
             display: "flex",
@@ -1679,6 +2396,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             width: "100%",
             boxSizing: "border-box",
             overflow: "visible",
+            flexShrink: 0,
           }}
         >
           <button
@@ -1711,7 +2429,13 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             type="text"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder={activeDocumentId ? "Ask a question about this document…" : "Ask anything about the organization, prior learning, or the web…"}
+            placeholder={
+              selectedRefDocuments.length > 0
+                ? `Ask about the referenced document${selectedRefDocuments.length > 1 ? "s" : ""}…`
+                : activeDocumentId
+                  ? "Ask a question about this document…"
+                  : "Ask anything about the organization, prior learning, or the web…"
+            }
             disabled={isWaiting || !isAuthenticated}
             style={{
               flex: 1,
@@ -1725,7 +2449,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               outline: "none",
             }}
           />
-          <div style={{ position: "relative", flexShrink: 0 }}>
+          <div style={{ position: "relative", flexShrink: 0 }} ref={scopeMenuRef}>
             <button
               type="button"
               onClick={() => setIsScopeMenuOpen((v) => !v)}
@@ -1750,8 +2474,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 {!activeDocumentId
                   ? "Scope: Org knowledge"
                   : effectiveSearchScope === "all"
-                    ? "Scope: All projects"
-                    : "Scope: This project"}
+                    ? "Scope: All repositories"
+                    : "Scope: This repository"}
               </span>
               <span style={{ opacity: 0.8 }}>▾</span>
             </button>
@@ -1764,7 +2488,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   width: 220,
                   backgroundColor: "#FFFFFF",
                   borderRadius: 12,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${c.border}`,
                   boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
                   padding: 8,
                   zIndex: 80,
@@ -1785,14 +2509,14 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     textAlign: "left",
                     padding: "10px 10px",
                     borderRadius: 10,
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: effectiveSearchScope === "project" ? "#E7F0FF" : "#FFFFFF",
                     cursor: !activeDocumentId ? "default" : "pointer",
                     opacity: !activeDocumentId ? 0.55 : 1,
                     fontSize: 13,
                   }}
                 >
-                  This project
+                  This repository
                 </button>
                 <button
                   type="button"
@@ -1805,18 +2529,18 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     textAlign: "left",
                     padding: "10px 10px",
                     borderRadius: 10,
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: effectiveSearchScope === "all" ? "#E7F0FF" : "#FFFFFF",
                     cursor: "pointer",
                     fontSize: 13,
                   }}
                 >
-                  {activeDocumentId ? "All projects" : "Organization knowledge + web"}
+                  {activeDocumentId ? "All repositories" : "Organization knowledge + web"}
                 </button>
               </div>
             )}
           </div>
-          <div style={{ position: "relative", flexShrink: 0 }}>
+          <div style={{ position: "relative", flexShrink: 0 }} ref={historyMenuRef}>
             <button
               type="button"
               onClick={() => {
@@ -1854,7 +2578,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   overflowY: "auto",
                   backgroundColor: "#FFFFFF",
                   borderRadius: 12,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${c.border}`,
                   boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
                   padding: 10,
                   zIndex: 80,
@@ -1872,14 +2596,14 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     width: "100%",
                     padding: "10px 10px",
                     borderRadius: 10,
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     fontSize: 13,
                     outline: "none",
                     boxSizing: "border-box",
                   }}
                 />
                 {historyLoading ? (
-                  <div style={{ fontSize: 12, color: colors.textMuted }}>Loading…</div>
+                  <div style={{ fontSize: 12, color: c.textMuted }}>Loading…</div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {historySessions
@@ -1904,7 +2628,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                             textAlign: "left",
                             padding: "10px 10px",
                             borderRadius: 10,
-                            border: `1px solid ${colors.border}`,
+                            border: `1px solid ${c.border}`,
                             backgroundColor: "#FFFFFF",
                             cursor: "pointer",
                             display: "flex",
@@ -1912,23 +2636,23 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                             gap: 4,
                           }}
                         >
-                          <div style={{ fontSize: 13, color: colors.textPrimary, fontWeight: 700 }}>
+                          <div style={{ fontSize: 13, color: c.textPrimary, fontWeight: 700 }}>
                             {s.title || s.document_id || "Conversation"}
                           </div>
-                          <div style={{ fontSize: 12, color: colors.textMuted }}>
+                <div style={{ fontSize: 12, color: c.textMuted }}>
                             {(s.scope || "document").toUpperCase()} • {s.model || "model"} • {s.updated_at || ""}
                           </div>
                         </button>
                       ))}
                     {historySessions.length === 0 && (
-                      <div style={{ fontSize: 12, color: colors.textMuted }}>No conversations yet.</div>
+                      <div style={{ fontSize: 12, color: c.textMuted }}>No conversations yet.</div>
                     )}
                   </div>
                 )}
               </div>
             )}
           </div>
-          <div style={{ position: "relative", flexShrink: 0 }}>
+          <div style={{ position: "relative", flexShrink: 0 }} ref={modelMenuRef}>
             <button
               type="button"
               onClick={() => setIsModelMenuOpen((v) => !v)}
@@ -1970,10 +2694,10 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   width: 320,
                   maxHeight: 320,
                   overflowY: "auto",
-                  backgroundColor: "#FFFFFF",
+                  backgroundColor: isDark ? c.bgSecondary : "#FFFFFF",
                   borderRadius: 12,
-                  border: `1px solid ${colors.border}`,
-                  boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+                  border: `1px solid ${c.border}`,
+                  boxShadow: isDark ? "0 10px 30px rgba(0,0,0,0.5)" : "0 10px 30px rgba(0,0,0,0.25)",
                   padding: 10,
                   zIndex: 80,
                   display: "flex",
@@ -1982,22 +2706,22 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 }}
               >
                 {modelsOffline && (
-                  <div style={{ fontSize: 12, color: colors.textMuted }}>
+                  <div style={{ fontSize: 12, color: c.textMuted }}>
                     Offline (installed models only)
                   </div>
                 )}
-                {(modelsOffline
-                  ? [...installedModels, ...(installedModels.includes(GEMINI_MODEL_ID) ? [] : availableModels.filter(a => a === GEMINI_MODEL_ID))]
-                  : availableModels
-                ).map((m) => {
-                  const isGemini = m === GEMINI_MODEL_ID
+                {([...new Set(modelsOffline
+                    ? installedModels
+                    : availableModels
+                  )]).map((m, i) => {
+                  const cloudApi = isCloudModel(m, modelDetails)
                   const installed = installedModels.includes(m)
                   const ps = pullStates[m]
                   const isPulling =
                     ps && ps.state && !["success", "failed", "idle"].includes(String(ps.state)) && !installed
                   const percent = isPulling ? Number(ps.percent || 0) : 0
                   const badge =
-                    isGemini
+                    cloudApi
                       ? "API"
                       : installed
                         ? "Installed"
@@ -2010,10 +2734,10 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                               : "Pull"
                   return (
                     <button
-                      key={m}
+                      key={i}
                       type="button"
                       onClick={() => {
-                        if (!isGemini && !installed) {
+                        if (!cloudApi && !installed) {
                           openPullModal(m)
                           return
                         }
@@ -2024,8 +2748,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                         textAlign: "left",
                         padding: "10px 10px",
                         borderRadius: 10,
-                        border: `1px solid ${colors.border}`,
-                        backgroundColor: m === selectedModel ? "#E7F0FF" : "#FFFFFF",
+                        border: `1px solid ${c.border}`,
+                        backgroundColor: m === selectedModel ? c.surfaceActive : (isDark ? "transparent" : "#FFFFFF"),
                         cursor: "pointer",
                         display: "flex",
                         justifyContent: "space-between",
@@ -2033,27 +2757,74 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                         gap: 10,
                       }}
                     >
-                      <span style={{ fontSize: 13, color: colors.textPrimary }}>
+                      <span style={{ fontSize: 13, color: c.text }}>
                         {modelLabel(m)}
                       </span>
-                      <span
-                        style={{
-                          fontSize: 11,
-                          padding: "2px 8px",
-                          borderRadius: 999,
-                          border: `1px solid ${isGemini ? "#1a73e8" : installed ? colors.primary : colors.border}`,
-                          backgroundColor: isGemini ? "#e8f0fe" : installed ? "#E7F0FF" : "#F4F6F8",
-                          color: isGemini ? "#1a73e8" : installed ? colors.primaryDark : colors.textMuted,
-                        }}
-                      >
-                        {badge}
-                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, justifyContent: "flex-end" }}>
+                        {(capabilityMap[m] || []).slice(0, 3).map(cap => (
+                          <span
+                            key={cap}
+                            style={{
+                              fontSize: 10,
+                              padding: "1px 5px",
+                              borderRadius: 4,
+                              border: `1px solid ${c.border}`,
+                              backgroundColor: isDark ? c.surface : "#F8FAFC",
+                              color: c.textMuted,
+                              lineHeight: "16px",
+                            }}
+                          >
+                            {cap === "reasoning" ? "🧠" : cap === "vision" ? "👁️" : cap === "audio" ? "🎤" : cap === "code" ? "💻" : cap === "fast" ? "⚡" : cap === "large" ? "🐘" : cap}
+                          </span>
+                        ))}
+                        <span
+                          style={{
+                            fontSize: 11,
+                            padding: "2px 8px",
+                            borderRadius: 999,
+                            border: `1px solid ${cloudApi ? "#10b981" : installed ? c.primary : c.border}`,
+                            backgroundColor: cloudApi ? (isDark ? "rgba(16,185,129,0.18)" : "#ecfdf5") : installed ? c.surfaceActive : (isDark ? c.surface : "#F4F6F8"),
+                            color: cloudApi ? "#10b981" : installed ? c.primary : c.textMuted,
+                          }}
+                        >
+                          {badge}
+                        </span>
+                      </div>
                     </button>
                   )
                 })}
               </div>
             )}
           </div>
+          {isTranscribing && (
+            <div style={{
+              fontSize: 12, color: "#FFFFFF", whiteSpace: "nowrap",
+              opacity: 0.8,
+            }}>
+              Transcribing...
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={toggleRecording}
+            disabled={isTranscribing}
+            title={isRecording ? "Stop recording" : "Record voice message"}
+            style={{
+              width: 38,
+              height: 38,
+              borderRadius: "50%",
+              border: "none",
+              backgroundColor: isRecording ? "#EF4444" : "#2A2A2A",
+              color: "#FFFFFF",
+              fontSize: 16,
+              cursor: isTranscribing ? "default" : "pointer",
+              opacity: isTranscribing ? 0.5 : 1,
+              flexShrink: 0,
+              transition: "all 0.2s ease",
+            }}
+          >
+            {isRecording ? "⏹" : "🎙"}
+          </button>
           <button
             type="submit"
             disabled={isWaiting || !isAuthenticated}
@@ -2074,6 +2845,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         </form>
         {isPullOpen && (
           <div
+            ref={pullMenuRef}
             style={{
               position: "fixed",
               inset: 0,
@@ -2106,7 +2878,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   type="button"
                   onClick={() => setIsPullOpen(false)}
                   style={{
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: "#FFFFFF",
                     borderRadius: 10,
                     padding: "6px 10px",
@@ -2122,24 +2894,24 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     fontSize: 12,
                     padding: "2px 10px",
                     borderRadius: 999,
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: "#F4F6F8",
-                    color: colors.textPrimary,
+                    color: c.textPrimary,
                   }}
                 >
                   {pullStatus || "idle"} {pullAttempts ? `(attempt ${pullAttempts})` : ""}
                 </span>
-                <span style={{ fontSize: 12, color: colors.textMuted }}>
+                <span style={{ fontSize: 12, color: c.textMuted }}>
                   {pullEta != null ? `ETA ~${pullEta}s` : "Pulls can be large (10–20GB)."}
                 </span>
                 {pullStates[pullModel]?.resume_supported && (
-                  <span style={{ fontSize: 12, color: colors.textMuted }}>
+                  <span style={{ fontSize: 12, color: c.textMuted }}>
                     Resume supported
                   </span>
                 )}
               </div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                <div style={{ fontSize: 28, fontWeight: 800, color: colors.textPrimary }}>
+                <div style={{ fontSize: 28, fontWeight: 800, color: c.textPrimary }}>
                   {Math.max(0, Math.min(100, pullPercent))}%
                 </div>
                 <div style={{ flex: 1 }}>
@@ -2149,19 +2921,19 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                       borderRadius: 999,
                       backgroundColor: "#EEF2F7",
                       overflow: "hidden",
-                      border: `1px solid ${colors.border}`,
+                      border: `1px solid ${c.border}`,
                     }}
                   >
                     <div
                       style={{
                         height: "100%",
                         width: `${Math.max(0, Math.min(100, pullPercent))}%`,
-                        backgroundColor: pullError ? colors.danger : colors.primary,
+                        backgroundColor: pullError ? c.danger : c.primary,
                         transition: "width 200ms linear",
                       }}
                     />
                   </div>
-                  <div style={{ marginTop: 6, fontSize: 12, color: colors.textMuted }}>
+                  <div style={{ marginTop: 6, fontSize: 12, color: c.textMuted }}>
                     {pullStatus === "verifying"
                       ? "Verifying / extracting…"
                       : pullStatus === "retrying"
@@ -2175,7 +2947,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 </div>
               </div>
               {pullError && (
-                <div style={{ color: colors.danger, fontSize: 13 }}>{pullError}</div>
+                <div style={{ color: c.danger, fontSize: 13 }}>{pullError}</div>
               )}
               <div
                 style={{
@@ -2200,7 +2972,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   style={{
                     padding: "10px 12px",
                     borderRadius: 10,
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: "#FFFFFF",
                     cursor: modelsOffline ? "default" : "pointer",
                     opacity: modelsOffline || (pullStatus !== "failed" && pullStatus !== "idle") ? 0.6 : 1,
@@ -2214,6 +2986,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         )}
         {isDiagramOpen && (
           <div
+            ref={diagramMenuRef}
             style={{
               position: "fixed",
               inset: 0,
@@ -2244,7 +3017,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   type="button"
                   onClick={() => setIsDiagramOpen(false)}
                   style={{
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: "#FFFFFF",
                     borderRadius: 10,
                     padding: "6px 10px",
@@ -2262,7 +3035,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   width: "100%",
                   height: 180,
                   borderRadius: 12,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${c.border}`,
                   padding: 12,
                   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
                   fontSize: 12,
@@ -2280,7 +3053,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     padding: "10px 12px",
                     borderRadius: 10,
                     border: "none",
-                    backgroundColor: colors.primary,
+                    backgroundColor: c.primary,
                     color: "#FFFFFF",
                     cursor: loadingChat || !diagramText.trim() ? "default" : "pointer",
                     opacity: loadingChat || !diagramText.trim() ? 0.6 : 1,
@@ -2311,6 +3084,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         )}
         {isChartOpen && (
           <div
+            ref={chartMenuRef}
             style={{
               position: "fixed",
               inset: 0,
@@ -2341,7 +3115,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   type="button"
                   onClick={() => setIsChartOpen(false)}
                   style={{
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: "#FFFFFF",
                     borderRadius: 10,
                     padding: "6px 10px",
@@ -2362,32 +3136,32 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               {chartColumns.length > 0 && (
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
                   <div>
-                    <div style={{ fontSize: 12, color: colors.textMuted, marginBottom: 4 }}>Chart type</div>
+                    <div style={{ fontSize: 12, color: c.textMuted, marginBottom: 4 }}>Chart type</div>
                     <select
                       value={chartType}
                       onChange={(e) => setChartType(e.target.value)}
-                      style={{ width: "100%", padding: 8, borderRadius: 10, border: `1px solid ${colors.border}` }}
+                      style={{ width: "100%", padding: 8, borderRadius: 10, border: `1px solid ${c.border}` }}
                     >
-                      <option value="bar">Bar</option>
-                      <option value="line">Line</option>
+                      <option value="bar" style={{ backgroundColor: c.bgSecondary, color: c.text }}>Bar</option>
+                      <option value="line" style={{ backgroundColor: c.bgSecondary, color: c.text }}>Line</option>
                     </select>
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: colors.textMuted, marginBottom: 4 }}>X axis</div>
+                    <div style={{ fontSize: 12, color: c.textMuted, marginBottom: 4 }}>X axis</div>
                     <select
                       value={chartX}
                       onChange={(e) => setChartX(e.target.value)}
-                      style={{ width: "100%", padding: 8, borderRadius: 10, border: `1px solid ${colors.border}` }}
+                      style={{ width: "100%", padding: 8, borderRadius: 10, border: `1px solid ${c.border}` }}
                     >
-                      {chartColumns.map((c) => (
-                        <option key={c} value={c}>
+                      {chartColumns.map((col) => (
+                        <option key={col} value={col} style={{ backgroundColor: c.bgSecondary, color: c.text }}>
                           {c}
                         </option>
                       ))}
                     </select>
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: colors.textMuted, marginBottom: 4 }}>Y series</div>
+                    <div style={{ fontSize: 12, color: c.textMuted, marginBottom: 4 }}>Y series</div>
                     <select
                       multiple
                       value={chartY}
@@ -2395,10 +3169,10 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                         const selected = Array.from(e.target.selectedOptions).map((o) => o.value)
                         setChartY(selected)
                       }}
-                      style={{ width: "100%", padding: 8, borderRadius: 10, border: `1px solid ${colors.border}`, height: 90 }}
+                      style={{ width: "100%", padding: 8, borderRadius: 10, border: `1px solid ${c.border}`, height: 90 }}
                     >
-                      {(chartNumeric.length ? chartNumeric : chartColumns).map((c) => (
-                        <option key={c} value={c}>
+                      {(chartNumeric.length ? chartNumeric : chartColumns).map((col) => (
+                        <option key={col} value={col} style={{ backgroundColor: c.bgSecondary, color: c.text }}>
                           {c}
                         </option>
                       ))}
@@ -2415,7 +3189,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     padding: "10px 12px",
                     borderRadius: 10,
                     border: "none",
-                    backgroundColor: colors.primary,
+                    backgroundColor: c.primary,
                     color: "#FFFFFF",
                     cursor: !chartFile || chartRows.length === 0 ? "default" : "pointer",
                     opacity: !chartFile || chartRows.length === 0 ? 0.6 : 1,
@@ -2450,7 +3224,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           >
             <div
               style={{
-                backgroundColor: "#FFFFFF",
+                backgroundColor: isDark ? c.bgSecondary : "#FFFFFF",
                 borderRadius: 12,
                 padding: 16,
                 width: "100%",
@@ -2461,7 +3235,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 gap: 12,
               }}
             >
-              <div style={{ fontWeight: 600 }}>Upload document</div>
+              <div style={{ fontWeight: 700, fontSize: 16, color: c.text, marginBottom: 4 }}>Upload to Repository</div>
+              <div style={{ fontSize: 13, color: c.textMuted, marginBottom: 8 }}>Select an existing repository or create a new one.</div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <select
                   value={selectedProjectId}
@@ -2471,31 +3246,40 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     minWidth: 200,
                     padding: "10px 12px",
                     borderRadius: 10,
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     fontSize: 14,
-                    backgroundColor: "#FFFFFF",
+                    color: c.text,
+                    backgroundColor: isDark ? c.inputBg : "#FFFFFF",
+                    WebkitAppearance: "none",
+                    MozAppearance: "none",
+                    appearance: "none",
+                    backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23${isDark ? 'ffffff' : '0a1628'}40' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                    backgroundPosition: "right 10px center",
+                    backgroundRepeat: "no-repeat",
+                    backgroundSize: "16px",
+                    paddingRight: "32px",
                   }}
                 >
-                  <option value="">No project</option>
+                  <option value="">No repository</option>
                   {projects.map((project) => (
                     <option key={project.id} value={project.id}>
                       {project.name}
                     </option>
                   ))}
-                  <option value="new">New project…</option>
+                  <option value="new">New repository…</option>
                 </select>
                 {selectedProjectId === "new" && (
                   <input
                     type="text"
                     value={newProjectName}
                     onChange={(e) => setNewProjectName(e.target.value)}
-                    placeholder="New project name"
+                    placeholder="New repository name"
                     style={{
                       flex: 1,
                       minWidth: 200,
                       padding: "10px 12px",
                       borderRadius: 10,
-                      border: `1px solid ${colors.border}`,
+                      border: `1px solid ${c.border}`,
                       fontSize: 14,
                     }}
                   />
@@ -2509,7 +3293,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 style={{
                   padding: "10px 12px",
                   borderRadius: 10,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${c.border}`,
                   fontSize: 14,
                 }}
               />
@@ -2520,7 +3304,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 style={{
                   padding: "10px 12px",
                   borderRadius: 10,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${c.border}`,
                   fontSize: 14,
                 }}
               />
@@ -2549,7 +3333,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   style={{
                     padding: "8px 14px",
                     borderRadius: 999,
-                    border: `1px solid ${colors.border}`,
+                    border: `1px solid ${c.border}`,
                     backgroundColor: "#FFFFFF",
                     fontSize: 13,
                     cursor: "pointer",
@@ -2565,7 +3349,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     padding: "8px 14px",
                     borderRadius: 999,
                     border: "none",
-                    backgroundColor: colors.primary,
+                    backgroundColor: c.primary,
                     color: "#FFFFFF",
                     fontSize: 13,
                     cursor:
@@ -2584,76 +3368,100 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   )
 
   return (
-    <div style={{ position: "relative" }}>
+    <div style={{ position: "relative", height: isMobile ? "auto" : "calc(100vh - 64px - 48px)", display: "flex", flexDirection: "column" }}>
+      {/* Bootstrap progress banner */}
       {bootstrapRunning && (
         <div
           style={{
             position: "fixed",
-            inset: 0,
-            backgroundColor: "rgba(0,0,0,0.25)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: 16,
+            top: 72,
+            left: "50%",
+            transform: "translateX(-50%)",
+            width: "90%",
+            maxWidth: 520,
+            padding: "12px 16px",
+            borderRadius: 12,
+            background: "rgba(15,17,23,0.95)",
+            border: "1px solid rgba(91,136,255,0.2)",
+            backdropFilter: "blur(16px)",
+            boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
             zIndex: 70,
             pointerEvents: "none",
           }}
         >
-          <div
-            style={{
-              backgroundColor: "#FFFFFF",
-              borderRadius: 12,
-              padding: 12,
-              border: `1px solid ${colors.border}`,
-              boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
-              width: "100%",
-              maxWidth: 520,
-            }}
-          >
-            <div style={{ fontWeight: 800, color: colors.textPrimary }}>
-              Preparing knowledge base
-            </div>
-            <div style={{ fontSize: 12, color: colors.textMuted, marginTop: 4 }}>
-              {bootstrapPercent}% • You can keep using the app while indexing runs.
-            </div>
+          <div style={{ fontWeight: 700, color: "#E5E7EB", fontSize: 14, marginBottom: 4 }}>
+            🧠 Preparing knowledge base — {bootstrapPercent}%
+          </div>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8 }}>
+            You can keep using the app while indexing runs.
+          </div>
+          <div style={{ height: 6, borderRadius: 999, background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
             <div
               style={{
-                height: 8,
-                borderRadius: 999,
-                backgroundColor: "#EEF2F7",
-                overflow: "hidden",
-                marginTop: 10,
+                width: `${Math.max(0, Math.min(100, bootstrapPercent))}%`,
+                height: "100%",
+                background: "linear-gradient(90deg, #5B88FF, #1FE7FF)",
+                transition: "width 0.5s ease",
               }}
-            >
-              <div
-                style={{
-                  width: `${Math.max(0, Math.min(100, bootstrapPercent))}%`,
-                  height: "100%",
-                  backgroundColor: colors.primary,
-                }}
-              />
-            </div>
+            />
           </div>
         </div>
       )}
+
+      {/* Analysis drawer toggle button */}
+      {analysis && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8, flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={() => setShowAnalysisDrawer((v) => !v)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "6px 14px",
+              borderRadius: 10,
+              border: showAnalysisDrawer
+                ? "1px solid rgba(91,136,255,0.4)"
+                : "1px solid rgba(255,255,255,0.1)",
+              background: showAnalysisDrawer
+                ? "rgba(91,136,255,0.12)"
+                : "rgba(255,255,255,0.04)",
+              color: showAnalysisDrawer ? "#5B88FF" : "rgba(255,255,255,0.5)",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              transition: "all 0.2s ease",
+            }}
+          >
+            <span>📊</span>
+            <span>{showAnalysisDrawer ? "Hide Analysis" : "Show Analysis"}</span>
+          </button>
+        </div>
+      )}
+
+      {/* Main layout */}
       <div
         style={{
+          flex: 1,
           display: "grid",
-          gridTemplateColumns: isMobile
-            ? "minmax(0, 1fr)"
-            : "minmax(0, 2fr) minmax(0, 3fr)",
+          gridTemplateColumns:
+            isMobile || !showAnalysisDrawer
+              ? "minmax(0, 1fr)"
+              : "minmax(0, 2fr) minmax(0, 3fr)",
           gap: 20,
-          height: isMobile ? "auto" : "calc(100vh - 64px - 48px)",
+          minHeight: 0,
+          transition: "grid-template-columns 0.3s ease",
         }}
       >
         {isMobile ? (
           <>
             {copilotPanel}
-            {analysisPanel}
+            {showAnalysisDrawer && analysisPanel}
           </>
         ) : (
           <>
-            {analysisPanel}
+            {showAnalysisDrawer && analysisPanel}
             {copilotPanel}
           </>
         )}
@@ -2663,66 +3471,79 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
 }
 
 const cardStyle: React.CSSProperties = {
-  backgroundColor: colors.surface,
-  borderRadius: 12,
-  padding: 16,
-  border: `1px solid ${colors.border}`,
-  boxShadow: "0 4px 14px rgba(11,78,162,0.08)",
+  background: "rgba(255,255,255,0.05)",
+  backdropFilter: "blur(12px)",
+  borderRadius: 16,
+  padding: 18,
+  border: "1px solid rgba(255,255,255,0.08)",
+  boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
 }
 
 const cardHeaderStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
-  marginBottom: 8,
-  fontWeight: 600,
-  color: colors.textPrimary,
+  marginBottom: 12,
+  fontWeight: 700,
+  color: "#E5E7EB",
+  fontSize: 14,
 }
 
 const bodyTextStyle: React.CSSProperties = {
   fontSize: 14,
-  color: colors.textPrimary,
+  color: "rgba(255,255,255,0.7)",
+  lineHeight: 1.6,
 }
 
 const sectionLabelStyle: React.CSSProperties = {
-  fontSize: 12,
-  fontWeight: 600,
+  fontSize: 11,
+  fontWeight: 700,
   textTransform: "uppercase",
-  color: colors.textMuted,
-  marginBottom: 4,
+  letterSpacing: "0.08em",
+  color: "rgba(255,255,255,0.35)",
+  marginBottom: 6,
 }
 
 const chipStyle: React.CSSProperties = {
-  padding: "4px 8px",
-  borderRadius: 16,
-  backgroundColor: "#E7F0FF",
-  color: colors.primaryDark,
+  padding: "4px 10px",
+  borderRadius: 99,
+  background: "rgba(91,136,255,0.15)",
+  border: "1px solid rgba(91,136,255,0.25)",
+  color: "#93B4FF",
   fontSize: 12,
+  fontWeight: 500,
 }
 
 const chipOutlineStyle: React.CSSProperties = {
-  padding: "4px 8px",
-  borderRadius: 16,
-  border: `1px solid ${colors.primary}`,
-  color: colors.primaryDark,
+  padding: "4px 10px",
+  borderRadius: 99,
+  border: "1px solid rgba(31,231,255,0.25)",
+  background: "rgba(31,231,255,0.08)",
+  color: "#67E8FF",
   fontSize: 12,
-  backgroundColor: colors.surface,
+  fontWeight: 500,
 }
 
 const pillStyle: React.CSSProperties = {
   fontSize: 11,
-  padding: "2px 8px",
+  padding: "2px 10px",
   borderRadius: 999,
-  backgroundColor: "#FFE6B7",
-  color: colors.primaryDark,
+  background: "rgba(245,158,11,0.15)",
+  border: "1px solid rgba(245,158,11,0.25)",
+  color: "#FCD34D",
+  fontWeight: 600,
 }
 
 const promptChipButtonStyle: React.CSSProperties = {
-  padding: "6px 10px",
-  borderRadius: 999,
-  border: "none",
-  backgroundColor: "#FFE6B7",
-  color: colors.primaryDark,
+  padding: "8px 14px",
+  borderRadius: 10,
+  border: "1px solid rgba(245,158,11,0.2)",
+  background: "rgba(245,158,11,0.08)",
+  color: "rgba(252,211,77,0.9)",
   fontSize: 13,
   cursor: "pointer",
+  textAlign: "left",
+  lineHeight: 1.4,
+  transition: "all 0.2s ease",
+  fontFamily: "inherit",
 }

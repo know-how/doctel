@@ -8,6 +8,7 @@ export const colors = {
   primary: "#0B4EA2",       // Navy blue (logo outer ring)
   primaryDark: "#003087",   // Deeper navy
   secondary: "#FDB813",     // Gold / yellow (logo ring)
+  accent: "#5B88FF",        // Bright blue accent (UI highlight)
   accentOrange: "#F36F21", // Orange (logo gradient)
   accentRed: "#C1121F",    // Deep red (logo ZETDC text)
   background: "#F4F7FC",   // Slightly cool white, drawn from the blue

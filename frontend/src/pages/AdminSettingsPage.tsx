@@ -6,7 +6,9 @@ import {
   adminPatchSettings,
   adminTestSettings,
 } from "../api/client"
-import { colors } from "../theme/colors"
+import { useTheme } from "../context/ThemeContext"
+import { getTokens } from "../theme/themeTokens"
+import { Badge, Button, Card, GlassPanel, Text } from "../components/styled"
 
 type Category =
   | "models"
@@ -30,6 +32,8 @@ const categories: { id: Category; label: string }[] = [
 ]
 
 export const AdminSettingsPage: React.FC = () => {
+  const { theme } = useTheme()
+  const t = getTokens(theme)
   const [active, setActive] = useState<Category>("models")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -191,225 +195,310 @@ export const AdminSettingsPage: React.FC = () => {
 
   const restartKeys = Object.entries(restartMap).filter(([, v]) => !!v).map(([k]) => k)
 
+  const categoryIcons: Record<Category, string> = {
+    models: "🤖",
+    rag: "📚",
+    security: "🔒",
+    storage: "💾",
+    ui: "🎨",
+    zetdc: "⚡",
+    diagnostics: "🔍",
+    audit: "📋",
+  }
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "240px minmax(0, 1fr)", gap: 16 }}>
-      <div
+    <div style={{ display: "grid", gridTemplateColumns: "240px minmax(0, 1fr)", gap: t.spacing.lg, height: "100%" }}>
+      {/* Sidebar */}
+      <GlassPanel
+        variant="medium"
         style={{
-          backgroundColor: "#FFFFFF",
-          borderRadius: 12,
-          border: `1px solid ${colors.border}`,
-          padding: 10,
+          padding: t.spacing.md,
           height: "calc(100vh - 64px - 48px)",
           overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
         }}
       >
-        <div style={{ fontWeight: 800, marginBottom: 10, color: colors.textPrimary }}>
-          System Settings
+        <div style={{
+          fontSize: 15, fontWeight: 800, color: t.colors.text,
+          marginBottom: t.spacing.md, padding: `${t.spacing.xs}px ${t.spacing.sm}px`,
+          letterSpacing: "-0.2px",
+          background: `linear-gradient(135deg, ${t.colors.text} 0%, ${t.colors.primary} 100%)`,
+          WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          backgroundClip: "text",
+        }}>
+          ⚙️ System Settings
         </div>
-        {categories.map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            onClick={() => setActive(c.id)}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              padding: "10px 10px",
-              borderRadius: 10,
-              border: `1px solid ${colors.border}`,
-              backgroundColor: active === c.id ? "#E7F0FF" : "#FFFFFF",
-              cursor: "pointer",
-              marginBottom: 8,
-            }}
-          >
-            {c.label}
-          </button>
-        ))}
-      </div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+          {categories.map((c) => {
+            const isActive = active === c.id
+            return (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => setActive(c.id)}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "10px 12px",
+                  borderRadius: t.radii.md,
+                  border: isActive
+                    ? `1px solid ${t.colors.primary}40`
+                    : `1px solid transparent`,
+                  background: isActive
+                    ? `linear-gradient(135deg, ${t.colors.primary}20, ${t.colors.primary}08)`
+                    : "transparent",
+                  cursor: "pointer",
+                  transition: "all 0.2s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  backdropFilter: isActive ? "blur(4px)" : "none",
+                  boxShadow: isActive ? `0 0 20px ${t.colors.primary}15` : "none",
+                }}
+                onMouseEnter={(e) => {
+                  if (!isActive) {
+                    e.currentTarget.style.background = `${t.colors.surface}80`
+                    e.currentTarget.style.borderColor = `${t.colors.border}60`
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isActive) {
+                    e.currentTarget.style.background = "transparent"
+                    e.currentTarget.style.borderColor = "transparent"
+                  }
+                }}
+              >
+                <span style={{ fontSize: 16 }}>{categoryIcons[c.id]}</span>
+                <span style={{
+                  fontSize: 13,
+                  fontWeight: isActive ? 600 : 400,
+                  color: isActive ? t.colors.text : t.colors.textSecondary,
+                }}>
+                  {c.label}
+                </span>
+                {isActive && (
+                  <span style={{
+                    marginLeft: "auto",
+                    width: 6, height: 6, borderRadius: "50%",
+                    background: t.colors.primary,
+                    boxShadow: `0 0 10px ${t.colors.primary}`,
+                  }} />
+                )}
+              </button>
+            )
+          })}
+        </div>
+      </GlassPanel>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+      {/* Main content */}
+      <div style={{ display: "flex", flexDirection: "column", gap: t.spacing.md, minWidth: 0 }}>
+
+        {/* Restart warning */}
         {restartKeys.length > 0 && (
-          <div
+          <GlassPanel
+            variant="light"
             style={{
-              backgroundColor: "#FFF5D6",
-              border: `1px solid ${colors.border}`,
-              borderRadius: 12,
-              padding: 12,
+              padding: t.spacing.md,
+              border: `1px solid ${t.colors.accent}50`,
             }}
           >
-            <div style={{ fontWeight: 800, color: colors.textPrimary }}>Restart recommended</div>
-            <div style={{ fontSize: 12, color: colors.textMuted, marginTop: 4 }}>
-              Some changed keys may require a restart: {restartKeys.slice(0, 6).join(", ")}
-              {restartKeys.length > 6 ? "…" : ""}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 18 }}>🔄</span>
+              <div>
+                <div style={{ fontWeight: 700, color: t.colors.text, fontSize: 13 }}>
+                  Restart recommended
+                </div>
+                <div style={{ fontSize: 12, color: t.colors.textMuted, marginTop: 2 }}>
+                  Some changed keys may require a restart:{" "}
+                  <span style={{ color: t.colors.accent }}>{restartKeys.slice(0, 6).join(", ")}{restartKeys.length > 6 ? "…" : ""}</span>
+                </div>
+              </div>
             </div>
-          </div>
+          </GlassPanel>
         )}
 
-        <div
+        {/* Category header */}
+        <GlassPanel
+          variant="light"
           style={{
-            backgroundColor: "#FFFFFF",
-            borderRadius: 12,
-            border: `1px solid ${colors.border}`,
-            padding: 12,
+            padding: `${t.spacing.md}px ${t.spacing.lg}px`,
             display: "flex",
             justifyContent: "space-between",
-            gap: 12,
+            gap: t.spacing.md,
             alignItems: "center",
           }}
         >
           <div>
-            <div style={{ fontWeight: 800, color: colors.textPrimary }}>
-              {categories.find((c) => c.id === active)?.label}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 18 }}>{categoryIcons[active]}</span>
+              <h2 style={{
+                margin: 0, fontSize: 16, fontWeight: 700, color: t.colors.text,
+                letterSpacing: "-0.2px",
+              }}>
+                {categories.find((c) => c.id === active)?.label}
+              </h2>
             </div>
-            <div style={{ fontSize: 12, color: colors.textMuted }}>
-              Effective settings = defaults + config.yaml + DB overrides.
+            <div style={{ fontSize: 12, color: t.colors.textMuted, marginTop: 4, marginLeft: 2 }}>
+              Effective settings = defaults + config.yaml + DB overrides
             </div>
             {active !== "audit" && (
-              <div style={{ fontSize: 12, color: colors.textMuted, marginTop: 4 }}>
-                Sources in this view: default {sourceSummary.default} • file {sourceSummary.file} • db{" "}
-                {sourceSummary.db}
+              <div style={{ fontSize: 11, color: t.colors.textMuted, marginTop: 2, marginLeft: 2 }}>
+                <span style={{ color: t.colors.textSecondary }}>Sources:</span>{" "}
+                <Badge variant="secondary" style={{ fontSize: 10 }}>default {sourceSummary.default}</Badge>{" "}
+                <Badge variant="primary" style={{ fontSize: 10 }}>file {sourceSummary.file}</Badge>{" "}
+                <Badge variant="success" style={{ fontSize: 10 }}>db {sourceSummary.db}</Badge>
               </div>
             )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              onClick={load}
-              disabled={loading}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 10,
-                border: `1px solid ${colors.border}`,
-                backgroundColor: "#FFFFFF",
-                cursor: loading ? "default" : "pointer",
-                opacity: loading ? 0.6 : 1,
-              }}
-            >
-              Refresh
-            </button>
-            <button
-              type="button"
-              onClick={backup}
-              disabled={loading}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 10,
-                border: `1px solid ${colors.border}`,
-                backgroundColor: "#FFFFFF",
-                cursor: loading ? "default" : "pointer",
-                opacity: loading ? 0.6 : 1,
-              }}
-            >
-              Backup
-            </button>
+            <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
+              ⟳ Refresh
+            </Button>
+            <Button variant="secondary" size="sm" onClick={backup} disabled={loading}>
+              💾 Backup
+            </Button>
           </div>
-        </div>
+        </GlassPanel>
 
         {backupPath && (
-          <div style={{ fontSize: 12, color: colors.textMuted }}>
-            Backup written: {backupPath}
+          <div style={{ fontSize: 12, color: t.colors.success, padding: `0 ${t.spacing.xs}px` }}>
+            ✅ Backup written: {backupPath}
           </div>
         )}
 
-        {error && <div style={{ color: colors.danger, fontSize: 13 }}>{error}</div>}
+        {error && (
+          <GlassPanel variant="light" style={{ padding: t.spacing.sm, border: `1px solid ${t.colors.error}60` }}>
+            <div style={{ color: t.colors.error, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+              <span>⚠️</span> {error}
+            </div>
+          </GlassPanel>
+        )}
 
         {active === "audit" ? (
-          <div
+          <GlassPanel
+            variant="medium"
             style={{
-              backgroundColor: "#FFFFFF",
-              borderRadius: 12,
-              border: `1px solid ${colors.border}`,
-              padding: 12,
+              padding: t.spacing.md,
               height: "calc(100vh - 64px - 48px - 120px)",
               overflowY: "auto",
             }}
           >
             {auditRows.length === 0 ? (
-              <div style={{ fontSize: 13, color: colors.textMuted }}>No audit entries.</div>
+              <div style={{ fontSize: 13, color: t.colors.textMuted, textAlign: "center", padding: 40 }}>
+                No audit entries found.
+              </div>
             ) : (
               <div style={{ display: "grid", gap: 10 }}>
                 {auditRows.map((r) => (
-                  <div
-                    key={r.id}
-                    style={{
-                      border: `1px solid ${colors.border}`,
-                      borderRadius: 12,
-                      padding: 10,
-                    }}
-                  >
-                    <div style={{ fontWeight: 800 }}>{r.key}</div>
-                    <div style={{ fontSize: 12, color: colors.textMuted }}>
+                  <Card key={r.id} hover={false} style={{ padding: t.spacing.md }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      <span style={{ fontWeight: 700, color: t.colors.text, fontSize: 13 }}>{r.key}</span>
+                      <Badge variant="secondary" style={{ fontSize: 10 }}>v{r.id}</Badge>
+                    </div>
+                    <div style={{ fontSize: 11, color: t.colors.textMuted, marginBottom: 8 }}>
                       {r.changed_at} • user_id={r.changed_by_user_id}
                     </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 8 }}>
-                      <pre style={{ margin: 0, fontSize: 11, whiteSpace: "pre-wrap" }}>{r.old_value}</pre>
-                      <pre style={{ margin: 0, fontSize: 11, whiteSpace: "pre-wrap" }}>{r.new_value}</pre>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: t.spacing.md }}>
+                      <div style={{
+                        background: `${t.colors.bgSecondary}90`,
+                        borderRadius: t.radii.sm,
+                        padding: t.spacing.sm,
+                        border: `1px solid ${t.colors.error}30`,
+                      }}>
+                        <div style={{ fontSize: 10, color: t.colors.error, fontWeight: 600, marginBottom: 4 }}>OLD</div>
+                        <pre style={{ margin: 0, fontSize: 11, whiteSpace: "pre-wrap", color: t.colors.textSecondary }}>{r.old_value}</pre>
+                      </div>
+                      <div style={{
+                        background: `${t.colors.bgSecondary}90`,
+                        borderRadius: t.radii.sm,
+                        padding: t.spacing.sm,
+                        border: `1px solid ${t.colors.success}30`,
+                      }}>
+                        <div style={{ fontSize: 10, color: t.colors.success, fontWeight: 600, marginBottom: 4 }}>NEW</div>
+                        <pre style={{ margin: 0, fontSize: 11, whiteSpace: "pre-wrap", color: t.colors.text }}>{r.new_value}</pre>
+                      </div>
                     </div>
-                  </div>
+                  </Card>
                 ))}
               </div>
             )}
-          </div>
+          </GlassPanel>
         ) : (
           <>
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              spellCheck={false}
-              style={{
-                width: "100%",
-                minHeight: "calc(100vh - 64px - 48px - 220px)",
-                borderRadius: 12,
-                border: `1px solid ${colors.border}`,
-                padding: 12,
-                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                fontSize: 12,
-                backgroundColor: "#0F172A",
-                color: "#E2E8F0",
-                outline: "none",
-                resize: "vertical",
-                boxSizing: "border-box",
-              }}
-            />
-
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-              <div style={{ fontSize: 12, color: colors.textMuted }}>
-                Sources map is available per key; this editor saves the JSON shown.
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  type="button"
-                  onClick={test}
-                  disabled={loading}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: `1px solid ${colors.border}`,
-                    backgroundColor: "#FFFFFF",
-                    cursor: loading ? "default" : "pointer",
-                    opacity: loading ? 0.6 : 1,
-                  }}
-                >
-                  Test & Validate
-                </button>
-                <button
-                  type="button"
-                  onClick={save}
-                  disabled={loading}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    border: "none",
-                    backgroundColor: colors.primary,
-                    color: "#FFFFFF",
-                    cursor: loading ? "default" : "pointer",
-                    opacity: loading ? 0.6 : 1,
-                  }}
-                >
-                  Save
-                </button>
+            <div style={{ position: "relative", flex: 1 }}>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                spellCheck={false}
+                style={{
+                  width: "100%",
+                  minHeight: "calc(100vh - 64px - 48px - 220px)",
+                  borderRadius: t.radii.lg,
+                  border: `1px solid ${t.colors.border}`,
+                  padding: t.spacing.lg,
+                  fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace",
+                  fontSize: 12.5,
+                  lineHeight: 1.6,
+                  backgroundColor: `${t.colors.bgSecondary}CC`,
+                  color: "#E2E8F0",
+                  outline: "none",
+                  resize: "vertical",
+                  boxSizing: "border-box",
+                  backdropFilter: "blur(8px)",
+                  tabSize: 2,
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = t.colors.primary
+                  e.currentTarget.style.boxShadow = `0 0 20px ${t.colors.primary}20`
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = t.colors.border
+                  e.currentTarget.style.boxShadow = "none"
+                }}
+              />
+              <div style={{
+                position: "absolute",
+                top: 12, right: 12,
+                fontSize: 10, color: t.colors.textMuted,
+                background: `${t.colors.bgSecondary}80`,
+                padding: "2px 8px",
+                borderRadius: t.radii.sm,
+                backdropFilter: "blur(4px)",
+                pointerEvents: "none",
+              }}>
+                JSON
               </div>
             </div>
+
+            <GlassPanel
+              variant="light"
+              style={{
+                padding: `${t.spacing.sm}px ${t.spacing.md}px`,
+                display: "flex",
+                justifyContent: "space-between",
+                gap: t.spacing.md,
+                alignItems: "center",
+              }}
+            >
+              <div style={{ fontSize: 11, color: t.colors.textMuted }}>
+                Edit the JSON configuration directly • sources map shown per key
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Button variant="secondary" size="sm" onClick={test} disabled={loading}>
+                  🧪 Test & Validate
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={save}
+                  disabled={loading}
+                  style={{ minWidth: 80, justifyContent: "center" }}
+                >
+                  {loading ? "⟳" : "💾 Save"}
+                </Button>
+              </div>
+            </GlassPanel>
           </>
         )}
       </div>

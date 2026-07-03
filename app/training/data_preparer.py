@@ -108,7 +108,7 @@ def _chunks_to_pairs(chunks: list[str]) -> list[dict]:
 
 # ── public API ────────────────────────────────────────────────────────────────
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".log", ".csv", ".md"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".log", ".csv", ".md", ".wav", ".mp3", ".m4a", ".ogg", ".flac", ".mp4", ".avi", ".mov", ".mkv"}
 
 
 def prepare_inbox(inbox_dir: Path, batches_dir: Path, chunk_size: int = 400) -> dict:

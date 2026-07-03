@@ -190,6 +190,67 @@ async def _query_teacher(prompt: str, teacher_samples_dir: Optional[Path] = None
         return None
 
 
+async def _query_registry_api(prompt: str) -> Optional[dict]:
+    """Try all configured registry providers (OpenAI-compatible) as an additional tier."""
+    try:
+        from app.services.model_registry_service import get_all_providers
+        from openai import AsyncOpenAI
+    except ImportError:
+        return None
+
+    providers = get_all_providers()
+    if not providers:
+        return None
+
+    for provider in providers:
+        api_key_env = provider.get("api_key_env", "")
+        if not api_key_env:
+            continue
+        api_key = os.getenv(api_key_env, "").strip()
+        if not api_key:
+            continue
+        base_url = provider.get("base_url", "").strip()
+        if not base_url:
+            continue
+
+        models = provider.get("models", [])
+        if not models:
+            continue
+
+        provider_name = provider.get("name", "unknown")
+        for model in models:
+            model_id = model.get("id", "")
+            model_name = model.get("name", model_id)
+            if not model_id:
+                continue
+            try:
+                client = AsyncOpenAI(
+                    api_key=api_key,
+                    base_url=base_url.rstrip("/"),
+                    timeout=60.0,
+                )
+                response = await client.chat.completions.create(
+                    model=model_id,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=1024,
+                    temperature=0.7,
+                )
+                answer = response.choices[0].message.content
+                if answer and _is_confident(answer):
+                    logger.info("Registry provider '%s' model '%s' answered", provider_name, model_id)
+                    return {
+                        "answer": answer,
+                        "tier": f"registry_{provider_name}",
+                        "model": model_id,
+                        "confidence": 0.8,
+                    }
+            except Exception as e:
+                logger.debug("Registry provider '%s' model '%s' failed: %s", provider_name, model_id, e)
+                continue
+
+    return None
+
+
 async def _query_web(prompt: str, model: str, web_samples_dir: Optional[Path] = None) -> Optional[str]:
     """Fall back to DuckDuckGo search + local summarisation."""
     try:
@@ -246,8 +307,47 @@ async def select_model_with_fallback(
     if answer and _is_confident(answer):
         return {"answer": answer, "tier": "ollama", "model": ollama_model, "confidence": 0.75}
 
+    # ── Tier 2b: Gemini API ─────────────────────────────────────────────────
+    from app.services.gemini_service import is_configured as gemini_configured, generate as gemini_generate
+    if gemini_configured():
+        logger.info("Decision Node: Tier 2 uncertain – trying Tier 2b (Gemini API)")
+        try:
+            answer_text = await gemini_generate(prompt, system=(settings.zetdc.system_prompt or "").strip() or None)
+            if answer_text and _is_confident(answer_text):
+                return {"answer": answer_text, "tier": "gemini_api", "model": "gemini-api", "confidence": 0.85}
+        except Exception as e:
+            logger.warning("Gemini API tier failed: %s", e)
+
+    # ── Tier 2c: DeepSeek API ─────────────────────────────────────────────────
+    from app.services.deepseek_service import is_configured as deepseek_configured, generate as deepseek_generate
+    if deepseek_configured():
+        logger.info("Decision Node: Tier 2 uncertain – trying Tier 2c (DeepSeek API)")
+        try:
+            answer_text = await deepseek_generate(prompt, system=(settings.zetdc.system_prompt or "").strip() or None)
+            if answer_text and _is_confident(answer_text):
+                return {"answer": answer_text, "tier": "deepseek_api", "model": "deepseek-api", "confidence": 0.85}
+        except Exception as e:
+            logger.warning("DeepSeek API tier failed: %s", e)
+
+    # ── Tier 2d: OpenCode Zen ─────────────────────────────────────────────────
+    from app.services.opencode_zen_service import is_configured as zen_configured, generate as zen_generate
+    if zen_configured():
+        logger.info("Decision Node: Tier 2 uncertain – trying Tier 2d (OpenCode Zen)")
+        try:
+            answer_text = await zen_generate(prompt, model="zen/deepseek-v4-flash-free", system=(settings.zetdc.system_prompt or "").strip() or None)
+            if answer_text and _is_confident(answer_text):
+                return {"answer": answer_text, "tier": "zen_api", "model": "zen/deepseek-v4-flash-free", "confidence": 0.85}
+        except Exception as e:
+            logger.warning("Zen API tier failed: %s", e)
+
+    # ── Tier 2e: Registry API providers ───────────────────────────────────────
+    logger.info("Decision Node: Tier 2d uncertain – trying Tier 2e (registry API providers)")
+    registry_result = await _query_registry_api(prompt)
+    if registry_result:
+        return registry_result
+
     # ── Tier 3: Cloud teacher ─────────────────────────────────────────────────
-    logger.info("Decision Node: Tier 2 uncertain – trying Tier 3 (cloud teacher)")
+    logger.info("Decision Node: Tier 2e uncertain – trying Tier 3 (cloud teacher)")
     answer = await _query_teacher(prompt, teacher_samples_dir)
     if answer:
         return {"answer": answer, "tier": "cloud_teacher", "model": "cloud", "confidence": 0.85}
@@ -271,9 +371,15 @@ def get_router_status() -> dict:
     """Return a status dict showing which tiers are currently available."""
     from app.services.teacher_service import is_configured as teacher_configured
     from app.services.web_search_service import is_enabled as web_enabled
+    from app.services.gemini_service import is_configured as gemini_configured
+    from app.services.deepseek_service import is_configured as deepseek_configured
+    from app.services.opencode_zen_service import is_configured as zen_configured
     return {
         "local_lora": _has_local_adapter(),
         "ollama": True,  # assumed available; actual check handled by call-site
+        "gemini_api": gemini_configured(),
+        "deepseek_api": deepseek_configured(),
+        "zen_api": zen_configured(),
         "cloud_teacher": teacher_configured(),
         "web_search": web_enabled(),
         "active_ollama_model": select_text_model(),

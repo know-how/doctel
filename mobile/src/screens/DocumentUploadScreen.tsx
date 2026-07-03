@@ -1,17 +1,22 @@
 import React, { useEffect, useState } from "react"
-import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator } from "react-native"
+import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator, useWindowDimensions } from "react-native"
 import * as DocumentPicker from "expo-document-picker"
-import { colors } from "../theme/colors"
-import { uploadDocument, getProjects } from "../api/client"
+import { useTheme } from "../context/ThemeContext"
+import { getTokens } from "../theme/themeTokens"
+import { uploadDocument, getWorkspaces } from "../api/client"
 import { ProjectSummary } from "../types/api"
 
 interface DocumentUploadScreenProps {
   onUploaded?: (documentId: string) => void
 }
 
-export const DocumentUploadScreen: React.FC<DocumentUploadScreenProps> = ({
-  onUploaded,
-}) => {
+export function DocumentUploadScreen({ onUploaded }: DocumentUploadScreenProps) {
+  const { theme } = useTheme()
+  const t = getTokens(theme)
+  const c = t.colors
+  const { width } = useWindowDimensions()
+  const isTablet = width >= 768
+
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [selectedProjectId, setSelectedProjectId] = useState<string>("")
   const [projectName, setProjectName] = useState("")
@@ -28,7 +33,7 @@ export const DocumentUploadScreen: React.FC<DocumentUploadScreenProps> = ({
   useEffect(() => {
     const fetchProjects = async () => {
       try {
-        const res = await getProjects()
+        const res = await getWorkspaces()
         setProjects(res.projects)
       } catch (e: any) {
         console.warn("Failed to load projects", e)
@@ -75,7 +80,7 @@ export const DocumentUploadScreen: React.FC<DocumentUploadScreenProps> = ({
           : undefined
 
     if (selectedProjectId === "new" && !resolvedProjectName) {
-      setError("Project name is required")
+      setError("Repository name is required")
       setLoading(false)
       return
     }
@@ -97,18 +102,69 @@ export const DocumentUploadScreen: React.FC<DocumentUploadScreenProps> = ({
     }
   }
 
+  const chipStyle = {
+    paddingHorizontal: t.spacing.sm,
+    paddingVertical: 6,
+    borderRadius: t.radii.lg,
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.cardBg,
+  }
+
+  const chipActiveStyle = {
+    backgroundColor: c.primary + "14",
+    borderColor: c.primary,
+  }
+
+  const chipText = {
+    color: c.text,
+    fontSize: 13,
+  }
+
+  const chipActiveText = {
+    color: c.primaryHover,
+    fontWeight: "600" as const,
+  }
+
+  const inputStyle = {
+    borderWidth: 1,
+    borderColor: c.border,
+    borderRadius: t.radii.md,
+    paddingHorizontal: t.spacing.sm,
+    paddingVertical: 10,
+    backgroundColor: c.cardBg,
+  }
+
+  const primaryButtonStyle = {
+    backgroundColor: c.primary,
+    paddingVertical: 14,
+    borderRadius: t.radii.full,
+    alignItems: "center" as const,
+    marginTop: t.spacing.xs,
+  }
+
+  const secondaryButtonStyle = {
+    backgroundColor: c.primary + "14",
+    borderWidth: 1,
+    borderColor: c.primary,
+    paddingVertical: t.spacing.lg,
+    borderRadius: t.radii.md,
+    alignItems: "center" as const,
+    marginTop: t.spacing.xs,
+  }
+
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 16, paddingBottom: 24 }}>
-      <Text style={{ fontSize: 18, fontWeight: "600", color: colors.textPrimary }}>
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: t.spacing.md, paddingBottom: t.spacing.lg, padding: isTablet ? t.spacing.lg : t.spacing.md, maxWidth: isTablet ? 600 : undefined, alignSelf: "center" }}>
+      <Text style={{ fontSize: 18, fontWeight: "600", color: c.text }}>
         Upload Document
       </Text>
 
-      <View style={{ gap: 8 }}>
-        <Text style={{ fontSize: 13, color: colors.textMuted }}>Project</Text>
+      <View style={{ gap: t.spacing.xs }}>
+        <Text style={{ fontSize: 13, color: c.textMuted }}>Repository</Text>
         {loadingProjects ? (
-          <ActivityIndicator size="small" color={colors.primary} style={{ alignSelf: "flex-start" }} />
+          <ActivityIndicator size="small" color={c.primary} style={{ alignSelf: "flex-start" }} />
         ) : (
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+          <View style={{ flexDirection: isTablet ? "row" : "row", flexWrap: "wrap", gap: t.spacing.xs }}>
             <Pressable
               style={[chipStyle, selectedProjectId === "" && chipActiveStyle]}
               onPress={() => {
@@ -117,7 +173,7 @@ export const DocumentUploadScreen: React.FC<DocumentUploadScreenProps> = ({
               }}
             >
               <Text style={[chipText, selectedProjectId === "" && chipActiveText]}>
-                No project
+                No repository
               </Text>
             </Pressable>
             {projects.map((project) => (
@@ -136,7 +192,7 @@ export const DocumentUploadScreen: React.FC<DocumentUploadScreenProps> = ({
               onPress={() => setSelectedProjectId("new")}
             >
               <Text style={[chipText, selectedProjectId === "new" && chipActiveText]}>
-                New project...
+                New repository...
               </Text>
             </Pressable>
           </View>
@@ -144,52 +200,55 @@ export const DocumentUploadScreen: React.FC<DocumentUploadScreenProps> = ({
       </View>
 
       {selectedProjectId === "new" && (
-        <View style={{ gap: 8 }}>
-          <Text style={{ fontSize: 13, color: colors.textMuted }}>New Project Name</Text>
+        <View style={{ gap: t.spacing.xs }}>
+          <Text style={{ fontSize: 13, color: c.textMuted }}>New Repository Name</Text>
           <TextInput
             value={projectName}
             onChangeText={setProjectName}
-            placeholder="Project Name"
+            placeholder="Repository Name"
+            placeholderTextColor={c.textMuted}
             style={inputStyle}
           />
         </View>
       )}
 
-      <View style={{ gap: 8 }}>
-        <Text style={{ fontSize: 13, color: colors.textMuted }}>Document Type</Text>
+      <View style={{ gap: t.spacing.xs }}>
+        <Text style={{ fontSize: 13, color: c.textMuted }}>Document Type</Text>
         <TextInput
           value={documentType}
           onChangeText={setDocumentType}
           placeholder="Document Type"
+          placeholderTextColor={c.textMuted}
           style={inputStyle}
         />
       </View>
 
-      <View style={{ gap: 8 }}>
-        <Text style={{ fontSize: 13, color: colors.textMuted }}>Document Date</Text>
+      <View style={{ gap: t.spacing.xs }}>
+        <Text style={{ fontSize: 13, color: c.textMuted }}>Document Date</Text>
         <TextInput
           value={documentDate}
           onChangeText={setDocumentDate}
           placeholder="YYYY-MM-DD"
+          placeholderTextColor={c.textMuted}
           style={inputStyle}
         />
       </View>
 
       <Pressable onPress={pickFile} style={secondaryButtonStyle}>
-        <Text style={{ color: colors.primaryDark, fontWeight: "500" }}>Select File</Text>
-        <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 4 }}>
+        <Text style={{ color: c.primaryHover, fontWeight: "500" }}>Select File</Text>
+        <Text style={{ color: c.textMuted, fontSize: 12, marginTop: t.spacing.xs }}>
           PDF, DOCX, TXT
         </Text>
       </Pressable>
 
       {!!fileName && (
-        <Text style={{ fontSize: 12, color: colors.primary }}>
+        <Text style={{ fontSize: 12, color: c.primary }}>
           Selected: {fileName}
         </Text>
       )}
 
-      {error ? <Text style={{ color: colors.danger }}>{error}</Text> : null}
-      {status ? <Text style={{ color: colors.primary }}>{status}</Text> : null}
+      {error ? <Text style={{ color: c.error }}>{error}</Text> : null}
+      {status ? <Text style={{ color: c.primary }}>{status}</Text> : null}
 
       <Pressable onPress={submit} style={[primaryButtonStyle, loading && { opacity: 0.7 }]} disabled={loading}>
         <Text style={{ color: "#FFFFFF", fontWeight: "600" }}>
@@ -199,54 +258,3 @@ export const DocumentUploadScreen: React.FC<DocumentUploadScreenProps> = ({
     </ScrollView>
   )
 }
-
-const inputStyle = {
-  borderWidth: 1,
-  borderColor: colors.border,
-  borderRadius: 10,
-  paddingHorizontal: 12,
-  paddingVertical: 10,
-  backgroundColor: "#FFFFFF",
-} as const
-
-const primaryButtonStyle = {
-  backgroundColor: colors.primary,
-  paddingVertical: 14,
-  borderRadius: 999,
-  alignItems: "center",
-  marginTop: 8,
-} as const
-
-const secondaryButtonStyle = {
-  backgroundColor: "#E7F0FF",
-  borderWidth: 1,
-  borderColor: colors.primary,
-  paddingVertical: 16,
-  borderRadius: 10,
-  alignItems: "center",
-  marginTop: 8,
-} as const
-
-const chipStyle = {
-  paddingHorizontal: 12,
-  paddingVertical: 6,
-  borderRadius: 16,
-  borderWidth: 1,
-  borderColor: colors.border,
-  backgroundColor: "#FFFFFF",
-} as const
-
-const chipActiveStyle = {
-  backgroundColor: "#E7F0FF",
-  borderColor: colors.primary,
-} as const
-
-const chipText = {
-  color: colors.textPrimary,
-  fontSize: 13,
-} as const
-
-const chipActiveText = {
-  color: colors.primaryDark,
-  fontWeight: "600",
-} as const

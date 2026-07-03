@@ -5,6 +5,7 @@ import json
 import logging
 import asyncio
 import time
+import shutil
 from typing import List, Optional
 from pathlib import Path
 from PIL import Image
@@ -14,13 +15,61 @@ import docx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+_tesseract_checked = False
+_tesseract_available = False
+
+def _check_tesseract() -> bool:
+    global _tesseract_checked, _tesseract_available
+    if not _tesseract_checked:
+        _tesseract_checked = True
+        _tesseract_available = shutil.which("tesseract") is not None
+        if not _tesseract_available:
+            logger = logging.getLogger(__name__)
+            logger.warning("tesseract not found in PATH – OCR will be skipped")
+    return _tesseract_available
+
 from app.config import settings
+import asyncio
+
+# Track auto-training cooldown (only trigger once per batch)
+_last_auto_train = 0
+AUTO_TRAIN_COOLDOWN_SEC = 300
+
+def _schedule_auto_training(db, doc):
+    """Schedule automatic model training after document ingestion."""
+    global _last_auto_train
+    import time
+    now = time.time()
+    if now - _last_auto_train < AUTO_TRAIN_COOLDOWN_SEC:
+        return  # Cooldown - don't trigger too often
+    _last_auto_train = now
+
+    async def _do_train():
+        try:
+            from app.services.multi_model_trainer import train_models_from_project
+            project_id = int(doc.project_id)
+            result = await train_models_from_project(
+                project_ids=[project_id],
+                db=db,
+            )
+            import logging
+            logging.getLogger().info(f"Auto-training complete for project {project_id}: {result}")
+        except Exception as e:
+            import logging
+            logging.getLogger().warning(f"Auto-training skipped: {e}")
+
+    asyncio.ensure_future(_do_train())
 from app.db.models import Document, DocAnalysis, SuggestedPrompt, Chunk, Embedding
 from app.utils.ollama_client import ollama
 from app.services.model_router import select_text_model
 from app.utils.chroma_client import chroma
 
 logger = logging.getLogger(__name__)
+
+# Cache for pre-chunked audio/video segments from process_audio_for_rag().
+# Keyed by file path → {"chunks": list[dict], "source_type": str}
+# Set by extract_text(), consumed by run_embedding_pipeline().
+_audio_chunks_cache: dict[str, dict] = {}
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -85,7 +134,7 @@ async def extract_text(file_path: str, mime_type: str) -> str:
                 text += page.extract_text() or ""
             
             # Fallback to OCR if text is poor/empty
-            if len(text.strip()) < 50:
+            if len(text.strip()) < 50 and _check_tesseract():
                 logger.info(f"PDF text extraction poor for {file_path}, falling back to OCR")
                 try:
                     import pypdfium2 as pdfium
@@ -96,7 +145,10 @@ async def extract_text(file_path: str, mime_type: str) -> str:
                 for i in range(len(pdf)):
                     page = pdf.get_page(i)
                     pil_image = page.render(scale=2).to_pil()
-                    ocr_parts.append(pytesseract.image_to_string(pil_image))
+                    try:
+                        ocr_parts.append(pytesseract.image_to_string(pil_image))
+                    except Exception:
+                        pass
                     page.close()
                 pdf.close()
                 text = "\n".join(ocr_parts)
@@ -119,11 +171,52 @@ async def extract_text(file_path: str, mime_type: str) -> str:
             logger.error(f"Error reading TXT {file_path}: {e}")
             
     elif file_ext in [".png", ".jpg", ".jpeg"]:
+        if _check_tesseract():
+            try:
+                text = pytesseract.image_to_string(Image.open(file_path))
+            except Exception as e:
+                logger.error(f"Error performing OCR on image {file_path}: {e}")
+        else:
+            logger.info(f"Skipping OCR for {file_path} – tesseract not available")
+
+    elif file_ext in {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".wma"}:
         try:
-            text = pytesseract.image_to_string(Image.open(file_path))
+            from app.services.transcription_service import process_audio_for_rag
+            result = await process_audio_for_rag(file_path, mime_type=mime_type)
+            rag_chunks: list[dict] = result.get("rag_chunks", [])
+            full_text: str = result.get("full_text", "")
+            stype: str = result.get("source_type", "audio")
+            if rag_chunks:
+                _audio_chunks_cache[file_path] = {"chunks": rag_chunks, "source_type": stype}
+                text = " ".join(c["text"] for c in rag_chunks)
+                logger.info(f"Audio pipeline: {len(rag_chunks)} natural chunks, source_type={stype}, {len(text)} chars from {file_path}")
+            elif full_text:
+                text = full_text
+                logger.info(f"Audio transcription extracted {len(text)} chars from {file_path} (no chunks)")
+            else:
+                logger.warning(f"Audio transcription returned no content for {file_path}")
         except Exception as e:
-            logger.error(f"Error performing OCR on image {file_path}: {e}")
-            
+            logger.error(f"Error transcribing audio {file_path}: {e}")
+
+    elif file_ext in {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv"}:
+        try:
+            from app.services.transcription_service import process_audio_for_rag
+            result = await process_audio_for_rag(file_path, mime_type=mime_type)
+            rag_chunks: list[dict] = result.get("rag_chunks", [])
+            full_text: str = result.get("full_text", "")
+            stype: str = result.get("source_type", "video")
+            if rag_chunks:
+                _audio_chunks_cache[file_path] = {"chunks": rag_chunks, "source_type": stype}
+                text = " ".join(c["text"] for c in rag_chunks)
+                logger.info(f"Video pipeline: {len(rag_chunks)} natural chunks, source_type={stype}, {len(text)} chars from {file_path}")
+            elif full_text:
+                text = full_text
+                logger.info(f"Video transcription extracted {len(text)} chars from {file_path} (no chunks)")
+            else:
+                logger.warning(f"Video transcription returned no content for {file_path}")
+        except Exception as e:
+            logger.error(f"Error transcribing video {file_path}: {e}")
+
     return text
 
 def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
@@ -152,17 +245,28 @@ async def analyze_document(text: str, doc_id: int, db: AsyncSession):
     # ── Single combined prompt ──────────────────────────────────────────────
     # One round-trip to Ollama or Gemini produces everything we need.
     combined_prompt = (
+        "You are a professional document analyst for ZETDC (Zimbabwe Electricity Transmission and Distribution Company). "
         "Analyze the document excerpt below and return ONLY a valid JSON object "
-        "(no markdown, no commentary) with exactly these keys:\n"
-        "  executive_summary  – string, max 10 sentences\n"
-        "  detailed_summary   – array of bullet strings\n"
+        "(no markdown, no commentary, no asterisks) with exactly these keys:\n"
+        "  executive_summary  – string: a professional narrative summary in flowing prose (max 10 sentences). "
+        "Do NOT use asterisks, bold markdown, numbered lists, or bullet points. Write as well-structured paragraphs.\n"
+        "  detailed_summary   – array of strings: each string must be a complete narrative sentence (not a bullet point). "
+        "Present key findings as professional prose, not as a list of fragments.\n"
         "  sentiment          – one of: Positive, Neutral, Negative, Urgent\n"
         "  topics             – array of short strings (max 8)\n"
         "  entities           – array of strings (people, orgs, systems)\n"
-        "  action_items       – array of strings\n"
-        "  decisions          – array of strings\n"
+        "  action_items       – array of strings: each as a complete professional sentence\n"
+        "  decisions          – array of strings: each as a complete professional sentence\n"
         "  prompts            – array of 5 specific, actionable questions a user could ask "
         "about this document (include one Mermaid diagram prompt and one action-items prompt)\n\n"
+        "SUMMARY WRITING RULES:\n"
+        "- NEVER use asterisks (**bold**) or markdown formatting for emphasis\n"
+        "- NEVER use numbered or bulleted lists in executive_summary; write in narrative paragraphs\n"
+        "- Each detailed_summary entry must be a complete, well-formed sentence — not a fragment or bullet point\n"
+        "- Maintain a formal, professional tone suitable for ZETDC leadership and staff\n"
+        "- Begin executive_summary with a clear statement of the document's purpose and scope\n"
+        "- Organise content logically: context first, then key findings, then implications\n"
+        "- Use precise ZETDC terminology (transmission, distribution, substations, feeders, SCADA, HSE, ZERA compliance)\n\n"
         "Document excerpt:\n" + analysis_text
     )
 
@@ -183,7 +287,24 @@ async def analyze_document(text: str, doc_id: int, db: AsyncSession):
                 structured = json.loads(raw[json_start:json_end])
                 logger.info(f"Document {doc_id}: Gemini analysis successful")
         except Exception as e:
-            logger.warning(f"Gemini analysis failed for doc {doc_id} ({e}); falling back to Ollama")
+            logger.warning(f"Gemini analysis failed for doc {doc_id} ({e}); trying DeepSeek API")
+    
+    # ── Try DeepSeek API if Gemini failed ──────────────────────────────────
+    if not structured and settings.deepseek_api_key:
+        try:
+            from app.services.deepseek_service import generate as deepseek_generate
+            logger.info(f"Analyzing document {doc_id} with DeepSeek API")
+            raw = await deepseek_generate(
+                combined_prompt,
+                system="You are a precise document analyst. Output only valid JSON."
+            )
+            json_start = raw.find("{")
+            json_end = raw.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                structured = json.loads(raw[json_start:json_end])
+                logger.info(f"Document {doc_id}: DeepSeek analysis successful")
+        except Exception as e:
+            logger.warning(f"DeepSeek analysis failed for doc {doc_id} ({e}); falling back to Ollama")
     
     # ── Fallback to Ollama local model ──────────────────────────────────────
     if not structured:
@@ -303,10 +424,21 @@ async def ingest_document(doc_id: int, db: AsyncSession):
         init_overlap = settings.chunk_overlap
         
         async def run_embedding_pipeline(c_size: int, c_overlap: int) -> tuple[list[str], list[list[float]], list[str], list[dict]]:
-            chunks = chunk_text(text, c_size, c_overlap)
-            chunks = [c.strip() for c in (chunks or []) if isinstance(c, str) and c.strip()]
-            if not chunks:
-                raise ValueError("Chunking produced no chunks")
+            # Check for pre-chunked audio/video segments from extract_text()
+            cached = _audio_chunks_cache.pop(doc.path, None)
+            pre_chunked = cached["chunks"] if cached else None
+            pre_source_type = cached["source_type"] if cached else None
+            if pre_chunked:
+                chunks = [c["text"] for c in pre_chunked]
+                chunks = [c.strip() for c in chunks if c.strip()]
+                if not chunks:
+                    raise ValueError("Audio chunks produced no text segments")
+                logger.info(f"Using {len(chunks)} pre-chunked audio/video segments for {doc.filename}")
+            else:
+                chunks = chunk_text(text, c_size, c_overlap)
+                chunks = [c.strip() for c in (chunks or []) if isinstance(c, str) and c.strip()]
+                if not chunks:
+                    raise ValueError("Chunking produced no chunks")
 
             sem = asyncio.Semaphore(2)
             async def embed_one(i: int, chunk_text_content: str):
@@ -332,7 +464,37 @@ async def ingest_document(doc_id: int, db: AsyncSession):
                 ids.append(chroma_id)
                 emb_out.append(vec)
                 docs.append(content)
-                metadatas.append({"filename": doc.filename, "chunk_index": i, "document_id": doc_id})
+                # Determine source_type from file extension
+                # For pre-chunked audio/video, use the source_type from the pipeline
+                f_ext = Path(doc.filename).suffix.lower() if doc.filename else ""
+                if pre_source_type:
+                    stype = pre_source_type
+                elif f_ext in [".pdf", ".docx", ".txt", ".md"]:
+                    stype = "document"
+                elif f_ext in [".png", ".jpg", ".jpeg"]:
+                    stype = "image"
+                elif f_ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".wma"]:
+                    stype = "audio"
+                elif f_ext in [".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv"]:
+                    stype = "video"
+                else:
+                    stype = "unknown"
+                # Build metadata – include start_sec/end_sec for audio/video segments
+                meta: dict = {
+                    "filename": doc.filename,
+                    "chunk_index": i,
+                    "document_id": doc_id,
+                    "source_type": stype,
+                }
+                if pre_chunked and i < len(pre_chunked):
+                    seg = pre_chunked[i]
+                    if "start_sec" in seg:
+                        meta["start_sec"] = seg["start_sec"]
+                    if "end_sec" in seg:
+                        meta["end_sec"] = seg["end_sec"]
+                    if "speaker" in seg and seg["speaker"]:
+                        meta["speaker"] = seg["speaker"]
+                metadatas.append(meta)
             return chunks, emb_out, ids, docs, metadatas
 
         await _set_doc_state(db, doc, status="embedded", step="embed", percent=45, message="Generating embeddings")
@@ -395,6 +557,8 @@ async def ingest_document(doc_id: int, db: AsyncSession):
         await analyze_document(text, doc_id, db)
 
         await _set_doc_state(db, doc, status="completed", step="done", percent=100, message="Completed")
+        # Auto-trigger transfer learning on local models
+        _schedule_auto_training(db, doc)
     except Exception as e:
         await _set_doc_state(
             db,

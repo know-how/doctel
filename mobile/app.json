@@ -4,7 +4,27 @@
     "slug": "docintel",
     "version": "0.0.1",
     "orientation": "portrait",
-    "platforms": ["ios", "android"],
-    "sdkVersion": "54.0.0"
+    "platforms": ["ios", "android", "web"],
+    "sdkVersion": "54.0.0",
+    "scheme": "docintel",
+    "icon": "./src/assets/zetdc-logo.png",
+    "extra": {
+      "apiBaseUrl": "http://172.16.4.60:8000"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./src/assets/zetdc-logo.png",
+        "backgroundColor": "#1E3A8A"
+      },
+      "package": "com.zetdc.docintel",
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ]
+    }
   }
 }
+
+
+

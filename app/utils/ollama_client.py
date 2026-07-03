@@ -6,6 +6,18 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _format_size(size_bytes: int) -> str:
+    if size_bytes <= 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    size = float(size_bytes)
+    while size >= 1024 and i < len(units) - 1:
+        size /= 1024
+        i += 1
+    return f"{size:.1f} {units[i]}"
+
 class OllamaClient:
     def __init__(self):
         self.base_url = settings.ollama_base_url.rstrip("/")
@@ -105,6 +117,41 @@ class OllamaClient:
         response = await self._get_with_retries(url, timeout)
         models = response.json().get("models", [])
         return [m["name"] for m in models]
+
+    async def list_models_detailed(self) -> list[dict]:
+        url = f"{self.base_url}/api/tags"
+        timeout = self._timeout(read_seconds=5.0)
+        try:
+            response = await self._get_with_retries(url, timeout)
+            raw = response.json().get("models", [])
+            result = []
+            for m in raw:
+                size_bytes = m.get("size", 0)
+                details = m.get("details") or {}
+                result.append({
+                    "name": m.get("name", ""),
+                    "size": size_bytes,
+                    "size_human": _format_size(size_bytes),
+                    "family": details.get("family", ""),
+                    "parameter_size": details.get("parameter_size", ""),
+                    "quantization_level": details.get("quantization_level", ""),
+                    "modified_at": m.get("modified_at", ""),
+                    "digest": m.get("digest", "")[:12] if m.get("digest") else "",
+                    "ready": True,
+                })
+            return result
+        except Exception:
+            return []
+
+    async def is_healthy(self) -> bool:
+        try:
+            url = f"{self.base_url}/api/tags"
+            timeout = self._timeout(read_seconds=2.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url)
+                return resp.status_code == 200
+        except Exception:
+            return False
 
     async def show(self, model: str) -> dict:
         url = f"{self.base_url}/api/show"

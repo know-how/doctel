@@ -108,6 +108,7 @@ cd C:\Users\ze9167523\Documents\trae_projects\doctel
 py -3.12 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload 
 Or
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+python -m uvicorn app.main:app --host 10.119.239.203 --port 8000 --reload
 ```
 
 Backend URLs:
@@ -180,7 +181,6 @@ npm run dev -- --host 127.0.0.1 --port 5173
 ```
  
 Frontend URL:
-
 - Web UI (desktop + mobile responsive): `http://localhost:5173/`
 
 If Vite reports a different port (e.g. 5174), open the exact `Local` URL it prints.

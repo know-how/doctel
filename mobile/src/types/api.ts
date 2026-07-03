@@ -170,14 +170,29 @@ export interface SummaryHistoryResponse {
   history: SummaryHistoryEntry[]
 }
 
+export interface OllamaModelDetail {
+  name: string
+  size: number
+  size_human: string
+  family: string
+  parameter_size: string
+  quantization_level: string
+  modified_at: string
+  digest: string
+  ready: boolean
+  capabilities?: string[]
+  display_category?: string
+}
+
 export interface ModelsAvailableResponse {
   installed?: string[]
   available?: string[]
-  models?: string[]
+  models?: OllamaModelDetail[]
   default_model?: string
   offline?: boolean
   embed_model?: string
   vision_model?: string
+  ollama_healthy?: boolean
 }
 
 export interface ModelPullStatusResponse {
@@ -208,19 +223,21 @@ export interface MyProjectsResponse {
   projects: { id: string; name: string; role: string }[]
 }
 
+export interface MyDocument {
+  id: string
+  filename: string
+  project_id: string | null
+  project_name: string
+  status: string
+  created_at: string
+  download_url: string
+  view_url: string
+  needs_project_review?: boolean
+  auto_project_confidence?: number
+}
+
 export interface MyDocumentsResponse {
-  documents: {
-    id: string
-    filename: string
-    project_id: string | null
-    project_name: string
-    status: string
-    created_at: string
-    download_url: string
-    view_url: string
-    needs_project_review?: boolean
-    auto_project_confidence?: number
-  }[]
+  documents: MyDocument[]
 }
 
 export interface ChatSessionsListResponse {

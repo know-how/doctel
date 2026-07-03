@@ -13,8 +13,11 @@ python-docx
 
 sqlalchemy
 aiosqlite
+aiomysql
 httpx
 psutil
+
+cryptography>=42.0.0
 
 chromadb>=1.5,<2.0
 

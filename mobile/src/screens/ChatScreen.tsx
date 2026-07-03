@@ -1,495 +1,229 @@
 import React, { useEffect, useRef, useState } from "react"
-import { View, Text, TextInput, Pressable, ScrollView } from "react-native"
-import { colors } from "../theme/colors"
+import { View, Text, TextInput, Pressable, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, useWindowDimensions } from "react-native"
+import { Audio } from "expo-av"
+import { useTheme } from "../context/ThemeContext"
+import { getTokens } from "../theme/themeTokens"
 import {
   chatWithDocument,
   getDocumentPrompts,
   getUserHistory,
   getSummaryHistory,
   getDocumentAnalysis,
-  getIngestStatus,
+  transcribeAudio,
 } from "../api/client"
-import { ChatResponse, UserHistoryEntry, SummaryHistoryEntry, DocumentAnalysisResponse } from "../types/api"
+import { DocumentAnalysisResponse } from "../types/api"
+import { RobotSearching } from "../components/RobotSearching"
+import { UserIcon } from "../components/UserIcon"
+import { useModel } from "../context/ModelContext"
 
 type MobMsgStatus = "sending" | "waiting" | "success" | "error"
+
 interface MobileMessage {
   id: string
   question: string
   answer: string
-  sources: ChatResponse["sources"]
   status: MobMsgStatus
+  sources: Array<{ chunk_id: string }>
 }
 
-interface ChatScreenProps {
-  documentId: string
-}
+export function ChatScreen({ documentId }: { documentId: string }) {
+  const { theme } = useTheme()
+  const t = getTokens(theme)
+  const c = t.colors
+  const { width } = useWindowDimensions()
+  const isTablet = width >= 768
+  const maxBubbleWidth = isTablet ? "70%" : "84%"
+  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, loading: loadingModels } = useModel()
 
-export const ChatScreen: React.FC<ChatScreenProps> = ({ documentId }) => {
-  const [prompts, setPrompts] = useState<string[]>([])
-  const [question, setQuestion] = useState("")
   const [messages, setMessages] = useState<MobileMessage[]>([])
-  const [history, setHistory] = useState<UserHistoryEntry[]>([])
-  const [summaryHistory, setSummaryHistory] = useState<SummaryHistoryEntry[]>([])
-  const [analysis, setAnalysis] = useState<DocumentAnalysisResponse | null>(null)
+  const [question, setQuestion] = useState("")
   const [loading, setLoading] = useState(false)
-  const [loadingAnalysis, setLoadingAnalysis] = useState(true)
   const [error, setError] = useState("")
+  const [analysis, setAnalysis] = useState<DocumentAnalysisResponse | null>(null)
+  const [loadingAnalysis, setLoadingAnalysis] = useState(true)
+  const [history, setHistory] = useState<any[]>([])
+  const [summaryHistory, setSummaryHistory] = useState<any[]>([])
+  const [prompts, setPrompts] = useState<string[]>(["Summarize this document", "What are key insights?", "Identify risks"])
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
+  const recordingRef = useRef<Audio.Recording | null>(null)
   const scrollRef = useRef<ScrollView>(null)
 
   useEffect(() => {
-    setMessages([])
-    setError("")
-    const load = async () => {
-      try {
-        setLoadingAnalysis(true)
-        const promptRes = await getDocumentPrompts(documentId)
-        setPrompts(promptRes.prompts)
-        const [historyRes, summaryRes, analysisRes] = await Promise.all([
-          getUserHistory(),
-          getSummaryHistory(),
-          getDocumentAnalysis(documentId).catch(() => null)
-        ])
-        setHistory(historyRes.history)
-        setSummaryHistory(summaryRes.history)
-        if (analysisRes) {
-          setAnalysis(analysisRes)
-        }
-      } catch (e: any) {
-        setError(e.message ?? "Failed to load chat data.")
-      } finally {
-        setLoadingAnalysis(false)
-      }
-    }
-    load()
+    if (!documentId) { setError("No document selected"); setLoadingAnalysis(false); return }
+    loadInitialData()
   }, [documentId])
 
-  const handleAsk = async (q: string) => {
-    if (!q.trim() || loading) return
-
-    const ts = Date.now()
-    const msgId = `msg_${ts}`
-
-    // Optimistic update: show question immediately with typing indicator
-    setQuestion("")
-    setError("")
-    setLoading(true)
-    setMessages((prev) => [
-      ...prev,
-      { id: msgId, question: q, answer: "", sources: [], status: "waiting" },
-    ])
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50)
-
-    const resolve = (answer: string, sources: ChatResponse["sources"], status: MobMsgStatus) => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === msgId ? { ...m, answer, sources, status } : m)),
-      )
-    }
-
+  const loadInitialData = async () => {
     try {
-      const res = await chatWithDocument(documentId, {
-        question: q,
-        session_id: undefined,
-        history: undefined,
-      })
+      setLoadingAnalysis(true)
+      const [analysisData, historyData, summaryData, promptsData] = await Promise.all([
+        getDocumentAnalysis(documentId), getUserHistory(), getSummaryHistory(), getDocumentPrompts(documentId),
+      ])
+      setAnalysis(analysisData)
+      setHistory((historyData as any)?.history || historyData || [])
+      setSummaryHistory((summaryData as any)?.history || summaryData || [])
+      if ((promptsData as any)?.suggested_prompts?.length) setPrompts((promptsData as any).suggested_prompts)
+      else if (promptsData?.prompts?.length) setPrompts(promptsData.prompts)
+    } catch (err) {
+      setError("Failed to load analysis")
+    } finally {
+      setLoadingAnalysis(false)
+    }
+  }
 
-      if ("status" in res && (res.status === "queued" || res.status === "pending_analysis")) {
-        let attempts = 0
-        const checkStatus = async () => {
-          try {
-            const status = await getIngestStatus(documentId)
-            if (status.status === "completed" || status.analysis_ready || status.ingestion_completed) {
-              const answer = await chatWithDocument(documentId, {
-                question: q,
-                pending_message_id: (res as any).pending_message_id,
-              } as any)
-              if (!("status" in answer)) {
-                resolve(answer.answer, answer.sources, "success")
-              }
-              setLoading(false)
-            } else if (status.status === "failed") {
-              resolve("Ingestion failed. Your chat has been reset.", [], "error")
-              setMessages([])
-              setLoading(false)
-            } else {
-              if (attempts < 60) {
-                attempts++
-                setTimeout(checkStatus, 2000)
-              } else {
-                resolve("Ingestion is taking too long.", [], "error")
-                setLoading(false)
-              }
-            }
-          } catch (e: any) {
-            resolve(e.message ?? "Retry failed.", [], "error")
-            setLoading(false)
-          }
-        }
-        setTimeout(checkStatus, (res as any).retry_after_ms ?? 2000)
-        return
+  const handleAsk = async (text: string) => {
+    if (!text.trim()) return
+    try {
+      setLoading(true)
+      setError("")
+      const msgId = Date.now().toString()
+      const optimisticMsg: MobileMessage = { id: msgId, question: text, answer: "", status: "waiting", sources: [] }
+      setMessages((prev) => [...prev, optimisticMsg])
+      setQuestion("")
+      try {
+        const response = await chatWithDocument(documentId, { question: text, model: selectedModel || undefined } as any) as any
+        setMessages((prev) => prev.map((msg) => msg.id === msgId ? { ...msg, answer: response.answer || "No response", sources: response.sources || response.citations || [], status: "success" } : msg))
+      } catch (chatErr: any) {
+        setMessages((prev) => prev.map((msg) => msg.id === msgId ? { ...msg, status: "error", answer: chatErr?.message || "Failed to get response" } : msg))
+        setError(chatErr?.message || "Failed to send message")
       }
-
-      resolve(res.answer, res.sources, "success")
-    } catch (e: any) {
-      resolve(e.message ?? "Failed to get answer.", [], "error")
     } finally {
       setLoading(false)
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80)
     }
   }
 
-  const handleRetry = (failedMsg: MobileMessage) => {
-    setMessages((prev) => prev.filter((m) => m.id !== failedMsg.id))
-    void handleAsk(failedMsg.question)
+  const handleRetry = async (msg: MobileMessage) => {
+    setMessages((prev) => prev.filter((m) => m.id !== msg.id))
+    await handleAsk(msg.question)
   }
 
+  const startRecording = async () => {
+    try { const { status } = await Audio.requestPermissionsAsync(); if (status !== "granted") return; await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true }); const recording = new Audio.Recording(); await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY); await recording.startAsync(); recordingRef.current = recording; setIsRecording(true) }
+    catch { setIsRecording(false) }
+  }
+
+  const stopRecording = async () => {
+    try {
+      const recording = recordingRef.current; if (!recording) return; await recording.stopAndUnloadAsync(); const uri = recording.getURI() || ""; setIsRecording(false); setIsTranscribing(true)
+      try { const result = await transcribeAudio(uri, "recording.m4a", "audio/m4a"); if (result.text?.trim()) setQuestion(result.text.trim()) } catch {} finally { setIsTranscribing(false) }
+    } catch { setIsRecording(false) }
+  }
+
+  const toggleRecording = () => { if (isRecording) stopRecording(); else startRecording() }
+
   return (
-    <View style={{ flex: 1 }}>
-      <Text style={{ fontSize: 18, fontWeight: "600", color: colors.textPrimary }}>
-        DocIntel Chat
-      </Text>
-      <Text style={{ fontSize: 13, color: colors.textMuted, marginBottom: 12 }}>
-        Ask questions about the document. Your EC history is saved.
-      </Text>
-
-      {error ? <Text style={{ color: colors.danger }}>{error}</Text> : null}
-
-      <ScrollView
-        ref={scrollRef}
-        style={{ flex: 1, marginBottom: 12 }}
-        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
-      >
-        {loadingAnalysis && (
-          <Text style={{ color: colors.textMuted, marginBottom: 12 }}>Loading analysis...</Text>
-        )}
-
-        {analysis && (
-          <View style={{ gap: 16, marginBottom: 24 }}>
-            <View style={cardStyle}>
-              <View style={cardHeaderStyle}>
-                <Text style={cardTitleStyle}>Executive Summary</Text>
-                <View style={pillStyle}>
-                  <Text style={pillTextStyle}>AI generated</Text>
-                </View>
-              </View>
-              <Text style={bodyTextStyle}>{analysis.executive_summary}</Text>
-            </View>
-
-            <View style={cardStyle}>
-              <View style={cardHeaderStyle}>
-                <Text style={cardTitleStyle}>Detailed Summary</Text>
-              </View>
-              {analysis.detailed_summary.map((item, idx) => (
-                <View key={idx} style={{ flexDirection: "row", marginBottom: 4, paddingRight: 10 }}>
-                  <Text style={{ color: colors.textPrimary, marginRight: 6 }}>•</Text>
-                  <Text style={bodyTextStyle}>{item}</Text>
-                </View>
-              ))}
-            </View>
-
-            <View style={cardStyle}>
-              <View style={cardHeaderStyle}>
-                <Text style={cardTitleStyle}>Key Insights</Text>
-              </View>
-
-              <View style={{ marginBottom: 12 }}>
-                <Text style={sectionLabelStyle}>TOPICS</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                  {analysis.topics.map((topic) => (
-                    <View key={topic} style={chipBlueStyle}>
-                      <Text style={{ color: colors.primaryDark, fontSize: 12 }}>{topic}</Text>
-                    </View>
-                  ))}
-                </View>
-              </View>
-
-              <View style={{ marginBottom: 12 }}>
-                <Text style={sectionLabelStyle}>ENTITIES</Text>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                  {analysis.entities.map((entity) => (
-                    <View key={entity} style={chipOutlineStyle}>
-                      <Text style={{ color: colors.primaryDark, fontSize: 12 }}>{entity}</Text>
-                    </View>
-                  ))}
-                </View>
-              </View>
-
-              {(analysis.key_entities?.dates?.length ?? 0) > 0 && (
-                <View style={{ marginBottom: 12 }}>
-                  <Text style={sectionLabelStyle}>DATES</Text>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                    {analysis.key_entities?.dates?.map((date) => (
-                      <View key={date} style={chipOutlineStyle}>
-                        <Text style={{ color: colors.primaryDark, fontSize: 12 }}>{date}</Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              )}
-
-              {(analysis.key_entities?.locations?.length ?? 0) > 0 && (
-                <View style={{ marginBottom: 12 }}>
-                  <Text style={sectionLabelStyle}>LOCATIONS</Text>
-                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                    {analysis.key_entities?.locations?.map((loc) => (
-                      <View key={loc} style={chipOutlineStyle}>
-                        <Text style={{ color: colors.primaryDark, fontSize: 12 }}>{loc}</Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              )}
-
-              {(analysis.action_items?.length ?? 0) > 0 && (
-                <View style={{ marginBottom: 12 }}>
-                  <Text style={sectionLabelStyle}>ACTION ITEMS</Text>
-                  {analysis.action_items?.slice(0, 6).map((item, idx) => (
-                    <View key={idx} style={{ flexDirection: "row", marginBottom: 4, paddingRight: 10 }}>
-                      <Text style={{ color: colors.textPrimary, marginRight: 6 }}>•</Text>
-                      <Text style={bodyTextStyle}>{item}</Text>
-                    </View>
-                  ))}
-                </View>
-              )}
-
-              <View>
-                <Text style={sectionLabelStyle}>SENTIMENT</Text>
-                <View
-                  style={[
-                    pillStyle,
-                    {
-                      alignSelf: "flex-start",
-                      backgroundColor:
-                        analysis.sentiment.toLowerCase() === "negative" ||
-                          analysis.sentiment.toLowerCase() === "urgent"
-                          ? colors.danger
-                          : colors.primary,
-                    },
-                  ]}
-                >
-                  <Text style={pillTextStyle}>{analysis.sentiment}</Text>
-                </View>
-              </View>
-
-            </View>
-          </View>
-        )}
-
-        <View style={cardStyle}>
-          <View style={cardHeaderStyle}>
-            <Text style={cardTitleStyle}>Copilot Chat History</Text>
-          </View>
-
-          {summaryHistory.length > 0 && (
-            <View style={{ marginBottom: 16 }}>
-              <Text style={{ fontSize: 13, color: colors.textMuted, marginBottom: 6 }}>
-                Summary History
-              </Text>
-              {summaryHistory.map((entry, idx) => (
-                <View key={`${entry.document_id}-${idx}`} style={historyCardStyle}>
-                  <Text style={{ fontSize: 12, color: colors.textMuted }}>
-                    {entry.document_id}
-                  </Text>
-                  <Text style={{ marginTop: 4, color: colors.textPrimary }}>
-                    {entry.executive_summary}
-                  </Text>
-                </View>
-              ))}
-            </View>
+    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1, backgroundColor: c.bg }} keyboardVerticalOffset={Platform.OS === "ios" ? 80 : 0}>
+      <View style={{ flex: 1, paddingHorizontal: t.spacing.md, paddingTop: t.spacing.md, paddingBottom: t.spacing.xs }}>
+        <View style={{ marginBottom: t.spacing.sm }}>
+          <Text style={{ fontSize: 18, fontWeight: "800", color: c.text, letterSpacing: -0.3 }}>AI Copilot</Text>
+          <Text style={{ fontSize: 12, color: c.textMuted, marginTop: 2 }}>Ask questions about your document</Text>
+          {!loadingModels && availableModels.length > 0 && (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: t.spacing.sm }}>
+              {availableModels.map((m, i) => {
+                const caps = modelCapabilities[m] || []
+                const icons = caps.slice(0, 3).map((cap: string) => ({ reasoning: "🧠", vision: "👁️", audio: "🎤", code: "💻", fast: "⚡", large: "🐘", text: "💬", embedding: "📊" })[cap] || "").filter(Boolean).join(" ")
+                return (
+                  <Pressable key={`cmodel-${i}`} onPress={() => setSelectedModel(m)} style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: t.radii.lg, marginRight: 6, backgroundColor: m === selectedModel ? c.primary : c.surface }}>
+                    <Text style={{ fontSize: 11, color: m === selectedModel ? "#FFF" : c.textSecondary, fontWeight: "600" }}>{m}</Text>
+                    {icons ? <Text style={{ fontSize: 9, color: m === selectedModel ? "#FFD" : c.textMuted, marginTop: 1, textAlign: "center" }}>{icons}</Text> : null}
+                  </Pressable>
+                )
+              })}
+            </ScrollView>
           )}
-          {history.length > 0 && (
-            <View style={{ marginBottom: 16 }}>
-              <Text style={{ fontSize: 13, color: colors.textMuted, marginBottom: 6 }}>
-                Previous Questions
-              </Text>
-              {history.map((entry, idx) => (
-                <View key={`${entry.document_id}-${idx}`} style={historyCardStyle}>
-                  <Text style={{ fontSize: 12, color: colors.textMuted }}>
-                    {entry.document_id}
-                  </Text>
-                  <Text style={{ marginTop: 4, color: colors.textPrimary }}>
-                    {entry.question}
-                  </Text>
-                  <Text style={{ marginTop: 4, color: colors.textMuted }}>
-                    {entry.answer}
-                  </Text>
-                </View>
-              ))}
+          {loadingModels && <ActivityIndicator size="small" color={c.primary} style={{ marginTop: 6 }} />}
+        </View>
+
+        {error ? (
+          <View style={{ padding: 10, borderRadius: t.radii.md, backgroundColor: c.error + "14", borderWidth: 1, borderColor: c.error + "28", marginBottom: 10 }}>
+            <Text style={{ color: c.error, fontSize: 13 }}>{error}</Text>
+          </View>
+        ) : null}
+
+        <ScrollView ref={scrollRef} style={{ flex: 1, marginBottom: t.spacing.sm }} onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })} showsVerticalScrollIndicator={false}>
+          {loadingAnalysis && <Text style={{ color: c.textMuted, marginBottom: t.spacing.sm, fontSize: 13 }}>Loading analysis…</Text>}
+
+          {messages.length === 0 && !loadingAnalysis && (
+            <View style={{ alignItems: "center", paddingVertical: 40, gap: 10 }}>
+              <Text style={{ fontSize: 36 }}>✦</Text>
+              <Text style={{ fontSize: 15, fontWeight: "700", color: c.textSecondary }}>Ask me anything</Text>
+              <Text style={{ fontSize: 13, color: c.textMuted, textAlign: "center" }}>I'm grounded in your document and will cite sources.</Text>
             </View>
           )}
 
           {messages.map((msg) => (
-            <View key={msg.id} style={{ marginBottom: 12 }}>
-              <View style={userBubbleStyle}>
-                <Text style={{ color: "#FFFFFF" }}>{msg.question}</Text>
-              </View>
-              {msg.status === "waiting" ? (
-                <View style={[assistantBubbleStyle, { flexDirection: "row", alignItems: "center", gap: 4 }]}>
-                  <Text style={{ color: colors.textMuted, fontSize: 14 }}>●</Text>
-                  <Text style={{ color: colors.textMuted, fontSize: 14 }}>●</Text>
-                  <Text style={{ color: colors.textMuted, fontSize: 14 }}>●</Text>
+            <View key={msg.id} style={{ marginBottom: t.spacing.md }}>
+              <View style={{ alignItems: "flex-end", marginBottom: t.spacing.sm }}>
+                <View style={{ flexDirection: "row-reverse", alignItems: "flex-end", gap: t.spacing.sm, maxWidth: maxBubbleWidth }}>
+                  <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: c.primary, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <UserIcon />
+                  </View>
+                  <View style={{ backgroundColor: c.primary, paddingHorizontal: 14, paddingVertical: 10, borderRadius: t.radii.lg, borderBottomRightRadius: 4, flex: 1 }}>
+                    <Text style={{ color: "#FFFFFF", fontSize: 14, lineHeight: 20 }}>{msg.question}</Text>
+                  </View>
                 </View>
+              </View>
+
+              {msg.status === "waiting" ? (
+                <View style={{ alignItems: "flex-start", marginLeft: 4 }}><RobotSearching /></View>
               ) : msg.status === "error" ? (
-                <View style={[assistantBubbleStyle, { borderColor: "rgba(239,68,68,0.4)", backgroundColor: "#FEF2F2" }]}>
-                  <Text style={{ color: "#dc2626" }}>❌ {msg.answer || "Failed to get a response."}</Text>
-                  <Pressable
-                    onPress={() => handleRetry(msg)}
-                    style={[primaryButtonStyle, { marginTop: 8, backgroundColor: "#dc2626" }]}
-                  >
-                    <Text style={{ color: "#FFFFFF", fontSize: 13 }}>↩ Retry</Text>
-                  </Pressable>
+                <View style={{ alignItems: "flex-start" }}>
+                  <View style={{ flexDirection: "row", alignItems: "flex-start", gap: t.spacing.sm, maxWidth: maxBubbleWidth }}>
+                    <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: c.error + "18", borderWidth: 1, borderColor: c.error + "30", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Text style={{ fontSize: 12 }}>⚠️</Text>
+                    </View>
+                    <View style={{ backgroundColor: c.error + "10", borderWidth: 1, borderColor: c.error + "20", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 4, borderBottomLeftRadius: t.radii.lg, borderTopRightRadius: t.radii.lg, borderBottomRightRadius: t.radii.lg, flex: 1, gap: t.spacing.sm }}>
+                      <Text style={{ color: c.error, fontSize: 14, lineHeight: 20 }}>{msg.answer || "Failed to get a response."}</Text>
+                      <Pressable onPress={() => handleRetry(msg)} style={{ backgroundColor: c.error + "18", borderWidth: 1, borderColor: c.error + "30", paddingVertical: 6, paddingHorizontal: 12, borderRadius: t.radii.sm, alignSelf: "flex-start" }}>
+                        <Text style={{ color: c.error, fontSize: 12, fontWeight: "600" }}>↩ Retry</Text>
+                      </Pressable>
+                    </View>
+                  </View>
                 </View>
               ) : (
-                <View style={assistantBubbleStyle}>
-                  <Text style={{ color: colors.textPrimary }}>{msg.answer}</Text>
-                  <View style={{ marginTop: 6, gap: 4 }}>
-                    {msg.sources.map((src) => (
-                      <Text key={src.chunk_id} style={{ fontSize: 11, color: colors.textMuted }}>
-                        Source: {src.chunk_id}
-                      </Text>
-                    ))}
+                <View style={{ alignItems: "flex-start" }}>
+                  <View style={{ flexDirection: "row", alignItems: "flex-start", gap: t.spacing.sm, maxWidth: maxBubbleWidth }}>
+                    <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 2 }}>
+                      <Text style={{ color: c.textSecondary, fontSize: 10, fontWeight: "700" }}>AI</Text>
+                    </View>
+                    <View style={{ backgroundColor: c.cardBg, borderWidth: 1, borderColor: c.border, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 4, borderBottomLeftRadius: t.radii.lg, borderTopRightRadius: t.radii.lg, borderBottomRightRadius: t.radii.lg, flex: 1, gap: t.spacing.sm }}>
+                      <Text style={{ color: c.text, fontSize: 14, lineHeight: 22 }}>{msg.answer}</Text>
+                      {msg.sources.length > 0 && (
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 5, marginTop: 4 }}>
+                          {msg.sources.slice(0, 3).map((src) => (
+                            <View key={src.chunk_id} style={{ paddingHorizontal: t.spacing.sm, paddingVertical: 3, borderRadius: t.radii.sm, backgroundColor: c.primary + "14", borderWidth: 1, borderColor: c.primary + "28" }}>
+                              <Text style={{ color: c.primary, fontSize: 10 }}>📄 chunk {src.chunk_id.slice(0, 8)}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+                    </View>
                   </View>
                 </View>
               )}
             </View>
           ))}
+        </ScrollView>
+
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+          {prompts.slice(0, 4).map((p) => (
+            <Pressable key={p} onPress={() => handleAsk(p)} style={{ paddingHorizontal: 12, paddingVertical: 7, borderRadius: t.radii.md, backgroundColor: c.warning + "10", borderWidth: 1, borderColor: c.warning + "28" }}>
+              <Text style={{ color: c.warning, fontSize: 12 }}>{p}</Text>
+            </Pressable>
+          ))}
         </View>
-      </ScrollView>
 
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-        {prompts.map((p) => (
-          <Pressable key={p} onPress={() => handleAsk(p)} style={promptChipStyle}>
-            <Text style={{ color: colors.primaryDark, fontSize: 12 }}>{p}</Text>
+        <View style={{ flexDirection: "row", gap: t.spacing.sm, backgroundColor: c.cardBg, borderRadius: t.radii.lg, borderWidth: 1, borderColor: c.border, padding: t.spacing.xs, alignItems: "center" }}>
+          <TextInput value={question} onChangeText={setQuestion} placeholder={isTranscribing ? "Transcribing voice..." : "Ask about this document…"} placeholderTextColor={c.textMuted} editable={!loading && !isTranscribing} style={{ flex: 1, borderWidth: 0, borderRadius: t.radii.md, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: "transparent", color: c.text, fontSize: 14, opacity: loading || isTranscribing ? 0.6 : 1 }} />
+          <Pressable onPress={toggleRecording} disabled={isTranscribing} style={{ width: 40, height: 40, borderRadius: t.radii.md, alignItems: "center", justifyContent: "center", backgroundColor: isRecording ? "#EF4444" : c.primary, opacity: isTranscribing ? 0.5 : 1 }}>
+            <Text style={{ color: "#FFFFFF", fontSize: 16 }}>{isRecording ? "⏹" : "🎙"}</Text>
           </Pressable>
-        ))}
+          <Pressable onPress={() => handleAsk(question)} style={{ width: 40, height: 40, backgroundColor: c.primary, borderRadius: t.radii.md, alignItems: "center", justifyContent: "center", opacity: loading ? 0.6 : 1 }} disabled={loading}>
+            <Text style={{ color: "#FFFFFF", fontWeight: "700", fontSize: 14 }}>{loading ? "…" : "➜"}</Text>
+          </Pressable>
+        </View>
       </View>
-
-      <View style={{ flexDirection: "row", gap: 8 }}>
-        <TextInput
-          value={question}
-          onChangeText={setQuestion}
-          placeholder="Ask a question"
-          editable={!loading}
-          style={[inputStyle, { flex: 1, opacity: loading ? 0.6 : 1 }]}
-        />
-        <Pressable onPress={() => handleAsk(question)} style={primaryButtonStyle} disabled={loading}>
-          <Text style={{ color: "#FFFFFF" }}>{loading ? "…" : "Send"}</Text>
-        </Pressable>
-      </View>
-    </View>
+    </KeyboardAvoidingView>
   )
-}
-
-const inputStyle = {
-  borderWidth: 1,
-  borderColor: colors.border,
-  borderRadius: 8,
-  paddingHorizontal: 12,
-  paddingVertical: 8,
-  backgroundColor: "#FFFFFF",
-} as const
-
-const primaryButtonStyle = {
-  backgroundColor: colors.primary,
-  paddingHorizontal: 16,
-  borderRadius: 8,
-  alignItems: "center",
-  justifyContent: "center",
-} as const
-
-const promptChipStyle = {
-  backgroundColor: "#FFF5D6",
-  borderWidth: 1,
-  borderColor: colors.secondary,
-  paddingHorizontal: 10,
-  paddingVertical: 6,
-  borderRadius: 14,
-} as const
-
-const userBubbleStyle = {
-  alignSelf: "flex-end",
-  backgroundColor: colors.primary,
-  padding: 10,
-  borderRadius: 12,
-  marginBottom: 6,
-} as const
-
-const assistantBubbleStyle = {
-  alignSelf: "flex-start",
-  backgroundColor: colors.surface,
-  borderWidth: 1,
-  borderColor: colors.border,
-  padding: 10,
-  borderRadius: 12,
-} as const
-
-const historyCardStyle = {
-  backgroundColor: "#FFFFFF",
-  borderWidth: 1,
-  borderColor: colors.border,
-  padding: 10,
-  borderRadius: 10,
-  marginBottom: 8,
-} as const
-
-const cardStyle = {
-  backgroundColor: colors.surface,
-  borderRadius: 12,
-  padding: 16,
-  borderWidth: 1,
-  borderColor: colors.border,
-} as const
-
-const cardHeaderStyle = {
-  flexDirection: "row" as const,
-  justifyContent: "space-between" as const,
-  alignItems: "center" as const,
-  marginBottom: 12,
-}
-
-const cardTitleStyle = {
-  fontWeight: "600" as const,
-  color: colors.textPrimary,
-  fontSize: 16,
-}
-
-const bodyTextStyle = {
-  fontSize: 14,
-  color: colors.textPrimary,
-  lineHeight: 20,
-}
-
-const sectionLabelStyle = {
-  fontSize: 12,
-  fontWeight: "600" as const,
-  color: colors.textMuted,
-  marginBottom: 6,
-}
-
-const chipBlueStyle = {
-  paddingHorizontal: 10,
-  paddingVertical: 4,
-  borderRadius: 16,
-  backgroundColor: "#E7F0FF",
-}
-
-const chipOutlineStyle = {
-  paddingHorizontal: 10,
-  paddingVertical: 4,
-  borderRadius: 16,
-  borderWidth: 1,
-  borderColor: colors.primary,
-  backgroundColor: colors.surface,
-}
-
-const pillStyle = {
-  paddingHorizontal: 8,
-  paddingVertical: 4,
-  borderRadius: 999,
-  backgroundColor: "#FFE6B7",
-}
-
-const pillTextStyle = {
-  fontSize: 11,
-  color: colors.primaryDark,
-  fontWeight: "600" as const,
 }

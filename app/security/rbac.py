@@ -30,6 +30,12 @@ async def get_current_user(
         else:
             sess = auth_service.validate_token(token)
             if not sess:
+                # Try loading from database (survives server restart)
+                sess = await auth_service._load_session_from_db(token)
+                if sess:
+                    # Cache in memory for subsequent requests
+                    auth_service._session_store[token] = sess
+            if not sess:
                 raise HTTPException(status_code=401, detail={"error": "token_expired"})
             user_id = sess.get("user_id")
             if not user_id:

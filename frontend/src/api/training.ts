@@ -4,8 +4,13 @@
  * Import from this file or from client.ts after re-export.
  */
 
-const BASE_URL =
-  (import.meta as any).env.VITE_API_BASE_URL ?? "http://localhost:8000"
+function getApiBaseUrl(): string {
+  const raw = (import.meta as any).env.VITE_API_BASE_URL
+  if (typeof raw === "string" && raw.trim()) return raw.trim().replace(/\/+$/, "")
+  return ""
+}
+
+const BASE_URL = getApiBaseUrl()
 const AUTH_TOKEN_KEY = "docintel_auth_token"
 
 function buildAuthHeaders(): Record<string, string> {

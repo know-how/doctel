@@ -31,14 +31,20 @@ async def get_rag_answer_scoped(
     model_name: Optional[str] = None,
     force_policy: bool = False,
     force_diagram: bool = False,
+    source_types: Optional[List[str]] = None,
 ):
     query_embedding = await ollama.embed(settings.embed_model, user_query)
 
     results_rows: list[dict] = []
     for pid in [int(p) for p in project_ids if p is not None]:
         try:
-            where = {"document_id": document_id} if document_id is not None else None
-            res = chroma.query(str(pid), query_embedding, top_k=settings.top_k, where=where)
+            where: dict = {}
+            if document_id is not None:
+                where["document_id"] = document_id
+            if source_types:
+                where["source_type"] = {"$in": source_types}
+            where_clause = where if where else None
+            res = chroma.query(str(pid), query_embedding, top_k=settings.top_k, where=where_clause)
         except Exception:
             continue
         docs = (res.get("documents") or [[]])[0] if isinstance(res, dict) else []
@@ -53,6 +59,7 @@ async def get_rag_answer_scoped(
                     "document_id": meta.get("document_id"),
                     "filename": meta.get("filename", "Unknown"),
                     "chunk_index": meta.get("chunk_index", 0),
+                    "source_type": meta.get("source_type", "document"),
                     "text": txt or "",
                     "distance": float(dist) if dist is not None else 1.0,
                 }
@@ -64,17 +71,20 @@ async def get_rag_answer_scoped(
     citations: list[dict] = []
     context_chunks: list[str] = []
     for r in results_rows:
-        citations.append(
-            {
-                "filename": r["filename"],
-                "chunk_index": int(r["chunk_index"] or 0),
-                "text": (r["text"][:200] + "...") if r["text"] else "",
-                "project_id": int(r["project_id"]),
-                "document_id": int(r["document_id"]) if r.get("document_id") is not None else None,
-            }
-        )
+        citation: dict = {
+            "filename": r["filename"],
+            "chunk_index": int(r["chunk_index"] or 0),
+            "text": (r["text"][:200] + "...") if r["text"] else "",
+            "project_id": int(r["project_id"]),
+            "document_id": int(r["document_id"]) if r.get("document_id") is not None else None,
+            "source_type": r.get("source_type", "document"),
+        }
+        citations.append(citation)
+        source_label = f"Source: {r['filename']}, Chunk {r['chunk_index']}"
+        if r.get("source_type") in ("audio", "video"):
+            source_label += f" [Type: {r['source_type']}]"
         context_chunks.append(
-            f"Source: {r['filename']}, Chunk {r['chunk_index']}\nContent: {r['text']}"
+            f"{source_label}\nContent: {r['text']}"
         )
 
     citations = _dedupe_keep_order(citations)
@@ -87,6 +97,10 @@ async def get_rag_answer_scoped(
         "Use ONLY the provided context to answer. "
         "Always include short citations like [Doc: <filename>, chunk <n>]. "
         "Use ZETDC terminology (transmission, distribution, substations, feeders, SCADA, HSE, ZERA compliance). "
+        "SUMMARY WRITING RULES: When writing summaries, NEVER use asterisks or markdown bold formatting. "
+        "NEVER use numbered or bulleted lists. Write summaries as flowing narrative paragraphs in professional prose. "
+        "Begin with a clear statement of scope and purpose, then present key findings in logically ordered paragraphs, "
+        "and close with implications or required actions. Maintain a formal tone suitable for ZETDC leadership and staff. "
     )
     if force_policy:
         system_prompt += (
@@ -103,10 +117,19 @@ async def get_rag_answer_scoped(
     user_prompt = f"Question: {user_query}\n\nContext:\n{context}"
     chosen = model_name or select_text_model("rag")
 
-    # Route to Gemini API if that model is selected
+    # Route to cloud APIs if that model is selected
     from app.services.gemini_service import GEMINI_MODEL_ID, generate as gemini_generate
-    if chosen == GEMINI_MODEL_ID:
+    from app.services.deepseek_service import DEEPSEEK_MODEL_ID, generate as deepseek_generate
+    from app.services.opencode_zen_service import generate as zen_generate
+    from app.services.huggingface_service import generate as hf_generate
+    if chosen == DEEPSEEK_MODEL_ID:
+        answer_text = await deepseek_generate(user_prompt, system=system_prompt)
+    elif chosen == GEMINI_MODEL_ID:
         answer_text = await gemini_generate(user_prompt, system=system_prompt)
+    elif chosen.startswith("zen/") or chosen.startswith("go/"):
+        answer_text = await zen_generate(user_prompt, model=chosen, system=system_prompt)
+    elif chosen.startswith("huggingface/"):
+        answer_text = await hf_generate(user_prompt, model=chosen, system=system_prompt)
     else:
         answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
 
