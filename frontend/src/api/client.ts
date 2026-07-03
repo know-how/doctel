@@ -588,7 +588,7 @@ export interface StreamCallbacks {
   onError: (error: string) => void
 }
 
-async function consumeSSEStream(response: Response, callbacks: StreamCallbacks): Promise<void> {
+async function consumeSSEStream(response: Response, callbacks: StreamCallbacks, timeoutMs: number = 120_000): Promise<void> {
   const reader = response.body?.getReader()
   if (!reader) {
     callbacks.onError("No response body")
@@ -599,39 +599,58 @@ async function consumeSSEStream(response: Response, callbacks: StreamCallbacks):
   let fullText = ""
   let model = ""
   let sessionId = ""
+  let timedOut = false
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split("\n")
-    buffer = lines.pop() || ""
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    reader.cancel()
+    callbacks.onError("The AI model did not respond within 2 minutes. Please try again.")
+  }, timeoutMs)
 
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed.startsWith("data: ")) continue
-      const payload = trimmed.slice(6).trim()
-      if (payload === "[DONE]") {
-        callbacks.onDone(fullText, model, sessionId)
-        return
-      }
-      try {
-        const data = JSON.parse(payload)
-        if (data.error) {
-          callbacks.onError(data.error)
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (timedOut) return
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split("\n")
+      buffer = lines.pop() || ""
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith("data: ")) continue
+        const payload = trimmed.slice(6).trim()
+        if (payload === "[DONE]") {
+          clearTimeout(timeoutId)
+          callbacks.onDone(fullText, model, sessionId)
           return
         }
-        if (data.chunk) {
-          fullText += data.chunk
-          model = data.model || model
-          sessionId = data.session_id || sessionId
-          callbacks.onChunk(data.chunk, model, sessionId)
+        try {
+          const data = JSON.parse(payload)
+          if (data.error) {
+            clearTimeout(timeoutId)
+            callbacks.onError(data.error)
+            return
+          }
+          if (data.chunk) {
+            fullText += data.chunk
+            model = data.model || model
+            sessionId = data.session_id || sessionId
+            callbacks.onChunk(data.chunk, model, sessionId)
+          }
+        } catch {
+          // skip malformed JSON
         }
-      } catch {
-        // skip malformed JSON
       }
     }
+  } catch (err: any) {
+    if (!timedOut) {
+      clearTimeout(timeoutId)
+      callbacks.onError(err?.message ?? "Stream read error")
+    }
+    return
   }
+  clearTimeout(timeoutId)
   callbacks.onDone(fullText, model, sessionId)
 }
 
