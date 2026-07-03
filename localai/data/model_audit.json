@@ -1,0 +1,132 @@
+[
+  {
+    "id": "60dcc93f-6720-460f-8082-24b08e00701f",
+    "timestamp": "2026-07-03T09:25:01.495250",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "code_generation",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "e926af43-fbf2-4327-978f-6b1ec0b49301",
+    "timestamp": "2026-07-03T09:24:50.038816",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "rag",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "3581d0af-e4d3-4522-993c-5a2587b3e0b0",
+    "timestamp": "2026-07-03T09:24:45.914584",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "embedding",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "645fca17-f129-45dc-a608-d502c2a5a24e",
+    "timestamp": "2026-07-03T09:24:41.348448",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "vision",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "9d7b75c9-0800-4f3c-94de-cbb1603c6ee6",
+    "timestamp": "2026-07-03T09:24:37.925794",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "comparison",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "ca3bc4b0-1c33-4749-92b3-19ef4ff3a7e2",
+    "timestamp": "2026-07-03T09:24:33.853941",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "classification",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "f9ba338b-6abe-4181-aeeb-9f33b690a128",
+    "timestamp": "2026-07-03T09:24:29.756899",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "extraction",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "8e1fe684-09ce-4710-a97d-359ea64f3ccc",
+    "timestamp": "2026-07-03T09:24:24.987692",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "summary",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "b1225767-faf4-494b-994a-c89290257fba",
+    "timestamp": "2026-07-03T06:58:11.399493",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "chat",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "61fe954d-18a6-4d1c-bfa4-69e43b4730fa",
+    "timestamp": "2026-07-03T06:34:49.868084",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "chat",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/deepseek-v4-flash"
+    },
+    "userId": "system",
+    "userName": "System"
+  }
+]
