@@ -17,3 +17,11 @@ localai/cache/
 
 # Windows
 Thumbs.db
+
+
+localai/logs/
+*.log
+
+.venv/
+*.gguf
+__pycache__/
