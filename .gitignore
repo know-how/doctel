@@ -1,1 +1,19 @@
-node_modules
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Models
+*.gguf
+
+# Local data
+localai/data/
+localai/cache/
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
