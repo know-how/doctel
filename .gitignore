@@ -25,3 +25,7 @@ localai/logs/
 .venv/
 *.gguf
 __pycache__/
+
+frontend/node_modules/
+mobile/node_modules/
+node_modules/
