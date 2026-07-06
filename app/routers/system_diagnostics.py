@@ -26,7 +26,7 @@ from app.routers.deps import (
     settings,
     logger,
 )
-from app.db.database import db_health, verify_database_health, _is_mysql, engine
+from app.db.database import db_health, verify_database_health, engine
 from app.db.database import AsyncSessionLocal
 from app.services.startup_service import startup_manager, ServiceStatus
 from app.services.cache_service import cache
@@ -179,7 +179,7 @@ async def system_status():
 
     # System info
     status["system"] = {
-        "mysql": _is_mysql,
+        "database": "mysql",
         "python_version": __import__("sys").version.split()[0],
         "platform": __import__("sys").platform,
         "base_dir": str(getattr(settings, "base_dir", "")),

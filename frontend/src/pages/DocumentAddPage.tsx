@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from "react"
 import { uploadDocument, getWorkspaces, createProject, getTrainingModelsStatus } from "../api/client"
+import { triggerTrainNow, triggerTrainBatch } from "../api/training"
 import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
 
@@ -72,9 +73,6 @@ export const DocumentAddPage: React.FC<{
   const [trainModelsInfo, setTrainModelsInfo] = useState<{ models: string[]; models_count: number; admin_only_details: boolean } | null>(null)
   const [trainState, setTrainState] = useState<"idle" | "training" | "done" | "error">("idle")
   const [trainMessage, setTrainMessage] = useState("")
-  const triggerTrainBatch = async () => { throw new Error("Not implemented") }
-  const triggerTrainNow = async () => { throw new Error("Not implemented") }
-
   useEffect(() => {
     getWorkspaces().then((res) => {
       const items = res.projects || res.workspaces || []

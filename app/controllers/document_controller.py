@@ -1,6 +1,11 @@
+import logging
+
 from fastapi import APIRouter, UploadFile, File, Form, Depends
 from fastapi.responses import FileResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.config import settings
 from app.models import (
+    ChatSource,
     DocumentCreateResponse,
     DocumentAnalysisResponse,
     PromptListResponse,
@@ -24,7 +29,11 @@ from app.services.document_service import (
     get_project_analysis,
     get_document_file,
 )
+from app.services.document_response_service import generate_document_response
+from app.db.database import get_db
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Documents"])
 
@@ -85,9 +94,34 @@ async def chat_with_document_endpoint(
     document_id: str,
     request: ChatRequest,
     user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> ChatResponse:
     request.ec_number = user["ec_number"]
-    return await chat_with_document(document_id, request)
+    # Delegate to the unified document response service which uses
+    # embedding‑based RAG (primary) + DB fallback + multi‑provider routing.
+    selected_model = request.selected_model or settings.default_model
+    try:
+        result = await generate_document_response(
+            document_id=int(document_id),
+            prompt=request.question,
+            selected_model=selected_model,
+            db=db,
+        )
+        answer_text = result.get("answer_text", "")
+        citations = result.get("citations", [])
+    except Exception as exc:
+        logger.exception("generate_document_response failed for doc %s", document_id)
+        answer_text = f"Error generating response: {exc}"
+        citations = []
+    return ChatResponse(
+        document_id=document_id,
+        question=request.question,
+        answer=answer_text,
+        sources=[
+            ChatSource(chunk_id=str(c.get("chunk_index", "")), snippet=c.get("text", ""))
+            for c in citations
+        ],
+    )
 
 
 @router.post("/projects", response_model=ProjectResponse)

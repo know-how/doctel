@@ -17,7 +17,7 @@ from app.routers.deps import (
     Project,
     _metrics,
 )
-from app.db.database import verify_database_health, _is_mysql, engine
+from app.db.database import verify_database_health, engine
 
 router = APIRouter(tags=["health"])
 

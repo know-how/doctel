@@ -116,7 +116,8 @@ class OllamaClient:
         timeout = self._timeout(read_seconds=3.0)
         response = await self._get_with_retries(url, timeout)
         models = response.json().get("models", [])
-        return [m["name"] for m in models]
+        # Strip :latest suffix because Ollama adds it to models pulled without an explicit tag
+        return [m["name"].removesuffix(":latest") for m in models]
 
     async def list_models_detailed(self) -> list[dict]:
         url = f"{self.base_url}/api/tags"
@@ -129,7 +130,7 @@ class OllamaClient:
                 size_bytes = m.get("size", 0)
                 details = m.get("details") or {}
                 result.append({
-                    "name": m.get("name", ""),
+                    "name": m.get("name", "").removesuffix(":latest"),
                     "size": size_bytes,
                     "size_human": _format_size(size_bytes),
                     "family": details.get("family", ""),

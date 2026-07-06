@@ -60,8 +60,6 @@ def _load_yaml_config(path: str) -> dict:
 
 class SecuritySettings(BaseModel):
     use_local_https: bool = False
-    encrypt_sqlite: bool = True
-    use_windows_efs: bool = True
 
 class RbacSettings(BaseModel):
     roles: List[str] = ["admin", "analyst", "viewer"]
@@ -208,13 +206,16 @@ class Settings(BaseModel):
     
     @property
     def db_url(self) -> str:
-        # If MySQL is configured via environment variable, use it
+        # Use environment variable override if provided
         if self.database_url:
             return self.database_url
-        # Otherwise fallback to SQLite
-        db_path = Path(self.base_dir) / "db" / "app.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        return f"sqlite+aiosqlite:///{db_path}"
+        # Default to MySQL connection
+        mysql_user = os.getenv("DOCINTEL_MYSQL_USER", "root")
+        mysql_pass = os.getenv("DOCINTEL_MYSQL_PASSWORD", "")
+        mysql_host = os.getenv("DOCINTEL_MYSQL_HOST", "127.0.0.1")
+        mysql_port = os.getenv("DOCINTEL_MYSQL_PORT", "3306")
+        mysql_db = os.getenv("DOCINTEL_MYSQL_DATABASE", "doctel")
+        return f"mysql+aiomysql://{mysql_user}:{mysql_pass}@{mysql_host}:{mysql_port}/{mysql_db}"
 
     @property
     def chroma_path(self) -> str:

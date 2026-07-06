@@ -24,7 +24,7 @@ performance_targets:
 available_models:
   - qwen3:4b
   - qwen3:8b
-  - llama3.2:latest
+  - llama3.2
   - llava:7b
   - nomic-embed-text
 default_model: "qwen3:4b"

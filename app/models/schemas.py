@@ -64,6 +64,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     question: str
     history: List[Dict[str, Any]] | None = None
+    selected_model: str | None = None
 
 
 class ChatSource(BaseModel):

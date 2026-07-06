@@ -20,7 +20,7 @@ export const API_ENDPOINTS = {
   DOCUMENTS: "/documents",
   DOCUMENTS_ANALYSIS: (id: string) => `/documents/${id}/analysis`,
   DOCUMENTS_PROMPTS: (id: string) => `/documents/${id}/prompts`,
-  DOCUMENTS_CHAT: (id: string) => `/documents/${id}/chat`,
+  DOCUMENTS_CHAT: (id: string) => `/api/ask/${id}`,
 
   // Projects
   PROJECTS: "/projects",

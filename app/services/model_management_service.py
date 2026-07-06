@@ -221,7 +221,7 @@ DEFAULT_MODELS_BY_PROVIDER: Dict[str, List[Dict[str, Any]]] = {
             "license": "Apache 2.0",
         },
         {
-            "id": "llama3.2:latest",
+            "id": "llama3.2",
             "name": "Llama 3.2",
             "contextWindow": 8192,
             "supportsChat": True,

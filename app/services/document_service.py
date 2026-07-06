@@ -1,3 +1,4 @@
+import asyncio
 import io
 from pathlib import Path
 import os
@@ -282,15 +283,65 @@ def _llama_cpp_generate(prompt: str) -> str:
     return str(text).strip()
 
 
-def _generate_with_llm(prompt: str) -> str:
+async def _generate_with_llm(prompt: str) -> str:
+    """Generate text using the configured provider.
+
+    Supports: ollama, llama_cpp, gemini, deepseek, zen, huggingface.
+    This is the async version — callers must ``await`` it.
+    """
     if settings.llm_provider == "ollama":
         return _ollama_generate(prompt)
     if settings.llm_provider == "llama_cpp":
         return _llama_cpp_generate(prompt)
+    if settings.llm_provider == "gemini":
+        from app.services.gemini_service import (
+            generate as gemini_generate,
+        )
+        try:
+            result = await asyncio.wait_for(gemini_generate(prompt), timeout=120.0)
+            return result or ""
+        except Exception as exc:
+            logger.warning("Gemini _generate_with_llm failed: %s", exc)
+            return ""
+    if settings.llm_provider == "deepseek":
+        from app.services.deepseek_service import (
+            generate as deepseek_generate,
+        )
+        try:
+            result = await asyncio.wait_for(deepseek_generate(prompt), timeout=120.0)
+            return result or ""
+        except Exception as exc:
+            logger.warning("DeepSeek _generate_with_llm failed: %s", exc)
+            return ""
+    if settings.llm_provider and settings.llm_provider.startswith("zen/"):
+        from app.services.opencode_zen_service import (
+            generate as zen_generate,
+        )
+        try:
+            result = await asyncio.wait_for(
+                zen_generate(prompt, model=settings.llm_provider), timeout=120.0
+            )
+            return result or ""
+        except Exception as exc:
+            logger.warning("Zen _generate_with_llm failed: %s", exc)
+            return ""
+    if settings.llm_provider and settings.llm_provider.startswith("huggingface/"):
+        from app.services.huggingface_service import (
+            generate as hf_generate,
+        )
+        try:
+            result = await asyncio.wait_for(
+                hf_generate(prompt, model=settings.llm_provider), timeout=120.0
+            )
+            return result or ""
+        except Exception as exc:
+            logger.warning("HF _generate_with_llm failed: %s", exc)
+            return ""
+    logger.warning("No supported llm_provider configured (current: %s)", settings.llm_provider)
     return ""
 
 
-def _maybe_generate_analysis_structured(document_id: str) -> dict[str, Any] | None:
+async def _maybe_generate_analysis_structured(document_id: str) -> dict[str, Any] | None:
     context = _read_document_text(document_id)
     if not context:
         return None
@@ -317,7 +368,7 @@ def _maybe_generate_analysis_structured(document_id: str) -> dict[str, Any] | No
         "Use ONLY the document content. If something is not present, return an empty array.\n\n"
         f"Document:\n{_llm_context(context)}"
     )
-    response = _generate_with_llm(prompt)
+    response = await _generate_with_llm(prompt)
     if not response:
         return None
     try:
@@ -329,7 +380,7 @@ def _maybe_generate_analysis_structured(document_id: str) -> dict[str, Any] | No
     return parsed
 
 
-def _maybe_generate_chat_answer(document_id: str, question: str) -> str:
+async def _maybe_generate_chat_answer(document_id: str, question: str) -> str:
     chunks = _retrieve_chunks(document_id, question, k=4)
     if not chunks:
         context = _read_document_text(document_id)
@@ -345,7 +396,7 @@ def _maybe_generate_chat_answer(document_id: str, question: str) -> str:
         "If the answer is not explicitly present, reply exactly: Not found in document.\n\n"
         f"Excerpts:\n{excerpts}\n\nQuestion: {question}\nAnswer:"
     )
-    llm_answer = _generate_with_llm(prompt)
+    llm_answer = await _generate_with_llm(prompt)
     if llm_answer:
         return llm_answer
     extractive = _extractive_answer_from_chunks(question, chunks)
@@ -896,7 +947,7 @@ async def get_document_analysis(
     action_items = _extract_action_items(context)
     decisions = _extract_decisions(context)
 
-    structured = _maybe_generate_analysis_structured(document_id)
+    structured = await _maybe_generate_analysis_structured(document_id)
     if structured:
         executive_summary = str(structured.get("executive_summary") or "").strip()
         detailed_summary = structured.get("detailed_summary") or []
@@ -988,7 +1039,7 @@ async def chat_with_document(
     if not document_exists(document_id):
         raise HTTPException(status_code=404, detail="Document not found")
 
-    answer = _maybe_generate_chat_answer(document_id, request.question)
+    answer = await _maybe_generate_chat_answer(document_id, request.question)
     chunks = _retrieve_chunks(document_id, request.question, k=4)
     if not answer:
         if chunks:

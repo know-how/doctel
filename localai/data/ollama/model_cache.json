@@ -1,11 +1,11 @@
 {
   "installed": [
-    "llama3.2:latest",
+    "llama3.2",
     "qwen3:8b",
     "qwen3:4b",
-    "nomic-embed-text:latest"
+    "nomic-embed-text"
   ],
-  "updated_at": 1783078660,
+  "updated_at": 1783329868,
   "pulls": {
     "llama3.2:3b-instruct": {
       "state": "in_progress",

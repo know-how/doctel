@@ -108,6 +108,7 @@ from app.models import (
 # ---------------------------------------------------------------------------
 from app.services.ingestion_service import ingest_document, get_file_hash
 from app.services.rag_service import get_rag_answer, get_rag_answer_scoped
+from app.services.document_response_service import generate_document_response
 from app.services.vision_service import analyze_image
 from app.services.auth_service import (
     verify_ad_credentials,
@@ -219,7 +220,7 @@ def _is_generation_model(model: str) -> bool:
     """Return True if the model name looks like a text generation model."""
     lowered = model.lower()
     return not _is_embedding_model(model) and any(
-        kw in lowered for kw in ["llama", "mistral", "qwen", "gemma", "phi", "deepseek", "gpt", "gemini"]
+        kw in lowered for kw in ["llama", "mistral", "qwen", "gemma", "phi", "deepseek", "gpt", "gemini", "cloud"]
     )
 
 

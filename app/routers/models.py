@@ -301,7 +301,7 @@ async def api_models_labels():
     ollama_labels = {
         "qwen3:4b": "Qwen 3 — 4B",
         "qwen3:8b": "Qwen 3 — 8B",
-        "llama3.2:latest": "Llama 3.2 (3B)",
+        "llama3.2": "Llama 3.2 (3B)",
         "llava:7b": "LLaVA 7B (vision)",
     }
 

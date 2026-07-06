@@ -37,7 +37,7 @@ _MODEL_CAPABILITIES: Dict[str, dict] = {
         "capabilities": ["text", "reasoning", "code"],
         "display_category": "Local",
     },
-    "llama3.2:latest": {
+    "llama3.2": {
         "capabilities": ["text", "fast"],
         "display_category": "Local",
     },
@@ -117,8 +117,8 @@ _MODEL_ALIASES: Dict[str, str] = {
     "gemini-1.5-pro": "gemini-1.5-pro",
     "deepseek-chat": "deepseek-chat",
     "deepseek-reasoner": "deepseek-reasoner",
-    "llama3.2": "llama3.2:latest",
-    "llama3.2:1b": "llama3.2:latest",
+    "llama3.2": "llama3.2",
+    "llama3.2:1b": "llama3.2",
     "llama3.2:3b": "llama3.2:3b",
     "qwen3:4b": "qwen3:4b",
     "qwen3:8b": "qwen3:8b",
