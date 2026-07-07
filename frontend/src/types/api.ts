@@ -138,6 +138,8 @@ export interface ModelsAvailableResponse {
   vision_model?: string
   ollama_healthy?: boolean
   defaults?: Record<string, string>
+  v2_providers?: V2Provider[]
+  v2_auto_routing?: boolean
 }
 
 export interface ModelPullStatusResponse {
@@ -501,4 +503,8 @@ export interface V2ReferenceResponse {
   validRoles: string[]
   validDepartments: string[]
   modelStates: string[]
+}
+
+export interface V2RoutingSelectResponse {
+  model: V2ModelMetadata & { provider_id: string; provider_name?: string; selection?: string; reason?: string }
 }

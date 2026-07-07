@@ -44,6 +44,7 @@ import {
   V2AuditResponse,
   V2RoutingStatusResponse,
   V2ReferenceResponse,
+  V2RoutingSelectResponse,
 } from "../types/api"
 
 function getApiBaseUrl(): string {
@@ -1616,5 +1617,12 @@ export async function v2GetReference(): Promise<V2ReferenceResponse> {
 export async function v2GetVisibleChatModels(): Promise<V2VisibleChatModelsResponse> {
   const res = await fetch(`${BASE_URL}/api/models/v2/chat/models`, { headers: buildAuthHeaders() })
   return handleResponse<V2VisibleChatModelsResponse>(res)
+}
+
+export async function v2SelectModelForTask(taskType: string): Promise<V2RoutingSelectResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/routing/select/${encodeURIComponent(taskType)}`, {
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<V2RoutingSelectResponse>(res)
 }
 

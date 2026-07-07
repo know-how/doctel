@@ -13,6 +13,8 @@ interface SidebarProps {
   isAuthenticated: boolean
   collapsed: boolean
   onToggleCollapse: () => void
+  mobileMenuOpen?: boolean
+  onToggleMobileMenu?: () => void
 }
 
 const COLLAPSED_KEY = "docintel_sidebar_collapsed"
@@ -60,6 +62,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isAuthenticated,
   collapsed,
   onToggleCollapse,
+  mobileMenuOpen = false,
+  onToggleMobileMenu = () => {},
 }) => {
   const { theme: themeName, toggleTheme, isDark } = useTheme()
   const t = getTokens(themeName)
@@ -119,9 +123,79 @@ export const Sidebar: React.FC<SidebarProps> = ({
     expandedSections.has(id) ? "▼" : "▶"
 
   return (
-    <aside
-      style={{
-        width: sidebarWidth,
+    <>
+      {/* ── Mobile hamburger button ── */}
+      <button
+        className="docintel-sidebar-hamburger"
+        onClick={onToggleMobileMenu}
+        style={{
+          position: "fixed",
+          top: 12,
+          left: 12,
+          zIndex: 201,
+          width: 40,
+          height: 40,
+          borderRadius: t.radii.md,
+          border: `1px solid ${t.colors.border}`,
+          background: t.colors.surface,
+          color: t.colors.text,
+          fontSize: 20,
+          cursor: "pointer",
+          display: "none",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: "0 2px 10px rgba(0,0,0,0.2)",
+          transition: "all 0.2s ease",
+          lineHeight: 1,
+          padding: 0,
+        }}
+        aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
+      >
+        {mobileMenuOpen ? "✕" : "☰"}
+      </button>
+
+      {/* ── Backdrop overlay for mobile ── */}
+      {mobileMenuOpen && (
+        <div
+          className="docintel-sidebar-backdrop"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.5)",
+            zIndex: 199,
+            backdropFilter: "blur(4px)",
+            WebkitBackdropFilter: "blur(4px)",
+            transition: "opacity 0.3s ease",
+          }}
+          onClick={onToggleMobileMenu}
+        />
+      )}
+
+      {/* ── Mobile responsive CSS ── */}
+      <style>{`
+        @media (max-width: 768px) {
+          .docintel-sidebar-hamburger { display: flex !important; }
+          .docintel-sidebar-backdrop { display: block !important; }
+          .docintel-sidebar-container {
+            position: fixed !important;
+            left: 0 !important;
+            top: 0 !important;
+            bottom: 0 !important;
+            z-index: 200 !important;
+            transform: translateX(-100%) !important;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), width 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+          }
+          .docintel-sidebar-container.docintel-sidebar-container--open {
+            transform: translateX(0) !important;
+            width: 340px !important;
+          }
+        }
+      `}</style>
+
+      <aside
+        className={`docintel-sidebar-container${mobileMenuOpen ? " docintel-sidebar-container--open" : ""}`}
+        style={{
+          width: sidebarWidth,
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
@@ -669,5 +743,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
     </aside>
+    </>
   )
 }

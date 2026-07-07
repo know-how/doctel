@@ -33,6 +33,11 @@ import { AnalyzeClassificationScreen } from "./src/screens/AnalyzeClassification
 import { OutputsHistoryScreen } from "./src/screens/OutputsHistoryScreen"
 import { AdminModelsScreen } from "./src/screens/AdminModelsScreen"
 import { AdminPromptsScreen } from "./src/screens/AdminPromptsScreen"
+import { V2AdminScreen } from "./src/screens/V2AdminScreen"
+import { ProvidersScreen } from "./src/screens/ProvidersScreen"
+import { ProviderDetailScreen } from "./src/screens/ProviderDetailScreen"
+import { ModelManagementScreen } from "./src/screens/ModelManagementScreen"
+import { TaskMappingScreen } from "./src/screens/TaskMappingScreen"
 import { SettingsProfileScreen } from "./src/screens/SettingsProfileScreen"
 import { CollaborationTeamScreen } from "./src/screens/CollaborationTeamScreen"
 import { NewChatScreen } from "./src/screens/NewChatScreen"
@@ -69,6 +74,9 @@ function getPageTitle(path: string): string {
     "/admin/prompts": "Prompts",
     "/admin/context": "Context & Tokens",
     "/admin/integrations": "Integrations",
+    "/admin/v2": "Model Catalog",
+    "/admin/v2/providers": "Providers",
+    "/admin/v2/task-mapping": "Task Mapping",
     "/settings/profile": "Profile",
     "/settings/security": "Security",
     "/settings/billing": "Billing",
@@ -169,6 +177,23 @@ function AppContent() {
 
   function renderPage() {
     const isAdmin = userRole === "admin"
+
+    // V2 dynamic routes (paths with variable parameters)
+    if (currentPath.startsWith("/admin/v2/providers/")) {
+      const parts = currentPath.split("/")
+      // /admin/v2/providers/{providerId}
+      if (parts.length === 5) {
+        const providerId = decodeURIComponent(parts[4])
+        return isAdmin ? <ProviderDetailScreen providerId={providerId} onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      }
+      // /admin/v2/providers/{providerId}/models/{modelId}
+      if (parts.length === 7 && parts[5] === "models") {
+        const providerId = decodeURIComponent(parts[4])
+        const modelId = decodeURIComponent(parts[6])
+        return isAdmin ? <ModelManagementScreen providerId={providerId} modelId={modelId} onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      }
+    }
+
     switch (currentPath) {
       case "/chat":
         return <NewChatScreen />
@@ -204,6 +229,12 @@ function AppContent() {
         return isAdmin ? <PlaceholderPage title="Context & Tokens" emoji="🔢" /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
       case "/admin/integrations":
         return isAdmin ? <PlaceholderPage title="Integrations" emoji="🔌" /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/v2":
+        return isAdmin ? <V2AdminScreen onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/v2/providers":
+        return isAdmin ? <ProvidersScreen onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/v2/task-mapping":
+        return isAdmin ? <TaskMappingScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
       case "/settings/profile":
         return <SettingsProfileScreen />
       case "/settings/security":

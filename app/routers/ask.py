@@ -260,7 +260,7 @@ async def ask_global(
     _default_model_pre = (settings.default_model or settings.text_model).strip()
     chosen_model = requested_model or _session_model_pre or _default_model_pre
     _using_gemini = (chosen_model == GEMINI_MODEL_ID)
-    _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID) or ("deepseek" in chosen_model.lower())
+    _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID)
     _using_zen = chosen_model.startswith("zen/") or chosen_model.startswith("go/")
     _using_hf = chosen_model.startswith("huggingface/")
     _using_cloud = (chosen_model == "cloud")
@@ -549,7 +549,7 @@ async def ask_global_stream(
         chosen_model = requested_model or (settings.default_model or settings.text_model).strip()
         print(f"chosen_model: '{chosen_model}'", flush=True)
         _using_gemini = (chosen_model == GEMINI_MODEL_ID)
-        _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID) or ("deepseek" in chosen_model.lower())
+        _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID)
         _using_zen = chosen_model.startswith("zen/") or chosen_model.startswith("go/")
         _using_hf = chosen_model.startswith("huggingface/")
         _using_cloud = (chosen_model == "cloud")
@@ -797,7 +797,7 @@ async def ask_document(
         _default_model_pre = (settings.default_model or settings.text_model).strip()
         chosen_model = requested_model or _session_model_pre or _default_model_pre
         _using_gemini = (chosen_model == GEMINI_MODEL_ID)
-        _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID) or ("deepseek" in chosen_model.lower())
+        _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID)
         _using_zen = chosen_model.startswith("zen/") or chosen_model.startswith("go/")
         _using_hf = chosen_model.startswith("huggingface/")
         _using_cloud = (chosen_model == "cloud")
@@ -1051,7 +1051,7 @@ async def ask_document_stream(
 
     chosen_model = requested_model or (settings.default_model or settings.text_model).strip()
     _using_gemini = (chosen_model == GEMINI_MODEL_ID)
-    _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID) or ("deepseek" in chosen_model.lower())
+    _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID)
     _using_zen = chosen_model.startswith("zen/") or chosen_model.startswith("go/")
     _using_hf = chosen_model.startswith("huggingface/")
     _using_cloud = (chosen_model == "cloud")

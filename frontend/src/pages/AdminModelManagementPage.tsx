@@ -16,6 +16,7 @@ import {
   v2GetAudit,
 } from "../api/client"
 import { useTheme } from "../context/ThemeContext"
+import { useModel } from "../context/ModelContext"
 import { getTokens } from "../theme/themeTokens"
 import type {
   V2CatalogResponse,
@@ -138,6 +139,20 @@ export const AdminModelManagementPage: React.FC = () => {
   const { theme } = useTheme()
   const t = getTokens(theme)
   const c = t.colors
+  const { reloadModels } = useModel()
+
+  // ── Broadcast admin changes to all tabs ──
+  const broadcastModelChange = useCallback((type: string = "models-changed") => {
+    try {
+      const bc = new BroadcastChannel("doctel-model-updates")
+      bc.postMessage({ type })
+      bc.close()
+    } catch {
+      // BroadcastChannel not available
+    }
+    // Also reload this component and the global ModelContext
+    reloadModels()
+  }, [reloadModels])
 
   const [tab, setTab] = useState<PageTab>("models")
   const [catalog, setCatalog] = useState<V2CatalogResponse | null>(null)
@@ -194,7 +209,8 @@ export const AdminModelManagementPage: React.FC = () => {
   const handleToggleModel = async (providerId: string, modelId: string, enabled: boolean) => {
     try {
       await v2ToggleModel(providerId, modelId, enabled)
-      loadData()
+      await loadData()
+      broadcastModelChange()
     } catch (e: any) {
       setError(e.message)
     }
@@ -204,6 +220,7 @@ export const AdminModelManagementPage: React.FC = () => {
     try {
       await v2SetModelState(providerId, modelId, state)
       loadData()
+      broadcastModelChange()
     } catch (e: any) {
       setError(e.message)
     }
@@ -213,6 +230,7 @@ export const AdminModelManagementPage: React.FC = () => {
     try {
       await v2SetVisibility(providerId, modelId, visible)
       loadData()
+      broadcastModelChange()
     } catch (e: any) {
       setError(e.message)
     }
@@ -224,6 +242,7 @@ export const AdminModelManagementPage: React.FC = () => {
       await v2UpdateModel(editingModel.providerId, editingModel.model.id, editForm)
       setEditingModel(null)
       loadData()
+      broadcastModelChange()
     } catch (e: any) {
       setError(e.message)
     }
@@ -237,6 +256,11 @@ export const AdminModelManagementPage: React.FC = () => {
         await v2SetTaskMapping(taskType, providerId, modelId)
       }
       loadData()
+      // Refresh ModelContext so Chat page picks up new defaults immediately
+      if (taskType === "chat" && modelId) {
+        try { localStorage.setItem("docintel_selected_model", modelId) } catch {}
+      }
+      broadcastModelChange("routing-changed")
     } catch (e: any) {
       setError(e.message)
     }
@@ -246,6 +270,7 @@ export const AdminModelManagementPage: React.FC = () => {
     try {
       const res = await v2ToggleRouting(!autoRouting)
       setAutoRouting(res.automaticRouting)
+      broadcastModelChange("routing-changed")
     } catch (e: any) {
       setError(e.message)
     }

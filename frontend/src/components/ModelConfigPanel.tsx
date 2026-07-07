@@ -46,7 +46,7 @@ export const ModelConfigPanel: React.FC<Props> = ({
   const [open, setOpen] = useState(false)
   const panelRef = useRef<HTMLDivElement>(null)
 
-  /* close on outside click */
+  /* close on outside click — use 'click' so trigger's onClick fires first */
   useEffect(() => {
     if (!open) return
     const handler = (e: MouseEvent) => {
@@ -54,8 +54,11 @@ export const ModelConfigPanel: React.FC<Props> = ({
         setOpen(false)
       }
     }
-    document.addEventListener("mousedown", handler)
-    return () => document.removeEventListener("mousedown", handler)
+    /* Use 'click' instead of 'mousedown' to avoid race with the trigger button's
+       onClick handler.  mousedown fires before click, so clicking the trigger
+       would close the panel (outside detection) then toggle it open again. */
+    document.addEventListener("click", handler)
+    return () => document.removeEventListener("click", handler)
   }, [open])
 
   /* close on Escape */

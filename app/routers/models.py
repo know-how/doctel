@@ -212,6 +212,8 @@ async def api_models_available():
     # Load task mapping defaults from V2 if available
     task_defaults = {}
     _mgmt_path = Path(settings.base_dir) / "data" / "model_management.json"
+    v2_providers = []
+    v2_auto_routing = True
     if _mgmt_path.exists():
         try:
             _raw = _mgmt_path.read_text(encoding="utf-8")
@@ -220,8 +222,40 @@ async def api_models_available():
             for task_type, mapping in _raw_mapping.items():
                 if isinstance(mapping, dict) and mapping.get("modelId"):
                     task_defaults[task_type] = mapping["modelId"]
+            v2_providers = _data.get("providers", [])
+            v2_auto_routing = _data.get("automaticRouting", True)
+
+            # Inject V2 enabled+visible models into the available lists so
+            # they appear in the UI without needing a separate endpoint call.
+            for p in v2_providers:
+                for m in p.get("models", []):
+                    mid = m.get("id", "")
+                    if not mid:
+                        continue
+                    if m.get("enabled") and m.get("visibleToUsers"):
+                        if mid not in filtered_installed:
+                            filtered_installed.append(mid)
+                        if mid not in filtered_available:
+                            filtered_available.append(mid)
+                    # Also add to all_details for capability/display info
+                    v2_detail = {
+                        "name": mid,
+                        "size": 0,
+                        "size_human": "Cloud",
+                        "family": p.get("name", m.get("name", "")),
+                        "parameter_size": m.get("name", ""),
+                        "quantization_level": m.get("pricingTier", "API"),
+                        "modified_at": "",
+                        "digest": "",
+                        "ready": m.get("enabled", False),
+                        "capabilities": m.get("capabilities", m.get("forTasks", [])),
+                        "display_category": get_display_category(mid),
+                    }
+                    existing_names = {d["name"] for d in all_details}
+                    if mid not in existing_names:
+                        all_details.append(v2_detail)
         except Exception as e:
-            logger.warning("Failed to load task mapping from %s: %s", _mgmt_path, e)
+            logger.warning("Failed to load V2 data from %s: %s", _mgmt_path, e)
     else:
         logger.info("V2 management file not found at %s", _mgmt_path)
 
@@ -235,6 +269,8 @@ async def api_models_available():
         "models": all_details,
         "ollama_healthy": not offline,
         "defaults": task_defaults,
+        "v2_providers": v2_providers,
+        "v2_auto_routing": v2_auto_routing,
     }
 
 

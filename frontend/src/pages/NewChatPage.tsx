@@ -70,7 +70,14 @@ export const NewChatPage: React.FC = () => {
   const audioChunksRef = useRef<Blob[]>([])
   const chatEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const { selectedModel: model, setSelectedModel: setModel, availableModels: models, modelCapabilities, modelLabels, modelDetails, loading: loadingModels } = useModel()
+  const { selectedModel: model, setSelectedModel: setModel, availableModels: models, modelCapabilities, modelLabels, modelDetails, loading: loadingModels, setModelForTask } = useModel()
+
+  // On mount, ensure we have the best chat-optimized model
+  useEffect(() => {
+    if (!loadingModels && !model) {
+      setModelForTask("chat")
+    }
+  }, [loadingModels, model, setModelForTask])
 
   // When model changes and a session exists, persist to backend
   const handleModelChange = async (nextModel: string) => {
@@ -410,7 +417,7 @@ export const NewChatPage: React.FC = () => {
 
       {/* Header */}
       <div style={{
-        flexShrink: 0, position: "relative", zIndex: 2,
+        flexShrink: 0, position: "relative", zIndex: 10,
         padding: `${t.spacing.lg}px 40px`,
         borderBottom: `1px solid ${t.colors.border}`,
         display: "flex", alignItems: "center", justifyContent: "space-between",

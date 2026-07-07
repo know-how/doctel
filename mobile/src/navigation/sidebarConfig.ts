@@ -61,6 +61,9 @@ export const sidebarConfig: NavItem[] = [
       { id: "admin-prompts", label: "Prompts", icon: "💬", path: "/admin/prompts" },
       { id: "admin-context", label: "Context & Tokens", icon: "🔢", path: "/admin/context" },
       { id: "admin-integrations", label: "Integrations", icon: "🔌", path: "/admin/integrations" },
+      { id: "admin-v2", label: "Model Catalog", icon: "📦", path: "/admin/v2" },
+      { id: "admin-v2-providers", label: "Providers", icon: "🏪", path: "/admin/v2/providers" },
+      { id: "admin-v2-task-mapping", label: "Task Mapping", icon: "🔀", path: "/admin/v2/task-mapping" },
     ],
   },
   {

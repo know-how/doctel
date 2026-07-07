@@ -3,7 +3,8 @@ import { View, Text, TextInput, Pressable, ScrollView, KeyboardAvoidingView, Pla
 import { Audio } from "expo-av"
 import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
-import { chatGlobally, getAvailableModels, setChatSessionModel, createChatSession, getModelCapabilities, transcribeAudio } from "../api/client"
+import { chatGlobally, setChatSessionModel, createChatSession, transcribeAudio } from "../api/client"
+import { useModel } from "../context/ModelContext"
 import { RobotSearching } from "../components/RobotSearching"
 import { UserIcon } from "../components/UserIcon"
 
@@ -31,10 +32,7 @@ export function GlobalChatScreen({ onBack }: GlobalChatScreenProps) {
   const [messages, setMessages] = useState<MobileMessage[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
-  const [models, setModels] = useState<string[]>([])
-  const [selectedModel, setSelectedModel] = useState<string>("")
-  const [loadingModels, setLoadingModels] = useState(true)
-  const [capabilities, setCapabilities] = useState<Record<string, string[]>>({})
+  const { availableModels, selectedModel, setSelectedModel, loading: modelsLoading, modelCapabilities } = useModel()
   const [sessionId, setSessionId] = useState<string>("")
   const [isRecording, setIsRecording] = useState(false)
   const [isTranscribing, setIsTranscribing] = useState(false)
@@ -42,19 +40,9 @@ export function GlobalChatScreen({ onBack }: GlobalChatScreenProps) {
   const scrollRef = useRef<ScrollView>(null)
 
   useEffect(() => {
-    const loadModels = async () => {
-      try { setLoadingModels(true); const res = await getAvailableModels() as any; const raw: string[] = [...(res.installed || []), ...(res.available || [])]; const modelList = [...new Set(raw)]; setModels(modelList); if (modelList.length > 0) setSelectedModel(modelList[0]) }
-      catch (e: any) { setError("Could not load available models") }
-      finally { setLoadingModels(false) }
-    }
-    const loadCapabilities = async () => {
-      try { const res = await getModelCapabilities() as any; setCapabilities(res.capabilities || res || {}) } catch {}
-    }
     const createSession = async () => {
       try { const session = await createChatSession(undefined, "global"); setSessionId(session.session_id || "") } catch {}
     }
-    loadModels()
-    loadCapabilities()
     createSession()
   }, [])
 
@@ -101,12 +89,12 @@ export function GlobalChatScreen({ onBack }: GlobalChatScreenProps) {
             <Text style={{ fontSize: 18, fontWeight: "700", color: c.text }}>🌍 Global Chat</Text>
             {onBack && (<Pressable onPress={onBack}><Text style={{ fontSize: 14, color: c.primary }}>← Back</Text></Pressable>)}
           </View>
-          {!loadingModels && models.length > 0 && (
+          {!modelsLoading && availableModels.length > 0 && (
             <View>
               <Text style={{ fontSize: 12, color: c.textMuted, marginBottom: 6 }}>Model</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                {models.map((model, i) => {
-                  const modelCaps = capabilities[model] || []
+                {availableModels.map((model, i) => {
+                  const modelCaps = modelCapabilities[model] || []
                   const capIcons = modelCaps.slice(0, 3).map((cap: string) => {
                     if (cap === "reasoning") return "🧠"
                     if (cap === "vision") return "👁️"

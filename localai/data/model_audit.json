@@ -1,5 +1,20 @@
 [
   {
+    "id": "dbb681af-7cc1-4fc1-8c8b-a4dd12901f52",
+    "timestamp": "2026-07-07T08:29:41.831422",
+    "action": "model_updated",
+    "entityType": "model",
+    "entityId": "qwen3:4b",
+    "details": {
+      "providerId": "ollama",
+      "changes": {
+        "enabled": false
+      }
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
     "id": "60dcc93f-6720-460f-8082-24b08e00701f",
     "timestamp": "2026-07-03T09:25:01.495250",
     "action": "task_mapping_updated",

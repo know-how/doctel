@@ -67,6 +67,7 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
   const [workspaceProjectId, setWorkspaceProjectId] = useState<string | null>(null)
   const [introVisible, setIntroVisible] = useState(false)
   const [collapsed, setCollapsed] = useState(loadCollapsed)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [uiCfg, setUiCfg] = useState<any>({
     show_intro_animation: true,
     show_greeting_message: true,
@@ -116,10 +117,16 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
     } else {
       setCurrentPath(path)
     }
+    // Close mobile sidebar when navigating
+    setMobileMenuOpen(false)
   }, [])
 
   const handleToggleSidebar = useCallback(() => {
     setCollapsed((v) => !v)
+  }, [])
+
+  const toggleMobileMenu = useCallback(() => {
+    setMobileMenuOpen((v) => !v)
   }, [])
 
   const renderPage = () => {
@@ -196,6 +203,7 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
 
   return (
     <div
+      className="docintel-layout-root"
       style={{
         display: "flex",
         height: "100vh",
@@ -205,6 +213,13 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
         fontFamily: t.font.sans,
       }}
     >
+      <style>{`
+        @media (max-width: 768px) {
+          .docintel-layout-content {
+            padding-left: 52px !important;
+          }
+        }
+      `}</style>
       <Sidebar
         currentPath={currentPath}
         onNavigate={handleNavigate}
@@ -214,9 +229,12 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
         isAuthenticated={isAuthenticated}
         collapsed={collapsed}
         onToggleCollapse={handleToggleSidebar}
+        mobileMenuOpen={mobileMenuOpen}
+        onToggleMobileMenu={toggleMobileMenu}
       />
 
       <div
+        className="docintel-layout-content"
         style={{
           flex: 1,
           display: "flex",

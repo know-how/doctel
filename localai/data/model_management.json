@@ -25,7 +25,7 @@
           "supportsClassification": true,
           "supportsSummary": true,
           "supportsExtraction": true,
-          "enabled": true,
+          "enabled": false,
           "visibleToUsers": true,
           "isDefault": false,
           "allowedRoles": [],
@@ -638,5 +638,5 @@
     }
   },
   "automaticRouting": true,
-  "lastUpdated": "2026-07-03T09:25:01.488364"
+  "lastUpdated": "2026-07-07T08:29:41.664581"
 }

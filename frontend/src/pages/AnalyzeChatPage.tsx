@@ -51,7 +51,14 @@ export const AnalyzeChatPage: React.FC = () => {
   const [docsError, setDocsError] = useState<string | null>(null)
 
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, modelDetails, loading: loadingModels } = useModel()
+  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, modelDetails, loading: loadingModels, setModelForTask } = useModel()
+
+  // On mount, ensure we have the best model for document analysis / RAG
+  useEffect(() => {
+    if (!loadingModels && !selectedModel) {
+      setModelForTask("rag")
+    }
+  }, [loadingModels, selectedModel, setModelForTask])
   const [messages, setMessages] = useState<Message[]>([])
   const [question, setQuestion] = useState("")
   const [loadingChat, setLoadingChat] = useState(false)

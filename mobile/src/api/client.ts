@@ -26,6 +26,18 @@ import {
   AdminSettingsResponse,
   AdminSettingsPatchResponse,
   AdminSettingsAuditResponse,
+  V2CatalogResponse,
+  V2ProviderListResponse,
+  V2ProviderResponse,
+  V2ModelListResponse,
+  V2ModelResponse,
+  V2TaskMappingResponse,
+  V2HealthResponse,
+  V2AuditResponse,
+  V2ReferenceResponse,
+  V2VisibleChatModelsResponse,
+  V2RoutingStatusResponse,
+  V2RoutingSelectResponse,
 } from "../types/api"
 import AsyncStorage from "@react-native-async-storage/async-storage"
 
@@ -958,4 +970,235 @@ export async function distillFromCloud(opts?: {
     body: JSON.stringify(opts || {}),
   })
   return handleResponse<any>(res)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Model Management v2 API
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function v2GetCatalog(): Promise<V2CatalogResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/catalog`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2CatalogResponse>(res)
+}
+
+export async function v2ListProviders(): Promise<V2ProviderListResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2ProviderListResponse>(res)
+}
+
+export async function v2GetProvider(providerId: string): Promise<V2ProviderResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2ProviderResponse>(res)
+}
+
+export async function v2AddProvider(payload: {
+  name: string; vendor?: string; base_url?: string; api_key_env?: string; description?: string; icon?: string
+}): Promise<V2ProviderResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<V2ProviderResponse>(res)
+}
+
+export async function v2UpdateProvider(providerId: string, payload: Record<string, any>): Promise<V2ProviderResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<V2ProviderResponse>(res)
+}
+
+export async function v2DeleteProvider(providerId: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}`, {
+    method: "DELETE",
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<{ ok: boolean }>(res)
+}
+
+export async function v2ReorderProviders(providerIds: string[]): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/reorder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify({ providerIds }),
+  })
+  return handleResponse<{ ok: boolean }>(res)
+}
+
+export async function v2ListModels(providerId: string): Promise<V2ModelListResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2ModelListResponse>(res)
+}
+
+export async function v2GetModel(providerId: string, modelId: string): Promise<V2ModelResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2ModelResponse>(res)
+}
+
+export async function v2AddModel(providerId: string, payload: Record<string, any>): Promise<V2ModelResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<V2ModelResponse>(res)
+}
+
+export async function v2UpdateModel(providerId: string, modelId: string, payload: Record<string, any>): Promise<V2ModelResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<V2ModelResponse>(res)
+}
+
+export async function v2DeleteModel(providerId: string, modelId: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}`, {
+    method: "DELETE",
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<{ ok: boolean }>(res)
+}
+
+export async function v2SetModelState(providerId: string, modelId: string, state: string): Promise<V2ModelResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify({ state }),
+  })
+  return handleResponse<V2ModelResponse>(res)
+}
+
+export async function v2ToggleModel(providerId: string, modelId: string, enabled: boolean): Promise<V2ModelResponse & { enabled: boolean }> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/toggle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify({ enabled }),
+  })
+  return handleResponse<V2ModelResponse & { enabled: boolean }>(res)
+}
+
+export async function v2SetVisibility(providerId: string, modelId: string, visible: boolean): Promise<V2ModelResponse & { visible: boolean }> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/visibility`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify({ visible }),
+  })
+  return handleResponse<V2ModelResponse & { visible: boolean }>(res)
+}
+
+export async function v2SetModelRoles(providerId: string, modelId: string, roles: string[]): Promise<V2ModelResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/roles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify({ roles }),
+  })
+  return handleResponse<V2ModelResponse>(res)
+}
+
+export async function v2SetModelDepartments(providerId: string, modelId: string, departments: string[]): Promise<V2ModelResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/departments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify({ departments }),
+  })
+  return handleResponse<V2ModelResponse>(res)
+}
+
+export async function v2GetTaskMapping(): Promise<V2TaskMappingResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/task-mapping`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2TaskMappingResponse>(res)
+}
+
+export async function v2SetTaskMapping(taskType: string, providerId: string, modelId: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/task-mapping/${encodeURIComponent(taskType)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify({ providerId, modelId }),
+  })
+  return handleResponse<{ ok: boolean }>(res)
+}
+
+export async function v2RemoveTaskMapping(taskType: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/task-mapping/${encodeURIComponent(taskType)}`, {
+    method: "DELETE",
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<{ ok: boolean }>(res)
+}
+
+export async function v2GetRoutingStatus(): Promise<V2RoutingStatusResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/routing/status`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2RoutingStatusResponse>(res)
+}
+
+export async function v2ToggleRouting(enabled: boolean): Promise<V2RoutingStatusResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/routing/toggle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await buildAuthHeaders()) },
+    body: JSON.stringify({ enabled }),
+  })
+  return handleResponse<V2RoutingStatusResponse>(res)
+}
+
+export async function v2GetHealth(): Promise<V2HealthResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/health`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2HealthResponse>(res)
+}
+
+export async function v2GetMarketplace(): Promise<{ catalog: any[] }> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/marketplace`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<{ catalog: any[] }>(res)
+}
+
+export async function v2GetAudit(limit: number = 100, action?: string): Promise<V2AuditResponse> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (action) params.set("action", action)
+  const res = await fetch(`${BASE_URL}/api/models/v2/audit?${params}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2AuditResponse>(res)
+}
+
+export async function v2GetReference(): Promise<V2ReferenceResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/ref`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2ReferenceResponse>(res)
+}
+
+export async function v2GetVisibleChatModels(): Promise<V2VisibleChatModelsResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/chat/models`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2VisibleChatModelsResponse>(res)
+}
+
+export async function v2SelectModelForTask(taskType: string): Promise<V2RoutingSelectResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/routing/select/${encodeURIComponent(taskType)}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<V2RoutingSelectResponse>(res)
 }

@@ -290,7 +290,7 @@ export const SystemStatusPage: React.FC = () => {
                 <div>Database: <strong style={{ color: c.text }}>{status.system.mysql ? "MySQL" : "SQLite"}</strong></div>
                 <div>Python: <strong style={{ color: c.text }}>{status.system.python_version}</strong></div>
                 <div>Platform: <strong style={{ color: c.text }}>{status.system.platform}</strong></div>
-                <div>Base: <strong style={{ color: c.text }} style={{ fontSize: 10 }}>{status.system.base_dir}</strong></div>
+                <div>Base: <strong style={{ color: c.text, fontSize: 10 }}>{status.system.base_dir}</strong></div>
               </div>
             </div>
           )}
