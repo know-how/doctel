@@ -1,5 +1,76 @@
 [
   {
+    "id": "89a46c1a-baf8-4ee0-b29c-fbe47b1e16f8",
+    "timestamp": "2026-07-07T11:09:03.876103",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "chat",
+    "details": {
+      "providerId": "opencode-zen",
+      "modelId": "deepseek-v4-flash-free"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "d0f9059b-4244-4823-af77-a18cc51c0b56",
+    "timestamp": "2026-07-07T11:07:25.965283",
+    "action": "model_added",
+    "entityType": "model",
+    "entityId": "deepseek-v4-flash-free",
+    "details": {
+      "providerId": "opencode-zen",
+      "name": "DeepSeek V4 Flash Free"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "bdc2adba-441b-404a-9980-72b6f446a335",
+    "timestamp": "2026-07-07T11:06:04.182459",
+    "action": "provider_added",
+    "entityType": "provider",
+    "entityId": "opencode-zen",
+    "details": {
+      "name": "OpenCode Zen",
+      "vendor": "Opencode"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "fd21bda0-4eb7-4156-935f-90c08cfae505",
+    "timestamp": "2026-07-07T10:47:11.457340",
+    "action": "task_mapping_updated",
+    "entityType": "task",
+    "entityId": "chat",
+    "details": {
+      "providerId": "opencode-go",
+      "modelId": "go/kimi-k2.6"
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
+    "id": "5095382c-1208-4f1f-a5b4-28338c217e44",
+    "timestamp": "2026-07-07T10:44:43.303534",
+    "action": "provider_updated",
+    "entityType": "provider",
+    "entityId": "opencode-go",
+    "details": {
+      "changes": {
+        "name": "OpenCode Go",
+        "vendor": "OpenCode",
+        "base_url": "https://opencode.ai/go/v1",
+        "api_key_env": "sk-MO0RQnYzWjNbL1krBZ64piUmM2vaQtPAtO3hpFJzEj9gvYskGeoHHdXJ5JbUpvfD",
+        "description": "OpenCode Go API proxy",
+        "icon": "opencode"
+      }
+    },
+    "userId": "system",
+    "userName": "System"
+  },
+  {
     "id": "dbb681af-7cc1-4fc1-8c8b-a4dd12901f52",
     "timestamp": "2026-07-07T08:29:41.831422",
     "action": "model_updated",

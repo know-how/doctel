@@ -20,6 +20,9 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
 
+# Import config models so they register with Base.metadata
+from app.db import config_models  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 # ── Detect database type ────────────────────────────────────────────────────
@@ -124,9 +127,9 @@ async def verify_database_health() -> DatabaseHealth:
             ))
             row = result.fetchone()
             table_count = row[0] if row else 0
-        db_health.tables_exist = table_count >= 15  # We expect ~15+ tables
+        db_health.tables_exist = table_count >= 21  # We expect ~21+ tables (16 app + 5 config)
         if not db_health.tables_exist:
-            db_health.error = f"Only {table_count} tables found (expected >= 15)"
+            db_health.error = f"Only {table_count} tables found (expected >= 21)"
     except Exception as e:
         db_health.tables_exist = False
         db_health.error = f"Table check failed: {e}"

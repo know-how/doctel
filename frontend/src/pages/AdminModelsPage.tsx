@@ -832,12 +832,14 @@ export const AdminModelsPage: React.FC = () => {
         <div style={{
           position: "fixed", inset: 0, zIndex: 1000,
           display: "flex", alignItems: "center", justifyContent: "center",
-          backgroundColor: "rgba(0,0,0,0.5)",
+          backgroundColor: "rgba(0,0,0,0.7)",
+          backdropFilter: "blur(4px)",
         }} onClick={() => { setShowAddProvider(false); setEditingProvider(null); resetProviderForm() }}>
           <div style={{
             width: 480, maxWidth: "90vw",
             borderRadius: t.radii.lg, border: `1px solid ${c.border}`,
-            padding: t.spacing.lg, backgroundColor: c.cardBg,
+            padding: t.spacing.lg, backgroundColor: c.bgSecondary,
+            boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
           }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ margin: `0 0 ${t.spacing.md} 0`, fontSize: 15, fontWeight: 700, color: c.text }}>
               {editingProvider ? `Edit Provider: ${editingProvider.name}` : "Add Provider"}

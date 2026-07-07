@@ -172,7 +172,7 @@
       "name": "OpenCode Go",
       "vendor": "OpenCode",
       "base_url": "https://opencode.ai/go/v1",
-      "api_key_env": "OPENCODE_GO_API_KEY",
+      "api_key_env": "sk-MO0RQnYzWjNbL1krBZ64piUmM2vaQtPAtO3hpFJzEj9gvYskGeoHHdXJ5JbUpvfD",
       "status": "disconnected",
       "description": "OpenCode Go API proxy",
       "icon": "opencode",
@@ -597,12 +597,49 @@
       "icon": "huggingface",
       "order": 8,
       "models": []
+    },
+    {
+      "id": "opencode-zen",
+      "name": "OpenCode Zen",
+      "vendor": "Opencode",
+      "base_url": "https://opencode.ai/zen/v1",
+      "api_key_env": "sk-MO0RQnYzWjNbL1krBZ64piUmM2vaQtPAtO3hpFJzEj9gvYskGeoHHdXJ5JbUpvfD",
+      "status": "disconnected",
+      "description": "Opencode zen",
+      "icon": "generic",
+      "order": 9,
+      "models": [
+        {
+          "id": "deepseek-v4-flash-free",
+          "name": "DeepSeek V4 Flash Free",
+          "contextWindow": 4096,
+          "supportsChat": true,
+          "supportsVision": false,
+          "supportsTools": false,
+          "supportsCode": false,
+          "supportsEmbedding": false,
+          "supportsReasoning": false,
+          "supportsRag": false,
+          "supportsClassification": false,
+          "supportsSummary": false,
+          "supportsExtraction": false,
+          "enabled": true,
+          "visibleToUsers": true,
+          "isDefault": false,
+          "allowedRoles": [],
+          "departmentRestrictions": [],
+          "state": "available",
+          "pricingTier": "free",
+          "license": "Proprietary",
+          "forTasks": []
+        }
+      ]
     }
   ],
   "taskMapping": {
     "chat": {
-      "providerId": "opencode-go",
-      "modelId": "go/deepseek-v4-flash"
+      "providerId": "opencode-zen",
+      "modelId": "deepseek-v4-flash-free"
     },
     "summary": {
       "providerId": "opencode-go",
@@ -638,5 +675,5 @@
     }
   },
   "automaticRouting": true,
-  "lastUpdated": "2026-07-07T08:29:41.664581"
+  "lastUpdated": "2026-07-07T11:09:03.678128"
 }

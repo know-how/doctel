@@ -141,6 +141,7 @@ async def ask_diagnostics(
     for provider_key, label in [
         ("gemini", "Gemini"),
         ("deepseek", "DeepSeek"),
+        ("opencode_go", "OpenCode Go"),
         ("opencode_zen", "Zen"),
         ("huggingface", "HuggingFace"),
         ("llama_cpp", "LlamaCpp"),

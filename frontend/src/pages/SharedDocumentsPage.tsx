@@ -433,16 +433,18 @@ export const SharedDocumentsPage: React.FC = () => {
       {shareModalOpen && (
         <div
           style={{
-            position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2000,
+            backdropFilter: "blur(4px)",
           }}
           onClick={() => setShareModalOpen(false)}
         >
           <div
             style={{
               width: 480, maxWidth: "95vw", maxHeight: "90vh", overflow: "auto",
-              borderRadius: 16, border: `1px solid ${c.border}`, backgroundColor: c.cardBg,
+              borderRadius: 16, border: `1px solid ${c.border}`, backgroundColor: c.bgSecondary,
               padding: 24,
+              boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
             }}
             onClick={(e) => e.stopPropagation()}
           >

@@ -23,6 +23,8 @@ import httpx
 from pathlib import Path
 from typing import Optional, List, Dict, AsyncGenerator
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 ZEN_MODEL_ID = "opencode-zen"
@@ -143,6 +145,14 @@ def _get_httpx_client() -> httpx.AsyncClient:
 
 
 def _api_key() -> str:
+    # Check Pydantic Settings first (populated from .env)
+    key = settings.opencode_go_api_key.strip()
+    if key:
+        return key
+    key = settings.opencode_zen_api_key.strip()
+    if key:
+        return key
+    # Fallback to os.getenv for backward compatibility
     key = os.getenv("OPENCODE_GO_API_KEY", "").strip()
     if key:
         return key
@@ -151,6 +161,14 @@ def _api_key() -> str:
 
 
 def _base_url() -> str:
+    # Check Pydantic Settings first
+    go_base = settings.opencode_go_base_url.strip()
+    if go_base:
+        return _normalize_base_url(go_base)
+    zen_base = settings.opencode_zen_base_url.strip()
+    if zen_base:
+        return _normalize_base_url(zen_base)
+    # Fallback to os.getenv for backward compatibility
     go_base = os.getenv("OPENCODE_GO_BASE_URL", "").strip()
     if go_base:
         return _normalize_base_url(go_base)

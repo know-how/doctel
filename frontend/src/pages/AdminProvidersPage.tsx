@@ -473,12 +473,14 @@ export const AdminProvidersPage: React.FC = () => {
       {/* Add/Edit Provider Modal */}
       {showForm && (
         <div style={{
-          position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.5)",
+          position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.7)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+          backdropFilter: "blur(4px)",
         }} onClick={() => setShowForm(false)}>
           <div style={{
-            backgroundColor: c.cardBg, borderRadius: 16, padding: 24,
+            backgroundColor: c.bgSecondary, borderRadius: 16, padding: 24,
             maxWidth: 480, width: "90%", border: `1px solid ${c.border}`,
+            boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
           }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 700, color: c.text }}>
               {editingId ? "Edit Provider" : "Add New Provider"}

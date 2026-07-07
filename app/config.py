@@ -147,6 +147,12 @@ class Settings(BaseModel):
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash-free")
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://opencode.ai/go/v1")
 
+    # OpenCode Go / Zen API (alternative free-tier providers)
+    opencode_go_api_key: str = os.getenv("OPENCODE_GO_API_KEY", "")
+    opencode_zen_api_key: str = os.getenv("OPENCODE_ZEN_API_KEY", "")
+    opencode_go_base_url: str = os.getenv("OPENCODE_GO_BASE_URL", "")
+    opencode_zen_base_url: str = os.getenv("OPENCODE_ZEN_BASE_URL", "")
+
     # Model routing
     enable_qwen_9b: bool = os.getenv("DOCINTEL_ENABLE_QWEN_9B", "false").lower() == "true"
     qwen_9b_model: str = os.getenv("DOCINTEL_QWEN_9B_MODEL", "qwen3:8b")

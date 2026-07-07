@@ -45,6 +45,10 @@ import {
   V2RoutingStatusResponse,
   V2ReferenceResponse,
   V2RoutingSelectResponse,
+  V2TestConnectionRequest,
+  V2TestConnectionResponse,
+  V2FetchModelsRequest,
+  V2FetchModelsResponse,
 } from "../types/api"
 
 function getApiBaseUrl(): string {
@@ -1624,5 +1628,23 @@ export async function v2SelectModelForTask(taskType: string): Promise<V2RoutingS
     headers: buildAuthHeaders(),
   })
   return handleResponse<V2RoutingSelectResponse>(res)
+}
+
+export async function v2TestConnection(payload: V2TestConnectionRequest): Promise<V2TestConnectionResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/test-connection`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<V2TestConnectionResponse>(res)
+}
+
+export async function v2FetchModels(payload: V2FetchModelsRequest): Promise<V2FetchModelsResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/fetch-models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<V2FetchModelsResponse>(res)
 }
 

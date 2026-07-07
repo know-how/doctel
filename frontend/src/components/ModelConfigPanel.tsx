@@ -31,6 +31,8 @@ interface Props {
   modelLabels: Record<string, string>
   onSelect: (model: string) => void
   loading?: boolean
+  /** Set of model IDs that belong to V2/cloud providers – sorted to top */
+  v2ModelIds?: Set<string>
 }
 
 export const ModelConfigPanel: React.FC<Props> = ({
@@ -40,6 +42,7 @@ export const ModelConfigPanel: React.FC<Props> = ({
   modelLabels,
   onSelect,
   loading,
+  v2ModelIds,
 }) => {
   const { theme } = useTheme()
   const t = getTokens(theme)
@@ -211,155 +214,73 @@ export const ModelConfigPanel: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* model list */}
+      {/* model list – V2/cloud models sorted to top */}
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {availableModels.map((m) => {
-          const isSelected = m === selectedModel
-          const caps = modelCapabilities[m] ?? []
-          return (
-            <button
-              key={m}
-              type="button"
-              onClick={() => handleSelect(m)}
-              style={{
-                width: "100%",
-                textAlign: "left",
-                padding: "10px 12px",
-                borderRadius: t.radii.md,
-                border: isSelected
-                  ? `1px solid ${t.colors.primary}50`
-                  : "1px solid transparent",
-                background: isSelected
-                  ? `linear-gradient(135deg, ${t.colors.primary}18, ${t.colors.primary}05)`
-                  : "transparent",
-                cursor: "pointer",
-                transition: "all 0.15s ease",
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                position: "relative",
-              }}
-              onMouseEnter={(e) => {
-                if (!isSelected) {
-                  e.currentTarget.style.background = `${t.colors.surface}80`
-                  e.currentTarget.style.borderColor = `${t.colors.border}60`
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!isSelected) {
-                  e.currentTarget.style.background = "transparent"
-                  e.currentTarget.style.borderColor = "transparent"
-                }
-              }}
-            >
-              {/* model icon */}
-              <div
-                style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: 8,
-                  background: isSelected
-                    ? `linear-gradient(135deg, ${t.colors.primary}30, ${t.colors.secondary}20)`
-                    : `${t.colors.surface}80`,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  flexShrink: 0,
-                  fontSize: 16,
-                  border: isSelected
-                    ? `1px solid ${t.colors.primary}30`
-                    : `1px solid ${t.colors.border}40`,
-                }}
-              >
-                {caps.includes("reasoning") ? "🧠" : caps.includes("vision") ? "👁️" : caps.includes("code") ? "💻" : "🤖"}
-              </div>
-
-              {/* name + capabilities */}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div
-                  style={{
-                    fontSize: 13,
-                    fontWeight: isSelected ? 700 : 500,
-                    color: isSelected ? t.colors.text : t.colors.textSecondary,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
-                >
-                  {modelLabels[m] || m}
-                </div>
-                {modelLabels[m] && modelLabels[m] !== m && (
+        {(() => {
+          const { sortedV2, sortedLocal, hasV2 } = (() => {
+            const v2Models: string[] = []
+            const localModels: string[] = []
+            const v2Set = v2ModelIds ?? new Set<string>()
+            for (const m of availableModels) {
+              if (v2Set.has(m)) v2Models.push(m)
+              else localModels.push(m)
+            }
+            const sortSelected = (arr: string[]) =>
+              [...arr].sort((a, b) => (a === selectedModel ? -1 : b === selectedModel ? 1 : 0))
+            return { sortedV2: sortSelected(v2Models), sortedLocal: sortSelected(localModels), hasV2: v2Models.length > 0 }
+          })()
+          const allItems: { id: string; group: "v2" | "local" }[] = [
+            ...sortedV2.map(m => ({ id: m, group: "v2" as const })),
+            ...sortedLocal.map(m => ({ id: m, group: "local" as const })),
+          ]
+          return allItems.map((item, idx) => {
+            const isFirstV2 = item.group === "v2" && idx === 0
+            const isFirstLocal = item.group === "local" && idx > 0 && allItems[idx - 1]?.group === "v2"
+            return (
+              <React.Fragment key={item.id}>
+                {isFirstLocal && hasV2 && (
                   <div
                     style={{
+                      padding: "8px 12px 4px",
                       fontSize: 10,
+                      fontWeight: 700,
                       color: t.colors.textMuted,
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.6px",
+                      borderTop: `1px solid ${t.colors.border}30`,
+                      marginTop: 4,
                     }}
                   >
-                    {m}
+                    Local Models
                   </div>
                 )}
-                {caps.length > 0 && (
+                {isFirstV2 && hasV2 && (
                   <div
                     style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: 3,
-                      marginTop: 3,
+                      padding: "0 12px 4px",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      color: t.colors.textMuted,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.6px",
                     }}
                   >
-                    {caps.map((cap) => {
-                      const info = getCapInfo(cap)
-                      return (
-                        <span
-                          key={cap}
-                          style={{
-                            fontSize: 9,
-                            padding: "1px 5px",
-                            borderRadius: 4,
-                            border: `1px solid ${info.color}40`,
-                            backgroundColor: `${info.color}15`,
-                            color: info.color,
-                            lineHeight: "16px",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 2,
-                          }}
-                        >
-                          {info.icon} {info.label}
-                        </span>
-                      )
-                    })}
+                    Cloud / API Models
                   </div>
                 )}
-              </div>
-
-              {/* checkmark when selected */}
-              {isSelected && (
-                <span
-                  style={{
-                    width: 20,
-                    height: 20,
-                    borderRadius: "50%",
-                    background: `linear-gradient(135deg, ${t.colors.primary}, ${t.colors.secondary})`,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                    fontSize: 11,
-                    color: "#fff",
-                    fontWeight: 700,
-                    boxShadow: `0 0 12px ${t.colors.primary}40`,
-                  }}
-                >
-                  ✓
-                </span>
-              )}
-            </button>
-          )
-        })}
+                <ModelRow
+                  m={item.id}
+                  isSelected={item.id === selectedModel}
+                  caps={modelCapabilities[item.id] ?? []}
+                  label={modelLabels[item.id] || item.id}
+                  onSelect={handleSelect}
+                  isV2={item.group === "v2"}
+                  t={t}
+                />
+              </React.Fragment>
+            )
+          })
+        })()}
       </div>
     </div>
   )
@@ -369,5 +290,160 @@ export const ModelConfigPanel: React.FC<Props> = ({
       {trigger}
       {dropdown}
     </div>
+  )
+}
+
+/* ── model row sub‑component ── */
+function ModelRow({ m, isSelected, caps, label, onSelect, isV2, t }: {
+  m: string
+  isSelected: boolean
+  caps: string[]
+  label: string
+  onSelect: (m: string) => void
+  isV2: boolean
+  t: ReturnType<typeof getTokens>
+}) {
+  return (
+    <button
+      key={m}
+      type="button"
+      onClick={() => onSelect(m)}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        padding: "10px 12px",
+        borderRadius: t.radii.md,
+        border: isSelected
+          ? `1px solid ${t.colors.primary}50`
+          : "1px solid transparent",
+        background: isSelected
+          ? `linear-gradient(135deg, ${t.colors.primary}18, ${t.colors.primary}05)`
+          : "transparent",
+        cursor: "pointer",
+        transition: "all 0.15s ease",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        position: "relative",
+      }}
+      onMouseEnter={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.background = `${t.colors.surface}80`
+          e.currentTarget.style.borderColor = `${t.colors.border}60`
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.background = "transparent"
+          e.currentTarget.style.borderColor = "transparent"
+        }
+      }}
+    >
+      {/* model icon */}
+      <div
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: 8,
+          background: isSelected
+            ? `linear-gradient(135deg, ${t.colors.primary}30, ${t.colors.secondary}20)`
+            : `${t.colors.surface}80`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          fontSize: 16,
+          border: isSelected
+            ? `1px solid ${t.colors.primary}30`
+            : `1px solid ${t.colors.border}40`,
+        }}
+      >
+        {isV2 ? "☁️" : caps.includes("reasoning") ? "🧠" : caps.includes("vision") ? "👁️" : caps.includes("code") ? "💻" : "🤖"}
+      </div>
+
+      {/* name + capabilities */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontSize: 13,
+            fontWeight: isSelected ? 700 : 500,
+            color: isSelected ? t.colors.text : t.colors.textSecondary,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {label}
+        </div>
+        {label !== m && (
+          <div
+            style={{
+              fontSize: 10,
+              color: t.colors.textMuted,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {m}
+          </div>
+        )}
+        {caps.length > 0 && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 3,
+              marginTop: 3,
+            }}
+          >
+            {caps.map((cap) => {
+              const info = getCapInfo(cap)
+              return (
+                <span
+                  key={cap}
+                  style={{
+                    fontSize: 9,
+                    padding: "1px 5px",
+                    borderRadius: 4,
+                    border: `1px solid ${info.color}40`,
+                    backgroundColor: `${info.color}15`,
+                    color: info.color,
+                    lineHeight: "16px",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 2,
+                  }}
+                >
+                  {info.icon} {info.label}
+                </span>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* checkmark when selected */}
+      {isSelected && (
+        <span
+          style={{
+            width: 20,
+            height: 20,
+            borderRadius: "50%",
+            background: `linear-gradient(135deg, ${t.colors.primary}, ${t.colors.secondary})`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            fontSize: 11,
+            color: "#fff",
+            fontWeight: 700,
+            boxShadow: `0 0 12px ${t.colors.primary}40`,
+          }}
+        >
+          ✓
+        </span>
+      )}
+    </button>
   )
 }

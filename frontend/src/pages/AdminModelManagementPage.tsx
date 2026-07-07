@@ -14,6 +14,8 @@ import {
   v2ToggleRouting,
   v2GetHealth,
   v2GetAudit,
+  v2TestConnection,
+  v2FetchModels,
 } from "../api/client"
 import { useTheme } from "../context/ThemeContext"
 import { useModel } from "../context/ModelContext"
@@ -24,6 +26,8 @@ import type {
   V2ModelMetadata,
   V2HealthSummary,
   V2AuditEntry,
+  V2TestConnectionResponse,
+  V2FetchModelsResponse,
 } from "../types/api"
 
 /* ─────────────────────────────────────────────────────────────
@@ -176,6 +180,14 @@ export const AdminModelManagementPage: React.FC = () => {
   const [editingModel, setEditingModel] = useState<{ providerId: string; model: V2ModelMetadata } | null>(null)
   const [editForm, setEditForm] = useState<Record<string, any>>({})
 
+  // Test Connection state
+  const [testingProvider, setTestingProvider] = useState<string | null>(null)
+  const [testResults, setTestResults] = useState<Record<string, V2TestConnectionResponse>>({})
+
+  // Fetch Models state
+  const [fetchingProvider, setFetchingProvider] = useState<string | null>(null)
+  const [fetchResults, setFetchResults] = useState<Record<string, V2FetchModelsResponse>>({})
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true)
@@ -294,6 +306,38 @@ export const AdminModelManagementPage: React.FC = () => {
     })
   }
 
+  // ── Test Connection Handler ──
+  const handleTestConnection = useCallback(async (providerId: string, baseUrl?: string) => {
+    setTestingProvider(providerId)
+    try {
+      const result = await v2TestConnection({ providerId, baseUrl })
+      setTestResults((prev) => ({ ...prev, [providerId]: result }))
+    } catch (e: any) {
+      setTestResults((prev) => ({
+        ...prev,
+        [providerId]: { success: false, message: e.message || "Test failed" },
+      }))
+    } finally {
+      setTestingProvider(null)
+    }
+  }, [])
+
+  // ── Fetch Models Handler ──
+  const handleFetchModels = useCallback(async (providerId: string, baseUrl?: string) => {
+    setFetchingProvider(providerId)
+    try {
+      const result = await v2FetchModels({ providerId, baseUrl })
+      setFetchResults((prev) => ({ ...prev, [providerId]: result }))
+    } catch (e: any) {
+      setFetchResults((prev) => ({
+        ...prev,
+        [providerId]: { success: false, message: e.message || "Fetch failed" },
+      }))
+    } finally {
+      setFetchingProvider(null)
+    }
+  }, [])
+
   // ── Render: Model Catalog (Layers 1-8) ────
 
   const renderCatalog = () => {
@@ -371,6 +415,116 @@ export const AdminModelManagementPage: React.FC = () => {
               {/* Models list */}
               {isExpanded && (
                 <div style={{ padding: "8px 16px 12px" }}>
+                  {/* Provider action toolbar */}
+                  <div style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 10,
+                    paddingBottom: 8,
+                    borderBottom: `1px solid ${c.border}`,
+                  }}>
+                    <button
+                      onClick={() => handleTestConnection(provider.id, provider.baseUrl)}
+                      disabled={testingProvider === provider.id}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 5,
+                        padding: "5px 12px",
+                        borderRadius: 8,
+                        border: `1px solid ${c.border}`,
+                        backgroundColor: testingProvider === provider.id ? c.border : c.inputBg,
+                        color: c.text,
+                        cursor: testingProvider === provider.id ? "wait" : "pointer",
+                        fontSize: 11,
+                        fontWeight: 600,
+                        opacity: testingProvider === provider.id ? 0.7 : 1,
+                      }}
+                    >
+                      {testingProvider === provider.id ? "⏳" : "🔌"} Test Connection
+                    </button>
+                    <button
+                      onClick={() => handleFetchModels(provider.id, provider.baseUrl)}
+                      disabled={fetchingProvider === provider.id}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 5,
+                        padding: "5px 12px",
+                        borderRadius: 8,
+                        border: `1px solid ${c.border}`,
+                        backgroundColor: fetchingProvider === provider.id ? c.border : c.inputBg,
+                        color: c.text,
+                        cursor: fetchingProvider === provider.id ? "wait" : "pointer",
+                        fontSize: 11,
+                        fontWeight: 600,
+                        opacity: fetchingProvider === provider.id ? 0.7 : 1,
+                      }}
+                    >
+                      {fetchingProvider === provider.id ? "⏳" : "📥"} Fetch Models
+                    </button>
+
+                    {/* Test result */}
+                    {testResults[provider.id] && (
+                      <span style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: testResults[provider.id].success ? "#22C55E" : "#EF4444",
+                        marginLeft: 4,
+                      }}>
+                        {testResults[provider.id].success ? "✅ Connected" : "❌ Failed"}
+                        {testResults[provider.id].latencyMs !== undefined && (
+                          <span style={{ color: c.textSecondary, fontWeight: 400 }}>
+                            {" "}· {testResults[provider.id].latencyMs}ms
+                          </span>
+                        )}
+                        {testResults[provider.id].message && (
+                          <span style={{ color: c.textMuted, fontWeight: 400, marginLeft: 4 }}>
+                            · {testResults[provider.id].message}
+                          </span>
+                        )}
+                      </span>
+                    )}
+
+                    {/* Fetch result count */}
+                    {fetchResults[provider.id]?.success && fetchResults[provider.id].count !== undefined && (
+                      <span style={{ fontSize: 11, color: c.textSecondary, fontWeight: 600 }}>📦
+                        {" "}{fetchResults[provider.id].count} models available
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Fetch models detail list */}
+                  {fetchResults[provider.id]?.success && fetchResults[provider.id].models && fetchResults[provider.id].models!.length > 0 && (
+                    <div style={{
+                      marginBottom: 10,
+                      padding: "8px 12px",
+                      borderRadius: 8,
+                      backgroundColor: c.bgSecondary,
+                      border: `1px solid ${c.border}`,
+                    }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: c.text, marginBottom: 6 }}>
+                        Available Models from API
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {fetchResults[provider.id].models!.map((m, i) => (
+                          <span key={m.id || i} style={{
+                            padding: "2px 8px",
+                            borderRadius: 6,
+                            backgroundColor: c.inputBg,
+                            border: `1px solid ${c.border}`,
+                            fontSize: 10,
+                            color: c.textSecondary,
+                          }}>
+                            {m.name || m.id}
+                            {m.owned_by && <span style={{ color: c.textMuted }}> ({m.owned_by})</span>}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {provider.models.map((model) => {
                     const detailKey = `${provider.id}/${model.id}`
                     const isDetailExpanded = expandedModelDetails.has(detailKey)
@@ -914,14 +1068,15 @@ export const AdminModelManagementPage: React.FC = () => {
       <div style={{
         position: "fixed",
         inset: 0,
-        backgroundColor: "rgba(0,0,0,0.5)",
+        backgroundColor: "rgba(0,0,0,0.7)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         zIndex: 1000,
+        backdropFilter: "blur(4px)",
       }} onClick={() => setEditingModel(null)}>
         <div style={{
-          backgroundColor: c.cardBg,
+          backgroundColor: c.bgSecondary,
           borderRadius: 16,
           padding: 24,
           maxWidth: 520,
@@ -929,6 +1084,7 @@ export const AdminModelManagementPage: React.FC = () => {
           maxHeight: "80vh",
           overflow: "auto",
           border: `1px solid ${c.border}`,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
         }} onClick={(e) => e.stopPropagation()}>
           <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 700, color: c.text }}>
             Edit Model — {model.name || model.id}

@@ -19,6 +19,8 @@ interface ModelContextValue {
   setModelForTask: (taskType: string) => Promise<void>
   /** V2 providers from the model management system (enriched) */
   v2Providers: V2Provider[]
+  /** Set of model IDs managed by V2 providers (for sorting/labeling) */
+  v2ModelIds: Set<string>
   /** Whether automatic routing is enabled */
   v2AutoRouting: boolean
   /** Task-to-model defaults from V2 task mapping */
@@ -112,7 +114,8 @@ export function ModelProvider({ children }: { children: ReactNode }) {
       setModelLabels(labelsRes.labels || {})
 
       // Store V2 data
-      setV2Providers(res.v2_providers || [])
+      const v2provsData = res.v2_providers || []
+      setV2Providers(v2provsData)
       setV2AutoRouting(res.v2_auto_routing !== false)
       setTaskDefaults(res.defaults || {})
 
@@ -195,6 +198,7 @@ export function ModelProvider({ children }: { children: ReactNode }) {
       reloadModels: loadModelData,
       setModelForTask,
       v2Providers,
+      v2ModelIds: new Set(v2Providers.flatMap(p => (p.models || []).map(m => m.id))),
       v2AutoRouting,
       taskDefaults,
     }}>

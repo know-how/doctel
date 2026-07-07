@@ -508,3 +508,36 @@ export interface V2ReferenceResponse {
 export interface V2RoutingSelectResponse {
   model: V2ModelMetadata & { provider_id: string; provider_name?: string; selection?: string; reason?: string }
 }
+
+// ── Test Connection ──
+
+export interface V2TestConnectionRequest {
+  baseUrl?: string
+  apiKey?: string
+  model?: string
+  providerId?: string
+}
+
+export interface V2TestConnectionResponse {
+  success: boolean
+  latencyMs?: number
+  statusCode?: number
+  message?: string
+}
+
+// ── Fetch Models ──
+
+export interface V2FetchModelsRequest {
+  baseUrl?: string
+  apiKey?: string
+  providerId?: string
+}
+
+export interface V2FetchModelsResponse {
+  success: boolean
+  latencyMs?: number
+  models?: { id: string; name?: string; owned_by?: string }[]
+  count?: number
+  statusCode?: number
+  message?: string
+}

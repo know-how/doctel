@@ -1,5 +1,5 @@
 """
-model_management_service.py — DocTel Enterprise Model Management
+model_management_service.py — DocTel Enterprise Model Management (DB-Backed)
 
 GitHub Copilot-style model management system with:
 - AI Provider Management (Layer 1)
@@ -16,28 +16,29 @@ GitHub Copilot-style model management system with:
 - Health Monitoring (Layer 13)
 - Audit & Governance (Layer 14)
 
-Stored in a JSON file under the base directory.
+All data stored in MySQL via config_service.py — no more JSON file I/O.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import uuid
-import time
-import threading
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.db.config_models import (
+    AIProvider,
+    AIModel,
+    TaskMapping,
+    HealthRecord,
+)
+from app.services import config_service as cfg
 
 logger = logging.getLogger(__name__)
-
-_MANAGEMENT_FILE = "model_management.json"
-_AUDIT_FILE = "model_audit.json"
-_HEALTH_FILE = "model_health.json"
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -458,214 +459,121 @@ AUTOMATIC_ROUTING_RULES = {
 }
 
 
-# ── File I/O ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  INTERNAL HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-def _data_path(filename: str) -> Path:
-    p = Path(settings.base_dir) / "data"
-    p.mkdir(parents=True, exist_ok=True)
-    return p / filename
-
-
-def _load_json(filename: str, default: Any = None) -> Any:
-    path = _data_path(filename)
-    if not path.exists():
-        return default if default is not None else {}
-    try:
-        raw = path.read_text(encoding="utf-8")
-        return json.loads(raw)
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Failed to load %s: %s", filename, exc)
-        return default if default is not None else {}
-
-
-def _save_json(filename: str, data: Any) -> None:
-    path = _data_path(filename)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
-
-
-# ── Audit helpers ────────────────────────────────────────────────────────────
-
-
-def _add_audit_entry(
-    action: str,
-    entity_type: str,
-    entity_id: str,
-    details: Dict[str, Any],
-    user_id: Optional[str] = None,
-    user_name: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Add an audit log entry."""
-    audit = _load_json(_AUDIT_FILE, [])
-    entry = {
-        "id": str(uuid.uuid4()),
-        "timestamp": datetime.utcnow().isoformat(),
-        "action": action,
-        "entityType": entity_type,
-        "entityId": entity_id,
-        "details": details,
-        "userId": user_id or "system",
-        "userName": user_name or "System",
+def _provider_to_dict(provider: AIProvider, include_models: bool = True,
+                       include_key: bool = False) -> dict:
+    """Convert an AIProvider ORM instance to the dict shape expected by routers."""
+    d = {
+        "id": provider.provider_id,
+        "name": provider.name,
+        "vendor": provider.vendor,
+        "base_url": provider.base_url,
+        "api_key_env": provider.api_key_env,
+        "status": provider.status,
+        "description": provider.description,
+        "icon": provider.icon,
+        "order": provider.sort_order,
     }
-    audit.insert(0, entry)
-    # Keep max 1000 entries
-    if len(audit) > 1000:
-        audit = audit[:1000]
-    _save_json(_AUDIT_FILE, audit)
-    return entry
+    if include_key:
+        d["api_key_value"] = provider.api_key_value
+    if include_models:
+        d["models"] = [_model_to_dict(m) for m in (provider.models or [])]
+    else:
+        d["models"] = []
+    return d
 
 
-def get_audit_log(limit: int = 100, action: Optional[str] = None) -> List[Dict[str, Any]]:
+def _model_to_dict(model: AIModel) -> dict:
+    """Convert an AIModel ORM instance to the dict shape expected by routers."""
+    return {
+        "id": model.model_id,
+        "name": model.display_name,
+        "contextWindow": model.context_window,
+        "supportsChat": model.supports_chat,
+        "supportsVision": model.supports_vision,
+        "supportsTools": model.supports_tools,
+        "supportsCode": model.supports_code,
+        "supportsEmbedding": model.supports_embedding,
+        "supportsReasoning": model.supports_reasoning,
+        "supportsRag": model.supports_rag,
+        "supportsClassification": model.supports_classification,
+        "supportsSummary": model.supports_summary,
+        "supportsExtraction": model.supports_extraction,
+        "supportsAudio": model.supports_audio,
+        "supportsComparison": model.supports_comparison,
+        "enabled": model.enabled,
+        "visibleToUsers": model.visible_to_users,
+        "state": model.state,
+        "isDefault": model.is_default,
+        "pricingTier": model.pricing_tier,
+        "license": model.license,
+        "allowedRoles": json.loads(model.allowed_roles) if model.allowed_roles else [],
+        "departmentRestrictions": json.loads(model.department_restrictions) if model.department_restrictions else [],
+        "forTasks": json.loads(model.for_tasks) if model.for_tasks else [],
+    }
+
+
+async def _get_provider_orm(provider_id: str, db: AsyncSession) -> Optional[AIProvider]:
+    """Get provider ORM instance by provider_id string."""
+    res = await db.execute(
+        select(AIProvider).where(AIProvider.provider_id == provider_id)
+    )
+    return res.scalar_one_or_none()
+
+
+async def _get_model_orm(provider_id: str, model_id: str,
+                          db: AsyncSession) -> Optional[AIModel]:
+    """Get model ORM instance by provider_id + model_id strings."""
+    provider = await _get_provider_orm(provider_id, db)
+    if not provider:
+        return None
+    res = await db.execute(
+        select(AIModel).where(
+            AIModel.provider_id == provider.id,
+            AIModel.model_id == model_id,
+        )
+    )
+    return res.scalar_one_or_none()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AUDIT & GOVERNANCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def get_audit_log(db: AsyncSession, limit: int = 100,
+                         action: Optional[str] = None) -> List[Dict[str, Any]]:
     """Retrieve audit log entries."""
-    audit = _load_json(_AUDIT_FILE, [])
-    if action:
-        audit = [e for e in audit if e.get("action") == action]
-    return audit[:limit]
+    entries = await cfg.get_audit_log(db=db, action=action, limit=limit)
+    return [e.to_dict() for e in entries]
 
 
-# ── Provider Management (Layer 1) ────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PROVIDER MANAGEMENT (Layer 1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def get_all_providers(db: AsyncSession) -> List[Dict[str, Any]]:
+    """Get all providers with their models."""
+    providers = await cfg.get_all_providers(db)
+    result = []
+    for p in providers:
+        d = _provider_to_dict(p, include_models=True)
+        result.append(d)
+    return result
 
 
-def _get_management_data() -> Dict[str, Any]:
-    """Load full management data or initialize with defaults."""
-    data = _load_json(_MANAGEMENT_FILE, None)
-    if data is None or "providers" not in data:
-        data = {
-            "providers": DEFAULT_PROVIDERS,
-            "taskMapping": {},
-            "automaticRouting": True,
-            "lastUpdated": datetime.utcnow().isoformat(),
-        }
-        # Add default models
-        for prov in data["providers"]:
-            prov_id = prov["id"]
-            if prov_id in DEFAULT_MODELS_BY_PROVIDER:
-                prov["models"] = DEFAULT_MODELS_BY_PROVIDER[prov_id]
-            else:
-                prov["models"] = []
-        # Merge models from providers.json (if available)
-        _merge_providers_json_into(data)
-        _save_json(_MANAGEMENT_FILE, data)
-    return data
+async def get_provider(db: AsyncSession, provider_id: str) -> Optional[Dict[str, Any]]:
+    """Get a single provider with its models."""
+    provider = await _get_provider_orm(provider_id, db)
+    if not provider:
+        return None
+    return _provider_to_dict(provider, include_models=True)
 
 
-def _merge_providers_json_into(data: Dict[str, Any]) -> None:
-    """Merge models from app/data/providers.json into the V2 management data.
-    Matches providers by name and adds/updates their model lists."""
-    import json as _json
-    from pathlib import Path as _Path
-    providers_json_path = _Path(__file__).resolve().parent.parent / "data" / "providers.json"
-    if not providers_json_path.exists():
-        return
-    try:
-        raw = providers_json_path.read_text(encoding="utf-8")
-        external_providers = _json.loads(raw)
-    except Exception:
-        logger.warning("Failed to parse providers.json for V2 seeding")
-        return
-
-    # Build lookup by (lowercased, space-stripped name)
-    ext_by_name = {}
-    for ep in external_providers:
-        name = (ep.get("name") or "").lower().replace(" ", "")
-        ext_by_name[name] = ep
-
-    for prov in data.get("providers", []):
-        prov_name = (prov.get("name") or "").lower().replace(" ", "")
-        # Determine prefix based on provider name keywords
-        prov_name_lower = (prov.get("name") or "").lower()
-        if prov_name_lower == "opencode go" or prov_name_lower == "opencodego":
-            prefix = "go/"
-        elif any(kw in prov_name_lower for kw in ["opencode", "zen"]):
-            prefix = "zen/"
-        elif prov_name_lower == "ollama":
-            prefix = ""
-        else:
-            prefix = ""
-        if prov_name in ext_by_name:
-            ep = ext_by_name[prov_name]
-            ext_models = ep.get("models", [])
-            if not ext_models:
-                continue
-            # Convert providers.json models to V2 format
-            prefix = "go/" if "go" in prov_name else "zen/"
-            v2_models = []
-            seen_ids = set()
-            for em in ext_models:
-                mid = em.get("id", "").strip()
-                if not mid or mid in seen_ids:
-                    continue
-                seen_ids.add(mid)
-                prefixed_id = f"{prefix}{mid}"
-                v2_models.append({
-                    "id": prefixed_id,
-                    "name": em.get("name", mid),
-                    "contextWindow": int(em.get("maxInputTokens", 128000)),
-                    "supportsChat": True,
-                    "supportsVision": bool(em.get("vision", False)),
-                    "supportsTools": bool(em.get("toolCalling", False)),
-                    "supportsCode": True,
-                    "supportsEmbedding": False,
-                    "supportsReasoning": True,
-                    "supportsRag": True,
-                    "supportsClassification": True,
-                    "supportsSummary": True,
-                    "supportsExtraction": True,
-                    "enabled": True,
-                    "visibleToUsers": True,
-                    "isDefault": False,
-                    "allowedRoles": [],
-                    "departmentRestrictions": [],
-                    "state": "available",
-                    "pricingTier": "free",
-                    "license": "Proprietary",
-                })
-            if v2_models:
-                prov["models"] = v2_models
-
-
-def _save_management_data(data: Dict[str, Any]) -> None:
-    data["lastUpdated"] = datetime.utcnow().isoformat()
-    _save_json(_MANAGEMENT_FILE, data)
-
-
-def _get_health_data() -> Dict[str, Any]:
-    health = _load_json(_HEALTH_FILE, {})
-    if not health:
-        health = {
-            "providers": {},
-            "models": {},
-            "lastUpdated": datetime.utcnow().isoformat(),
-        }
-        _save_json(_HEALTH_FILE, health)
-    return health
-
-
-def _save_health_data(data: Dict[str, Any]) -> None:
-    data["lastUpdated"] = datetime.utcnow().isoformat()
-    _save_json(_HEALTH_FILE, data)
-
-
-# ── Public Provider API ──────────────────────────────────────────────────────
-
-
-def get_all_providers() -> List[Dict[str, Any]]:
-    """Return all providers with their models."""
-    data = _get_management_data()
-    return data.get("providers", [])
-
-
-def get_provider(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Get a single provider by ID."""
-    for p in get_all_providers():
-        if p.get("id") == provider_id:
-            return p
-    return None
-
-
-def add_provider(
+async def add_provider(
+    db: AsyncSession,
     name: str,
     vendor: str = "",
     base_url: str = "",
@@ -674,106 +582,66 @@ def add_provider(
     icon: str = "generic",
 ) -> Dict[str, Any]:
     """Register a new AI provider."""
-    data = _get_management_data()
     provider_id = name.lower().replace(" ", "-").replace("_", "-")
-    # Ensure unique ID
-    existing_ids = {p.get("id") for p in data.get("providers", [])}
-    if provider_id in existing_ids:
-        provider_id = f"{provider_id}-{uuid.uuid4().hex[:6]}"
-
-    provider = {
-        "id": provider_id,
-        "name": name,
-        "vendor": vendor or name,
-        "base_url": base_url,
-        "api_key_env": api_key_env,
-        "status": "disconnected",
-        "description": description,
-        "icon": icon,
-        "order": len(data.get("providers", [])),
-        "models": [],
-    }
-    data.setdefault("providers", []).append(provider)
-    _save_management_data(data)
-    _add_audit_entry("provider_added", "provider", provider_id, {
-        "name": name, "vendor": vendor,
-    })
-    logger.info("Added provider '%s' (id=%s)", name, provider_id)
-    return provider
+    provider = await cfg.add_provider(
+        db=db,
+        provider_id=provider_id,
+        name=name,
+        vendor=vendor or name,
+        base_url=base_url,
+        api_key_env=api_key_env,
+        description=description,
+        icon=icon,
+        sort_order=0,
+    )
+    return _provider_to_dict(provider, include_models=True)
 
 
-def update_provider(provider_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Update provider metadata."""
-    data = _get_management_data()
-    providers = data.get("providers", [])
-    for p in providers:
-        if p.get("id") == provider_id:
-            allowed = {"name", "vendor", "base_url", "api_key_env", "description", "icon", "status"}
-            old_values = {}
-            for key in allowed:
-                if key in updates:
-                    old_values[key] = p.get(key)
-                    p[key] = updates[key]
-            _save_management_data(data)
-            _add_audit_entry("provider_updated", "provider", provider_id, {
-                "changes": updates,
-            })
-            return p
-    return None
+async def update_provider(db: AsyncSession, provider_id: str,
+                           updates: dict) -> Optional[Dict[str, Any]]:
+    """Update a provider's metadata."""
+    provider = await cfg.update_provider(db, provider_id, updates)
+    if not provider:
+        return None
+    return _provider_to_dict(provider, include_models=True)
 
 
-def delete_provider(provider_id: str) -> bool:
-    """Remove a provider and all its models."""
-    data = _get_management_data()
-    providers = data.get("providers", [])
-    new_list = [p for p in providers if p.get("id") != provider_id]
-    if len(new_list) == len(providers):
-        return False
-    data["providers"] = new_list
-    _save_management_data(data)
-    _add_audit_entry("provider_removed", "provider", provider_id, {})
+async def delete_provider(db: AsyncSession, provider_id: str) -> bool:
+    """Delete a provider and all its models."""
+    return await cfg.delete_provider(db, provider_id)
+
+
+async def reorder_providers(db: AsyncSession, provider_ids: List[str]) -> bool:
+    """Reorder providers by setting sort_order."""
+    for idx, pid in enumerate(provider_ids):
+        prov = await _get_provider_orm(pid, db)
+        if prov:
+            prov.sort_order = idx
+    await db.commit()
     return True
 
 
-def reorder_providers(provider_ids: List[str]) -> bool:
-    """Reorder providers by the given list of IDs."""
-    data = _get_management_data()
-    providers = data.get("providers", [])
-    id_map = {p["id"]: p for p in providers}
-    ordered = []
-    for pid in provider_ids:
-        if pid in id_map:
-            ordered.append(id_map[pid])
-    # Add any providers not in the list
-    for p in providers:
-        if p["id"] not in provider_ids:
-            ordered.append(p)
-    for i, p in enumerate(ordered):
-        p["order"] = i
-    data["providers"] = ordered
-    _save_management_data(data)
-    return True
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MODEL CRUD (Layers 2, 3, 4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def get_models_by_provider(db: AsyncSession, provider_id: str) -> List[Dict[str, Any]]:
+    """List all models for a provider."""
+    models = await cfg.get_models_by_provider_id(provider_id, db)
+    return [_model_to_dict(m) for m in models]
 
 
-# ── Model Catalog (Layer 2) & Metadata (Layer 3) ───────────────────────────
+async def get_model(db: AsyncSession, provider_id: str,
+                     model_id: str) -> Optional[Dict[str, Any]]:
+    """Get a specific model by provider_id and model_id."""
+    model = await _get_model_orm(provider_id, model_id, db)
+    if not model:
+        return None
+    return _model_to_dict(model)
 
 
-def get_models_by_provider(provider_id: str) -> List[Dict[str, Any]]:
-    """Get all models for a provider."""
-    provider = get_provider(provider_id)
-    return provider.get("models", []) if provider else []
-
-
-def get_model(provider_id: str, model_id: str) -> Optional[Dict[str, Any]]:
-    """Get a specific model by provider ID and model ID."""
-    models = get_models_by_provider(provider_id)
-    for m in models:
-        if m.get("id") == model_id:
-            return m
-    return None
-
-
-def add_model_to_provider(
+async def add_model_to_provider(
+    db: AsyncSession,
     provider_id: str,
     model_id: str,
     name: str,
@@ -788,565 +656,589 @@ def add_model_to_provider(
     supportsClassification: bool = False,
     supportsSummary: bool = False,
     supportsExtraction: bool = False,
+    supportsAudio: bool = False,
+    supportsComparison: bool = False,
     enabled: bool = True,
     visibleToUsers: bool = True,
-    isDefault: bool = False,
     state: str = "available",
     pricingTier: str = "free",
     license: str = "Proprietary",
-    forTasks: Optional[List[str]] = None,
+    forTasks: Optional[list] = None,
+    isDefault: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Add a model to a provider."""
-    data = _get_management_data()
-    providers = data.get("providers", [])
-    for p in providers:
-        if p.get("id") == provider_id:
-            model = {
-                "id": model_id,
-                "name": name,
-                "contextWindow": contextWindow,
-                "supportsChat": supportsChat,
-                "supportsVision": supportsVision,
-                "supportsTools": supportsTools,
-                "supportsCode": supportsCode,
-                "supportsEmbedding": supportsEmbedding,
-                "supportsReasoning": supportsReasoning,
-                "supportsRag": supportsRag,
-                "supportsClassification": supportsClassification,
-                "supportsSummary": supportsSummary,
-                "supportsExtraction": supportsExtraction,
-                "enabled": enabled,
-                "visibleToUsers": visibleToUsers,
-                "isDefault": isDefault,
-                "allowedRoles": [],
-                "departmentRestrictions": [],
-                "state": state,
-                "pricingTier": pricingTier,
-                "license": license,
-                "forTasks": forTasks or [],
-            }
-            p.setdefault("models", []).append(model)
-            _save_management_data(data)
-            _add_audit_entry("model_added", "model", model_id, {
-                "providerId": provider_id,
-                "name": name,
-            })
-            return model
-    return None
-
-
-def update_model(
-    provider_id: str, model_id: str, updates: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
-    """Update model metadata."""
-    data = _get_management_data()
-    for p in data.get("providers", []):
-        if p.get("id") == provider_id:
-            for m in p.get("models", []):
-                if m.get("id") == model_id:
-                    allowed = {
-                        "name", "contextWindow", "supportsChat", "supportsVision",
-                        "supportsTools", "supportsCode", "supportsEmbedding",
-                        "supportsReasoning", "supportsRag", "supportsClassification",
-                        "supportsSummary", "supportsExtraction", "enabled",
-                        "visibleToUsers", "isDefault", "allowedRoles",
-                        "departmentRestrictions", "state", "pricingTier",
-                        "license", "forTasks",
-                    }
-                    old_values = {}
-                    for key in updates:
-                        if key in allowed:
-                            if key not in old_values:
-                                old_values[key] = m.get(key)
-                            m[key] = updates[key]
-                    _save_management_data(data)
-                    _add_audit_entry("model_updated", "model", model_id, {
-                        "providerId": provider_id,
-                        "changes": updates,
-                    })
-                    return m
-    return None
-
-
-def remove_model_from_provider(provider_id: str, model_id: str) -> bool:
-    """Remove a model from a provider."""
-    data = _get_management_data()
-    for p in data.get("providers", []):
-        if p.get("id") == provider_id:
-            old_len = len(p.get("models", []))
-            p["models"] = [m for m in p.get("models", []) if m.get("id") != model_id]
-            if len(p["models"]) < old_len:
-                _save_management_data(data)
-                _add_audit_entry("model_removed", "model", model_id, {
-                    "providerId": provider_id,
-                })
-                return True
-            return False
-    return False
-
-
-# ── Model Activation (Layer 5) ─────────────────────────────────────────────
-
-
-def set_model_state(provider_id: str, model_id: str, state: str) -> Optional[Dict[str, Any]]:
-    """Set model activation state: active, inactive, maintenance, retired, etc."""
-    if state not in MODEL_STATES:
+    capabilities = {
+        "chat": supportsChat,
+        "vision": supportsVision,
+        "tools": supportsTools,
+        "code": supportsCode,
+        "embedding": supportsEmbedding,
+        "reasoning": supportsReasoning,
+        "rag": supportsRag,
+        "classification": supportsClassification,
+        "summary": supportsSummary,
+        "extraction": supportsExtraction,
+        "audio": supportsAudio,
+        "comparison": supportsComparison,
+    }
+    try:
+        model = await cfg.add_model(
+            db=db,
+            provider_id_str=provider_id,
+            model_id=model_id,
+            display_name=name,
+            context_window=contextWindow,
+            capabilities=capabilities,
+            enabled=enabled,
+            visible_to_users=visibleToUsers,
+            state=state,
+            pricing_tier=pricingTier,
+            license=license,
+            for_tasks=forTasks or [],
+            is_default=isDefault,
+        )
+        return _model_to_dict(model)
+    except ValueError:
         return None
-    return update_model(provider_id, model_id, {"state": state, "enabled": state == "active"})
 
 
-def set_model_enabled(provider_id: str, model_id: str, enabled: bool) -> Optional[Dict[str, Any]]:
-    """Enable or disable a model."""
-    return update_model(provider_id, model_id, {"enabled": enabled})
+async def update_model(db: AsyncSession, provider_id: str, model_id: str,
+                        updates: dict) -> Optional[Dict[str, Any]]:
+    """Update a model's metadata."""
+    # Map camelCase keys from frontend to snake_case DB columns
+    key_map = {
+        "name": "display_name",
+        "contextWindow": "context_window",
+        "supportsChat": "supports_chat",
+        "supportsVision": "supports_vision",
+        "supportsTools": "supports_tools",
+        "supportsCode": "supports_code",
+        "supportsEmbedding": "supports_embedding",
+        "supportsReasoning": "supports_reasoning",
+        "supportsRag": "supports_rag",
+        "supportsClassification": "supports_classification",
+        "supportsSummary": "supports_summary",
+        "supportsExtraction": "supports_extraction",
+        "supportsAudio": "supports_audio",
+        "supportsComparison": "supports_comparison",
+        "visibleToUsers": "visible_to_users",
+        "isDefault": "is_default",
+        "pricingTier": "pricing_tier",
+        "allowedRoles": "allowed_roles",
+        "departmentRestrictions": "department_restrictions",
+        "forTasks": "for_tasks",
+    }
+    db_updates = {}
+    for k, v in updates.items():
+        col = key_map.get(k, k)
+        db_updates[col] = v
+    model = await cfg.update_model(db, provider_id, model_id, db_updates)
+    if not model:
+        return None
+    return _model_to_dict(model)
 
 
-# ── Chat Visibility Control (Layer 6) ──────────────────────────────────────
+async def remove_model_from_provider(db: AsyncSession, provider_id: str,
+                                      model_id: str) -> bool:
+    """Remove a model from a provider."""
+    return await cfg.delete_model(db, provider_id, model_id)
 
 
-def set_model_visibility(provider_id: str, model_id: str, visible: bool) -> Optional[Dict[str, Any]]:
-    """Toggle whether a model appears in the chat model selector."""
-    return update_model(provider_id, model_id, {"visibleToUsers": visible})
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MODEL ACTIVATION (Layer 5)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def set_model_state(db: AsyncSession, provider_id: str, model_id: str,
+                           state: str) -> Optional[Dict[str, Any]]:
+    """Set model activation state."""
+    model = await cfg.update_model(db, provider_id, model_id, {"state": state})
+    if not model:
+        return None
+    return _model_to_dict(model)
 
 
-def get_visible_chat_models(user_role: str = "general_user", user_department: str = "") -> List[Dict[str, Any]]:
-    """Get models that should appear in the chat picker for a given user."""
-    visible_models = []
-    for p in get_all_providers():
-        for m in p.get("models", []):
-            # Must be installed/enabled
-            if not m.get("enabled", False):
-                continue
-            if not m.get("visibleToUsers", False):
-                continue
-            if m.get("state") not in ("active", "installed"):
-                continue
-            # Must support chat
-            if not m.get("supportsChat", False):
-                continue
-            # Role check
-            allowed_roles = m.get("allowedRoles", [])
-            if allowed_roles and user_role not in allowed_roles:
-                continue
-            # Department check
-            dept_restrictions = m.get("departmentRestrictions", [])
-            if dept_restrictions and user_department not in dept_restrictions:
-                continue
-            visible_models.append({
-                **m,
-                "provider_name": p.get("name"),
-                "provider_id": p.get("id"),
-            })
-    return visible_models
+async def set_model_enabled(db: AsyncSession, provider_id: str, model_id: str,
+                             enabled: bool) -> Optional[Dict[str, Any]]:
+    """Set model enabled/disabled."""
+    model = await cfg.update_model(db, provider_id, model_id, {"enabled": enabled})
+    if not model:
+        return None
+    return _model_to_dict(model)
 
 
-# ── Role-Based Access (Layer 7) ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CHAT VISIBILITY (Layer 6)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def set_model_visibility(db: AsyncSession, provider_id: str, model_id: str,
+                                visible: bool) -> Optional[Dict[str, Any]]:
+    """Toggle whether a model is visible to chat users."""
+    model = await cfg.update_model(db, provider_id, model_id,
+                                    {"visible_to_users": visible})
+    if not model:
+        return None
+    return _model_to_dict(model)
 
 
-def set_model_allowed_roles(
-    provider_id: str, model_id: str, roles: List[str]
-) -> Optional[Dict[str, Any]]:
+async def get_visible_chat_models(db: AsyncSession, user_role: str = "general_user",
+                                   user_department: str = "") -> List[Dict[str, Any]]:
+    """Get models visible to chat users, filtered by role and department."""
+    visible = await cfg.get_all_visible_chat_models(db)
+    result = []
+    for m in visible:
+        # Check role restrictions
+        allowed_roles = m.get("allowedRoles", [])
+        if allowed_roles and user_role not in allowed_roles:
+            continue
+        # Check department restrictions
+        dept_restrictions = m.get("departmentRestrictions", [])
+        if dept_restrictions and user_department not in dept_restrictions:
+            continue
+        # Include provider info
+        result.append(m)
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ROLE-BASED ACCESS (Layer 7) & DEPARTMENT RESTRICTIONS (Layer 8)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def set_model_allowed_roles(db: AsyncSession, provider_id: str, model_id: str,
+                                   roles: List[str]) -> Optional[Dict[str, Any]]:
     """Set which roles can access a model."""
-    invalid = [r for r in roles if r not in VALID_ROLES]
-    if invalid:
-        logger.warning("Invalid roles: %s", invalid)
-    valid_roles = [r for r in roles if r in VALID_ROLES]
-    return update_model(provider_id, model_id, {"allowedRoles": valid_roles})
+    model = await cfg.update_model(db, provider_id, model_id,
+                                    {"allowed_roles": json.dumps(roles)})
+    if not model:
+        return None
+    return _model_to_dict(model)
 
 
-def set_model_department_restrictions(
-    provider_id: str, model_id: str, departments: List[str]
+async def set_model_department_restrictions(
+    db: AsyncSession, provider_id: str, model_id: str,
+    departments: List[str],
 ) -> Optional[Dict[str, Any]]:
-    """Set which departments can access a model (empty = all)."""
-    invalid = [d for d in departments if d not in ZETDC_DEPARTMENTS]
-    if invalid:
-        logger.warning("Invalid departments: %s", invalid)
-    valid_depts = [d for d in departments if d in ZETDC_DEPARTMENTS]
-    return update_model(provider_id, model_id, {"departmentRestrictions": valid_depts})
+    """Set which departments can access a model."""
+    model = await cfg.update_model(db, provider_id, model_id,
+                                    {"department_restrictions": json.dumps(departments)})
+    if not model:
+        return None
+    return _model_to_dict(model)
 
 
-# ── Task-to-Model Mapping (Layer 11) ─────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TASK-TO-MODEL MAPPING (Layer 11)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def get_task_mapping(db: AsyncSession) -> Dict[str, Any]:
+    """Get the task-to-model mapping."""
+    return await cfg.get_task_mapping(db)
 
 
-def get_task_mapping() -> Dict[str, Any]:
-    """Get the current task-to-model mapping."""
-    data = _get_management_data()
-    return data.get("taskMapping", {})
-
-
-def set_task_mapping(task_type: str, provider_id: str, model_id: str) -> bool:
-    """Assign a specific model to a task type."""
+async def set_task_mapping(db: AsyncSession, task_type: str, provider_id: str,
+                            model_id: str) -> bool:
+    """Assign a model to a task type."""
     if task_type not in TASK_TYPES:
         return False
-    data = _get_management_data()
-    data.setdefault("taskMapping", {})
-    data["taskMapping"][task_type] = {
-        "providerId": provider_id,
-        "modelId": model_id,
-    }
-    _save_management_data(data)
-    _add_audit_entry("task_mapping_updated", "task", task_type, {
-        "providerId": provider_id,
-        "modelId": model_id,
-    })
+    await cfg.set_task_mapping(db, task_type, provider_id, model_id)
     return True
 
 
-def remove_task_mapping(task_type: str) -> bool:
-    """Remove a task-to-model mapping (revert to automatic)."""
+async def remove_task_mapping(db: AsyncSession, task_type: str) -> bool:
+    """Remove a task-to-model mapping."""
     if task_type not in TASK_TYPES:
         return False
-    data = _get_management_data()
-    data.setdefault("taskMapping", {})
-    if task_type in data["taskMapping"]:
-        del data["taskMapping"][task_type]
-        _save_management_data(data)
-        return True
-    return False
+    return await cfg.delete_task_mapping(db, task_type)
 
 
-# ── Intelligent Model Selection (Layer 12) ───────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  INTELLIGENT MODEL SELECTION (Layer 12)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def is_automatic_routing_enabled(db: AsyncSession) -> bool:
+    """Check if automatic routing is enabled (stored in SystemConfig)."""
+    val = await cfg.get_config_bool("routing.automatic", db, default=True)
+    return val
 
 
-def is_automatic_routing_enabled() -> bool:
-    """Check if automatic model routing is enabled."""
-    data = _get_management_data()
-    return data.get("automaticRouting", True)
-
-
-def set_automatic_routing(enabled: bool) -> None:
+async def set_automatic_routing(db: AsyncSession, enabled: bool) -> None:
     """Enable or disable automatic model routing."""
-    data = _get_management_data()
-    data["automaticRouting"] = enabled
-    _save_management_data(data)
-    _add_audit_entry("automatic_routing", "system", "routing", {
-        "enabled": enabled,
-    })
+    await cfg.set_config("routing.automatic", enabled, db,
+                          description="Automatic model routing enabled/disabled")
 
 
-def select_best_model_for_task(
+async def select_best_model_for_task(
+    db: AsyncSession,
     task_type: str,
     user_role: str = "general_user",
     user_department: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Intelligently select the best model for a given task.
-
-    Uses: 1) explicit task mapping, 2) automatic routing rules, 3) fallback.
-    """
+    """Select the best model for a given task using routing rules."""
     # 1. Check explicit task mapping
-    mapping = get_task_mapping()
-    if task_type in mapping:
-        entry = mapping[task_type]
-        model = get_model(entry["providerId"], entry["modelId"])
-        if model and model.get("enabled"):
-            return {**model, "provider_id": entry["providerId"], "selection": "explicit_mapping"}
+    mapping = await cfg.get_task_mapping_for(task_type, db)
+    if mapping and mapping.get("isActive"):
+        provider_id = mapping["providerId"]
+        model_id = mapping["modelId"]
+        model_obj = await _get_model_orm(provider_id, model_id, db)
+        if model_obj and model_obj.enabled:
+            # Check role/dept restrictions
+            allowed = json.loads(model_obj.allowed_roles) if model_obj.allowed_roles else []
+            dept_restr = json.loads(model_obj.department_restrictions) if model_obj.department_restrictions else []
+            if (not allowed or user_role in allowed) and (not dept_restr or user_department in dept_restr):
+                # Get provider name
+                provider = await _get_provider_orm(provider_id, db)
+                return {
+                    "providerId": provider_id,
+                    "providerName": provider.name if provider else provider_id,
+                    "modelId": model_id,
+                    "modelName": model_obj.display_name,
+                    "source": "task_mapping",
+                }
 
-    # 2. Automatic routing
-    if is_automatic_routing_enabled() and task_type in AUTOMATIC_ROUTING_RULES:
-        rules = AUTOMATIC_ROUTING_RULES[task_type]
-        candidates = []
-        for p in get_all_providers():
-            for m in p.get("models", []):
-                if not m.get("enabled"):
-                    continue
-                if not m.get("visibleToUsers"):
-                    continue
-                # Check capabilities
-                caps = rules.get("priority_capabilities", [])
-                if caps:
-                    for cap in caps:
-                        cap_key = f"supports{cap.capitalize()}"
-                        if m.get(cap_key, False):
-                            candidates.append({
-                                **m,
-                                "provider_id": p.get("id"),
-                                "provider_name": p.get("name"),
-                                "score": _score_model_for_caps(m, caps),
-                            })
-        if candidates:
-            # Sort by score descending
-            candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-            best = candidates[0]
-            # Preferred family boost
-            preferred = rules.get("preferred_family")
-            if preferred:
-                for c in candidates:
-                    if preferred.lower() in c.get("id", "").lower() or preferred.lower() in c.get("name", "").lower():
-                        return {**c, "selection": "automatic_routing", "reason": rules.get("description", "")}
-            return {**best, "selection": "automatic_routing", "reason": rules.get("description", "")}
+    # 2. Automatic routing: find best model by priority capabilities
+    rules = AUTOMATIC_ROUTING_RULES.get(task_type, {})
+    priority_caps = rules.get("priority_capabilities", [])
+    preferred_family = rules.get("preferred_family")
 
-    # 3. Fallback to first enabled chat model
-    for p in get_all_providers():
-        for m in p.get("models", []):
-            if m.get("enabled") and m.get("supportsChat"):
-                return {**m, "provider_id": p.get("id"), "selection": "fallback"}
+    # Query for enabled, visible models
+    query = select(AIModel).where(
+        AIModel.enabled == True,  # noqa: E712
+        AIModel.visible_to_users == True,  # noqa: E712
+    )
 
-    return None
+    res = await db.execute(query)
+    candidates: List[AIModel] = list(res.scalars().all())
+
+    # Score each candidate
+    def _score(m: AIModel) -> int:
+        score = 0
+        for cap in priority_caps:
+            col = getattr(m, f"supports_{cap}", None)
+            if col:
+                score += 2 if col else 0
+        # Bonus for preferred family
+        if preferred_family:
+            prov = None
+            # Need to check provider name for family matching
+            for c in candidates:
+                if c.id == m.id:
+                    # We already have the model, need provider
+                    pass
+        return score
+
+    scored = []
+    for m in candidates:
+        # Check role/dept
+        allowed = json.loads(m.allowed_roles) if m.allowed_roles else []
+        dept_restr = json.loads(m.department_restrictions) if m.department_restrictions else []
+        if allowed and user_role not in allowed:
+            continue
+        if dept_restr and user_department not in dept_restr:
+            continue
+        score = _score(m)
+        # Bonus for preferred family
+        if preferred_family:
+            prov = await _get_provider_orm_by_pk(m.provider_id, db)
+            if prov and preferred_family in prov.provider_id.lower():
+                score += 1
+        scored.append((score, m))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: -x[0])
+    best = scored[0][1]
+    prov = await _get_provider_orm_by_pk(best.provider_id, db)
+
+    return {
+        "providerId": prov.provider_id if prov else str(best.provider_id),
+        "providerName": prov.name if prov else "",
+        "modelId": best.model_id,
+        "modelName": best.display_name,
+        "source": "automatic_routing",
+    }
 
 
-def _score_model_for_caps(model: Dict[str, Any], capabilities: List[str]) -> int:
-    """Score a model based on how many required capabilities it supports."""
-    score = 0
-    for cap in capabilities:
-        cap_key = f"supports{cap.capitalize()}"
-        if model.get(cap_key, False):
-            score += 10
-    # Bonus for larger context
-    ctx = model.get("contextWindow", 0)
-    if ctx > 100000:
-        score += 5
-    elif ctx > 32000:
-        score += 3
-    elif ctx > 8000:
-        score += 1
-    return score
+async def _get_provider_orm_by_pk(pk: int, db: AsyncSession) -> Optional[AIProvider]:
+    """Get provider ORM instance by primary key."""
+    res = await db.execute(select(AIProvider).where(AIProvider.id == pk))
+    return res.scalar_one_or_none()
 
 
-# ── Health Monitoring (Layer 13) ────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HEALTH MONITORING (Layer 13)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-def record_health_ping(
+async def record_health_ping(
+    db: AsyncSession,
     provider_id: str,
     model_id: Optional[str] = None,
     latency_ms: Optional[float] = None,
     success: bool = True,
     tokens_used: int = 0,
 ) -> None:
-    """Record a health ping for a provider or model."""
-    health = _get_health_data()
-
-    window = 60  # Keep last 60 pings per entity
-    entry = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "latency_ms": latency_ms,
-        "success": success,
-        "tokens_used": tokens_used,
-    }
-
-    # Provider health
-    health.setdefault("providers", {}).setdefault(provider_id, {"pings": []})
-    pp = health["providers"][provider_id]
-    pp["pings"].append(entry)
-    if len(pp["pings"]) > window:
-        pp["pings"] = pp["pings"][-window:]
-
-    # Model health
-    if model_id:
-        key = f"{provider_id}/{model_id}"
-        health.setdefault("models", {}).setdefault(key, {"pings": []})
-        mp = health["models"][key]
-        mp["pings"].append(entry)
-        if len(mp["pings"]) > window:
-            mp["pings"] = mp["pings"][-window:]
-
-    _save_health_data(health)
+    """Record a health ping."""
+    await cfg.add_health_record(
+        db=db,
+        provider_id=provider_id,
+        model_id=model_id,
+        latency_ms=latency_ms,
+        success=success,
+        tokens_used=tokens_used,
+    )
 
 
-def compute_health_summary(
+async def compute_health_summary(
+    db: AsyncSession,
     provider_id: Optional[str] = None,
     model_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Compute health summary (availability, latency, success rate, etc.)."""
-    health = _get_health_data()
+    """Compute health summary for a provider or model."""
+    records = await cfg.get_health_history(db, provider_id=provider_id, limit=20)
+    if model_id:
+        records = [r for r in records if r.model_id == model_id]
 
-    if provider_id and model_id:
-        key = f"{provider_id}/{model_id}"
-        pings = health.get("models", {}).get(key, {}).get("pings", [])
-        prefix = f"Model {model_id}"
-    elif provider_id:
-        pings = health.get("providers", {}).get(provider_id, {}).get("pings", [])
-        prefix = f"Provider {provider_id}"
-    else:
-        # Aggregate all
-        all_pings = []
-        for pp in health.get("providers", {}).values():
-            all_pings.extend(pp.get("pings", []))
-        pings = all_pings
-        prefix = "System"
+    if not records:
+        return {
+            "status": "unknown",
+            "totalPings": 0,
+            "successRate": 0,
+            "avgLatencyMs": None,
+            "lastChecked": None,
+        }
 
-    return _compute_stats(pings, prefix)
+    successes = sum(1 for r in records if r.success)
+    latencies = [r.latency_ms for r in records if r.latency_ms is not None]
 
-
-def compute_all_health_summaries() -> Dict[str, Any]:
-    """Compute health summaries for all providers and models."""
-    health = _get_health_data()
-    result = {
-        "providers": {},
-        "models": {},
-        "system": _compute_stats(
-            [p for pp in health.get("providers", {}).values() for p in pp.get("pings", [])],
-            "System",
-        ),
+    return {
+        "status": "healthy" if successes == len(records) else "degraded" if successes > 0 else "unhealthy",
+        "totalPings": len(records),
+        "successRate": round(successes / len(records), 2),
+        "avgLatencyMs": round(sum(latencies) / len(latencies), 1) if latencies else None,
+        "lastChecked": records[0].checked_at.isoformat() if records[0].checked_at else None,
     }
 
-    for prov_id, prov_data in health.get("providers", {}).items():
-        result["providers"][prov_id] = _compute_stats(prov_data.get("pings", []), f"Provider {prov_id}")
 
-    for key, mod_data in health.get("models", {}).items():
-        result["models"][key] = _compute_stats(mod_data.get("pings", []), f"Model {key}")
-
+async def compute_all_health_summaries(db: AsyncSession) -> Dict[str, Any]:
+    """Compute health summaries for all providers and models."""
+    providers = await cfg.get_all_providers(db)
+    result = {}
+    for prov in providers:
+        prov_summary = await compute_health_summary(db, provider_id=prov.provider_id)
+        models_list = []
+        for model in (prov.models or []):
+            m_summary = await compute_health_summary(db, provider_id=prov.provider_id,
+                                                      model_id=model.model_id)
+            models_list.append({
+                "modelId": model.model_id,
+                "modelName": model.display_name,
+                **m_summary,
+            })
+        result[prov.provider_id] = {
+            **prov_summary,
+            "models": models_list,
+        }
     return result
 
 
-def _compute_stats(pings: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
-    """Compute statistics from a list of ping entries."""
-    if not pings:
-        return {
-            "label": label,
-            "status": "unknown",
-            "totalRequests": 0,
-            "successCount": 0,
-            "errorCount": 0,
-            "successRate": 100.0,
-            "avgLatencyMs": None,
-            "p95LatencyMs": None,
-            "totalTokens": 0,
-            "lastChecked": None,
-            "recentErrors": [],
-        }
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MODEL MARKETPLACE (Layer 9)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    total = len(pings)
-    successes = sum(1 for p in pings if p.get("success", True))
-    errors = total - successes
-    latencies = [p.get("latency_ms") for p in pings if p.get("latency_ms") is not None]
-    total_tokens = sum(p.get("tokens_used", 0) for p in pings)
-
-    success_rate = (successes / total * 100) if total > 0 else 100.0
-    avg_latency = (sum(latencies) / len(latencies)) if latencies else None
-    p95_latency = _percentile(sorted(latencies), 95) if latencies else None
-
-    recent_errors = [
-        {"timestamp": p["timestamp"], "latency_ms": p.get("latency_ms")}
-        for p in pings[-10:] if not p.get("success", True)
-    ]
-
-    if errors > total * 0.5:
-        status = "unhealthy"
-    elif errors > total * 0.2:
-        status = "degraded"
-    elif total > 0:
-        status = "healthy"
-    else:
-        status = "unknown"
-
-    return {
-        "label": label,
-        "status": status,
-        "totalRequests": total,
-        "successCount": successes,
-        "errorCount": errors,
-        "successRate": round(success_rate, 2),
-        "avgLatencyMs": round(avg_latency, 2) if avg_latency else None,
-        "p95LatencyMs": round(p95_latency, 2) if p95_latency else None,
-        "totalTokens": total_tokens,
-        "lastChecked": pings[-1]["timestamp"] if pings else None,
-        "recentErrors": recent_errors,
-    }
-
-
-def _percentile(sorted_data: List[float], percentile: int) -> float:
-    """Compute the nth percentile of a sorted list."""
-    if not sorted_data:
-        return 0.0
-    k = (percentile / 100.0) * (len(sorted_data) - 1)
-    f = int(k)
-    c = f + 1
-    if c >= len(sorted_data):
-        return sorted_data[-1]
-    return sorted_data[f] + (k - f) * (sorted_data[c] - sorted_data[f])
-
-
-# ── Model Marketplace (Layer 9) ──────────────────────────────────────────────
-
-
-def get_marketplace_catalog() -> List[Dict[str, Any]]:
-    """Return available models from the marketplace for installation."""
-    catalog = []
-    for p in get_all_providers():
-        provider_name = p.get("name", "")
-        for m in p.get("models", []):
-            state = m.get("state", "available")
-            if state in ("installed", "active"):
-                continue  # Already installed
-            catalog.append({
-                "modelId": m.get("id"),
-                "modelName": m.get("name"),
-                "providerId": p.get("id"),
-                "providerName": provider_name,
-                "contextWindow": m.get("contextWindow", 4096),
-                "capabilities": _model_capabilities_list(m),
-                "pricingTier": m.get("pricingTier", "free"),
-                "license": m.get("license", "Proprietary"),
-                "state": state,
-            })
-    return catalog
-
-
-def _model_capabilities_list(model: Dict[str, Any]) -> List[str]:
-    """Return list of supported capability names."""
+def _model_capabilities_list(model_dict: dict) -> List[str]:
+    """Extract list of capability names from a model dict."""
     caps = []
-    mapping = {
-        "supportsChat": "chat",
-        "supportsVision": "vision",
-        "supportsTools": "tools",
-        "supportsCode": "code",
-        "supportsReasoning": "reasoning",
-        "supportsEmbedding": "embedding",
-        "supportsRag": "rag",
-        "supportsClassification": "classification",
-        "supportsSummary": "summary",
-        "supportsExtraction": "extraction",
+    cap_map = {
+        "supportsChat": "chat", "supportsVision": "vision", "supportsTools": "tools",
+        "supportsCode": "code", "supportsEmbedding": "embedding",
+        "supportsReasoning": "reasoning", "supportsRag": "rag",
+        "supportsClassification": "classification", "supportsSummary": "summary",
+        "supportsExtraction": "extraction", "supportsAudio": "audio",
+        "supportsComparison": "comparison",
     }
-    for key, label in mapping.items():
-        if model.get(key, False):
-            caps.append(label)
+    for key, name in cap_map.items():
+        if model_dict.get(key, False):
+            caps.append(name)
     return caps
 
 
-# ── Full Catalog Export ──────────────────────────────────────────────────────
+async def get_marketplace_catalog(db: AsyncSession) -> List[Dict[str, Any]]:
+    """Get available models from the marketplace catalog.
+    
+    The marketplace contains DEFAULT_MODELS_BY_PROVIDER models that are not
+    yet installed in the user's DB.
+    """
+    # Get existing model IDs so we can exclude already-installed models
+    existing_providers = await cfg.get_all_providers(db)
+    installed_map: Dict[str, set] = {}
+    for prov in existing_providers:
+        installed_map[prov.provider_id] = set()
+        for m in (prov.models or []):
+            installed_map[prov.provider_id].add(m.model_id)
+
+    catalog = []
+    for prov_id, models_list in DEFAULT_MODELS_BY_PROVIDER.items():
+        installed_set = installed_map.get(prov_id, set())
+        for m_def in models_list:
+            if m_def["id"] not in installed_set:
+                entry = dict(m_def)
+                entry["providerId"] = prov_id
+                entry["capabilities"] = _model_capabilities_list(m_def)
+                catalog.append(entry)
+
+    return catalog
 
 
-def get_full_catalog() -> Dict[str, Any]:
-    """Export the entire model management catalog for the frontend."""
-    data = _get_management_data()
-    providers = data.get("providers", [])
-    task_mapping = data.get("taskMapping", {})
+async def test_provider_connection(
+    base_url: str,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Test connectivity to an AI provider endpoint.
 
+    Makes a lightweight API call to validate the base_url and optional api_key.
+    Returns a dict with success status, latency_ms, and any error message.
+    """
+    import time
+    import httpx
+
+    start = time.monotonic()
+    url = base_url.rstrip("/")
+
+    try:
+        # Try the OpenAI-compatible /v1/models endpoint as a lightweight check
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{url}/models", headers=headers)
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+
+        if resp.status_code < 500:
+            return {
+                "success": True,
+                "statusCode": resp.status_code,
+                "latencyMs": elapsed_ms,
+                "message": "Connection successful",
+            }
+        else:
+            return {
+                "success": False,
+                "statusCode": resp.status_code,
+                "latencyMs": elapsed_ms,
+                "message": f"Server error: {resp.status_code}",
+            }
+
+    except httpx.ConnectError:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": f"Connection refused — is the service running at {url}?",
+        }
+    except httpx.TimeoutException:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": f"Connection timed out after 10s",
+        }
+    except Exception as e:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": str(e),
+        }
+
+
+async def fetch_provider_models(
+    base_url: str,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fetch available models from a provider's API.
+
+    Calls the OpenAI-compatible /v1/models endpoint and returns the model list.
+    Returns a dict with success status and available models or error.
+    """
+    import time
+    import httpx
+
+    start = time.monotonic()
+    url = base_url.rstrip("/")
+
+    try:
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{url}/models", headers=headers)
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            models = data.get("data", data.get("models", []))
+            return {
+                "success": True,
+                "latencyMs": elapsed_ms,
+                "models": models,
+                "count": len(models),
+            }
+        else:
+            return {
+                "success": False,
+                "latencyMs": elapsed_ms,
+                "statusCode": resp.status_code,
+                "message": f"API error: {resp.status_code} — {resp.text[:200]}",
+            }
+
+    except httpx.ConnectError:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": f"Connection refused — is the service running at {url}?",
+        }
+    except httpx.TimeoutException:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": "Connection timed out after 15s",
+        }
+    except Exception as e:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": str(e),
+        }
+
+
+async def get_full_catalog(db: AsyncSession) -> Dict[str, Any]:
+    """Get full catalog including providers, models, task mapping, and marketplace."""
+    providers = await get_all_providers(db)
+    task_mapping = await get_task_mapping(db)
+    routing = await is_automatic_routing_enabled(db)
+    marketplace = await get_marketplace_catalog(db)
+
+    # Enrich providers with health
     enriched_providers = []
     for p in providers:
-        models = []
-        for m in p.get("models", []):
-            models.append({
-                **m,
-                "capabilities": _model_capabilities_list(m),
-            })
-        health = compute_health_summary(provider_id=p.get("id"))
-        enriched_providers.append({
-            **p,
-            "models": models,
-            "health": health,
-        })
-
-    # Compute task mapping with model info
-    enriched_task_mapping = {}
-    for task_type, mapping_entry in task_mapping.items():
-        prov_id = mapping_entry.get("providerId")
-        mod_id = mapping_entry.get("modelId")
-        model_data = get_model(prov_id, mod_id)
-        enriched_task_mapping[task_type] = {
-            "providerId": prov_id,
-            "modelId": mod_id,
-            "modelName": model_data.get("name") if model_data else None,
-            "providerName": get_provider(prov_id).get("name") if get_provider(prov_id) else None,
-        }
+        health = await compute_health_summary(db, provider_id=p["id"])
+        enriched_providers.append({**p, "health": health})
 
     return {
         "providers": enriched_providers,
-        "taskMapping": enriched_task_mapping,
-        "automaticRouting": data.get("automaticRouting", True),
+        "taskMapping": task_mapping,
+        "automaticRouting": routing,
         "taskTypes": TASK_TYPES,
         "validRoles": VALID_ROLES,
         "validDepartments": ZETDC_DEPARTMENTS,
         "validCapabilities": VALID_CAPABILITIES,
         "automaticRoutingRules": AUTOMATIC_ROUTING_RULES,
-        "marketplace": get_marketplace_catalog(),
+        "marketplace": marketplace,
     }

@@ -23,6 +23,7 @@ from app.routers.deps import (
 
 from fastapi import APIRouter
 import json
+import os
 from pathlib import Path
 
 router = APIRouter(tags=["models"])
@@ -227,10 +228,25 @@ async def api_models_available():
 
             # Inject V2 enabled+visible models into the available lists so
             # they appear in the UI without needing a separate endpoint call.
+            # Skip models whose underlying provider is unconfigured.
+            def _v2_is_configured(mid: str) -> bool:
+                """Return True if the provider for this model ID has its API key set."""
+                if mid.startswith("go/") or mid.startswith("zen/"):
+                    return zen_configured() or bool(os.getenv("OPENCODE_GO_API_KEY") or os.getenv("OPENCODE_ZEN_API_KEY"))
+                if mid.startswith("huggingface/"):
+                    return hf_configured()
+                if mid == GEMINI_MODEL_ID:
+                    return gemini_configured()
+                if mid == DEEPSEEK_MODEL_ID:
+                    return deepseek_configured()
+                return True
+
             for p in v2_providers:
                 for m in p.get("models", []):
                     mid = m.get("id", "")
                     if not mid:
+                        continue
+                    if not _v2_is_configured(mid):
                         continue
                     if m.get("enabled") and m.get("visibleToUsers"):
                         if mid not in filtered_installed:

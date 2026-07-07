@@ -70,7 +70,7 @@ export const NewChatPage: React.FC = () => {
   const audioChunksRef = useRef<Blob[]>([])
   const chatEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const { selectedModel: model, setSelectedModel: setModel, availableModels: models, modelCapabilities, modelLabels, modelDetails, loading: loadingModels, setModelForTask } = useModel()
+  const { selectedModel: model, setSelectedModel: setModel, availableModels: models, modelCapabilities, modelLabels, modelDetails, loading: loadingModels, setModelForTask, v2ModelIds } = useModel()
 
   // On mount, ensure we have the best chat-optimized model
   useEffect(() => {
@@ -464,6 +464,7 @@ export const NewChatPage: React.FC = () => {
             modelLabels={modelLabels}
             onSelect={(m) => { handleModelChange(m); setCapabilityWarning(null); }}
             loading={loadingModels}
+            v2ModelIds={v2ModelIds}
           />
         )}
       </div>

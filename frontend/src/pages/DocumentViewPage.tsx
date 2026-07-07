@@ -30,8 +30,6 @@ import {
   getModelPullStatus,
   getBootstrapStatus,
   getUiSettings,
-  getModelLabels,
-  getModelCapabilities,
   ApiError,
   flowchartGenerate,
   chartsAnalyze,
@@ -41,6 +39,7 @@ import {
 import { isCloudModel } from "../utils/modelUtils"
 import { colors } from "../theme/colors"
 import { useTheme } from "../context/ThemeContext"
+import { useModel } from "../context/ModelContext"
 import { getTokens } from "../theme/themeTokens"
 import { RobotSearching } from "../components/RobotSearching"
 import { UserIcon } from "../components/UserIcon"
@@ -173,14 +172,20 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const [loadingAnalysis, setLoadingAnalysis] = useState(false)
   const [loadingChat, setLoadingChat] = useState(false)
   const [chatInfo, setChatInfo] = useState<string | null>(null)
-  const [availableModels, setAvailableModels] = useState<string[]>([])
   const [installedModels, setInstalledModels] = useState<string[]>([])
-  const [modelDetails, setModelDetails] = useState<OllamaModelDetail[]>([])
-  const [modelsOffline, setModelsOffline] = useState(false)
-  const [selectedModel, setSelectedModel] = useState<string>("")
-  const [modelLabels, setModelLabels] = useState<Record<string, string>>({})
-  const [capabilityMap, setCapabilityMap] = useState<Record<string, string[]>>({})
   const [searchScope, setSearchScope] = useState<"project" | "all">("project")
+
+  const {
+    selectedModel, setSelectedModel,
+    availableModels,
+    modelLabels,
+    modelCapabilities: capabilityMap,
+    modelDetails,
+    offline: modelsOffline,
+    loading: modelsLoading,
+    reloadModels,
+    v2ModelIds,
+  } = useModel()
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const [isScopeMenuOpen, setIsScopeMenuOpen] = useState(false)
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
@@ -483,67 +488,15 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
 
   useEffect(() => {
     if (!isAuthenticated) return
-    const loadModels = async () => {
+    const loadInstalled = async () => {
       try {
         const res = await getAvailableModels()
-        const models = (res.available ?? res.models ?? []) as string[]
-        const installed = (res.installed ?? []) as string[]
-        setAvailableModels(models)
-        setInstalledModels(installed)
-        setModelDetails(res.models || [])
-        const offline = Boolean(res.offline)
-        setModelsOffline(offline)
-        const stored =
-          typeof window !== "undefined"
-            ? window.localStorage.getItem("docintel_model_preference")
-            : null
-        const fallback = res.default_model || models[0] || ""
-        const allowed = offline ? installed : models
-        const chatDefault = res.defaults?.["chat"]
-        const selected =
-          chatDefault && allowed.includes(chatDefault)
-            ? chatDefault
-            : stored && allowed.includes(stored)
-              ? stored
-              : allowed.includes(fallback)
-                ? fallback
-                : allowed[0] || fallback
-        setSelectedModel(selected)
-        if (selected && typeof window !== "undefined") {
-          window.localStorage.setItem("docintel_model_preference", selected)
-        }
+        setInstalledModels(res.installed ?? [])
       } catch (e: any) {
-        setChatInfo(e.message ?? "Failed to load model list")
+        console.warn("Failed to fetch installed models:", e)
       }
     }
-    loadModels()
-  }, [isAuthenticated, authEpoch])
-
-  useEffect(() => {
-    if (!isAuthenticated) return
-    const loadLabels = async () => {
-      try {
-        const res = await getModelLabels()
-        setModelLabels(res.labels || {})
-      } catch (e: any) {
-        // Silently fail, labels are optional
-        console.warn("Failed to load model labels:", e)
-      }
-    }
-    loadLabels()
-  }, [isAuthenticated, authEpoch])
-
-  useEffect(() => {
-    if (!isAuthenticated) return
-    const loadCaps = async () => {
-      try {
-        const res = await getModelCapabilities()
-        setCapabilityMap(res.capabilities || {})
-      } catch {
-        // Non-critical; capabilities are optional display
-      }
-    }
-    loadCaps()
+    loadInstalled()
   }, [isAuthenticated, authEpoch])
 
   useEffect(() => {
@@ -625,10 +578,9 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           const history = await getChatMessages(sessionId, 100)
           setChatMessages(history.messages)
         }
+        reloadModels()
         const models = await getAvailableModels()
-        setAvailableModels((models.available ?? models.models ?? []) as string[])
         setInstalledModels((models.installed ?? []) as string[])
-        setModelsOffline(Boolean(models.offline))
       } catch {
       }
     }
@@ -921,9 +873,6 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       return
     }
     setSelectedModel(nextModel)
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem("docintel_model_preference", nextModel)
-    }
     setIsModelMenuOpen(false)
     if (!sessionId) {
       setChatMessages((prev) => [
@@ -1008,11 +957,9 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           setPullStates((prev) => ({ ...prev, ...next }))
         }
         if (anySuccess) {
+          reloadModels()
           const updated = await getAvailableModels()
-          const models = (updated.available ?? updated.models ?? []) as string[]
-          const installed = (updated.installed ?? []) as string[]
-          setAvailableModels(models)
-          setInstalledModels(installed)
+          setInstalledModels((updated.installed ?? []) as string[])
           setChatInfo("Model installed successfully.")
         }
         const current = pullModel ? next[pullModel] ?? pullStates[pullModel] : null
@@ -2710,89 +2657,137 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                     Offline (installed models only)
                   </div>
                 )}
-                {([...new Set(modelsOffline
-                    ? installedModels
-                    : availableModels
-                  )]).map((m, i) => {
-                  const cloudApi = isCloudModel(m, modelDetails)
-                  const installed = installedModels.includes(m)
-                  const ps = pullStates[m]
-                  const isPulling =
-                    ps && ps.state && !["success", "failed", "idle"].includes(String(ps.state)) && !installed
-                  const percent = isPulling ? Number(ps.percent || 0) : 0
-                  const badge =
-                    cloudApi
-                      ? "API"
-                      : installed
-                        ? "Installed"
-                        : ps && ps.state === "pending"
-                          ? "Pending…"
-                          : ps && ps.state === "verifying"
-                            ? "Verifying…"
-                            : isPulling
-                              ? `Downloading… ${percent}%`
-                              : "Pull"
-                  return (
-                    <button
-                      key={i}
-                      type="button"
-                      onClick={() => {
-                        if (!cloudApi && !installed) {
-                          openPullModal(m)
-                          return
-                        }
-                        handleModelChange(m)
-                      }}
-                      style={{
-                        width: "100%",
-                        textAlign: "left",
-                        padding: "10px 10px",
-                        borderRadius: 10,
-                        border: `1px solid ${c.border}`,
-                        backgroundColor: m === selectedModel ? c.surfaceActive : (isDark ? "transparent" : "#FFFFFF"),
-                        cursor: "pointer",
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        gap: 10,
-                      }}
-                    >
-                      <span style={{ fontSize: 13, color: c.text }}>
-                        {modelLabel(m)}
-                      </span>
-                      <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, justifyContent: "flex-end" }}>
-                        {(capabilityMap[m] || []).slice(0, 3).map(cap => (
-                          <span
-                            key={cap}
+                {(() => {
+                  const sourceModels = [...new Set(modelsOffline ? installedModels : availableModels)]
+                  const v2Set = v2ModelIds ?? new Set<string>()
+                  const v2Group: string[] = []
+                  const localGroup: string[] = []
+                  for (const m of sourceModels) {
+                    if (v2Set.has(m)) v2Group.push(m)
+                    else localGroup.push(m)
+                  }
+                  interface ModelItem { id: string; group: "v2" | "local" }
+                  const allItems: ModelItem[] = [
+                    ...v2Group.map(m => ({ id: m, group: "v2" as const })),
+                    ...localGroup.map(m => ({ id: m, group: "local" as const })),
+                  ]
+                  const hasV2 = v2Group.length > 0
+                  return allItems.map((item, idx) => {
+                    const { id: m, group } = item
+                    const isV2 = group === "v2"
+                    const isFirstV2 = isV2 && idx === 0
+                    const isFirstLocal = group === "local" && idx > 0 && allItems[idx - 1]?.group === "v2"
+                    const cloudApi = isV2 || isCloudModel(m, modelDetails)
+                    const installed = installedModels.includes(m)
+                    const ps = pullStates[m]
+                    const isPulling =
+                      ps && ps.state && !["success", "failed", "idle"].includes(String(ps.state)) && !installed
+                    const percent = isPulling ? Number(ps.percent || 0) : 0
+                    const badge =
+                      cloudApi
+                        ? "API"
+                        : installed
+                          ? "Installed"
+                          : ps && ps.state === "pending"
+                            ? "Pending…"
+                            : ps && ps.state === "verifying"
+                              ? "Verifying…"
+                              : isPulling
+                                ? `Downloading… ${percent}%`
+                                : "Pull"
+                    return (
+                      <React.Fragment key={m}>
+                        {isFirstLocal && hasV2 && (
+                          <div
                             style={{
+                              padding: "8px 10px 4px",
                               fontSize: 10,
-                              padding: "1px 5px",
-                              borderRadius: 4,
-                              border: `1px solid ${c.border}`,
-                              backgroundColor: isDark ? c.surface : "#F8FAFC",
+                              fontWeight: 700,
                               color: c.textMuted,
-                              lineHeight: "16px",
+                              textTransform: "uppercase",
+                              letterSpacing: "0.6px",
+                              borderTop: `1px solid ${c.border}40`,
+                              marginTop: 4,
                             }}
                           >
-                            {cap === "reasoning" ? "🧠" : cap === "vision" ? "👁️" : cap === "audio" ? "🎤" : cap === "code" ? "💻" : cap === "fast" ? "⚡" : cap === "large" ? "🐘" : cap}
-                          </span>
-                        ))}
-                        <span
+                            Local Models
+                          </div>
+                        )}
+                        {isFirstV2 && hasV2 && (
+                          <div
+                            style={{
+                              padding: "0 10px 4px",
+                              fontSize: 10,
+                              fontWeight: 700,
+                              color: c.textMuted,
+                              textTransform: "uppercase",
+                              letterSpacing: "0.6px",
+                            }}
+                          >
+                            Cloud / API Models
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!cloudApi && !installed) {
+                              openPullModal(m)
+                              return
+                            }
+                            handleModelChange(m)
+                          }}
                           style={{
-                            fontSize: 11,
-                            padding: "2px 8px",
-                            borderRadius: 999,
-                            border: `1px solid ${cloudApi ? "#10b981" : installed ? c.primary : c.border}`,
-                            backgroundColor: cloudApi ? (isDark ? "rgba(16,185,129,0.18)" : "#ecfdf5") : installed ? c.surfaceActive : (isDark ? c.surface : "#F4F6F8"),
-                            color: cloudApi ? "#10b981" : installed ? c.primary : c.textMuted,
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "10px 10px",
+                            borderRadius: 10,
+                            border: `1px solid ${c.border}`,
+                            backgroundColor: m === selectedModel ? c.surfaceActive : (isDark ? "transparent" : "#FFFFFF"),
+                            cursor: "pointer",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: 10,
                           }}
                         >
-                          {badge}
-                        </span>
-                      </div>
-                    </button>
-                  )
-                })}
+                          <span style={{ fontSize: 13, color: c.text }}>
+                            {isV2 ? "☁️ " : ""}{modelLabel(m)}
+                          </span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, justifyContent: "flex-end" }}>
+                            {(capabilityMap[m] || []).slice(0, 3).map(cap => (
+                              <span
+                                key={cap}
+                                style={{
+                                  fontSize: 10,
+                                  padding: "1px 5px",
+                                  borderRadius: 4,
+                                  border: `1px solid ${c.border}`,
+                                  backgroundColor: isDark ? c.surface : "#F8FAFC",
+                                  color: c.textMuted,
+                                  lineHeight: "16px",
+                                }}
+                              >
+                                {cap === "reasoning" ? "🧠" : cap === "vision" ? "👁️" : cap === "audio" ? "🎤" : cap === "code" ? "💻" : cap === "fast" ? "⚡" : cap === "large" ? "🐘" : cap}
+                              </span>
+                            ))}
+                            <span
+                              style={{
+                                fontSize: 11,
+                                padding: "2px 8px",
+                                borderRadius: 999,
+                                border: `1px solid ${cloudApi ? "#10b981" : installed ? c.primary : c.border}`,
+                                backgroundColor: cloudApi ? (isDark ? "rgba(16,185,129,0.18)" : "#ecfdf5") : installed ? c.surfaceActive : (isDark ? c.surface : "#F4F6F8"),
+                                color: cloudApi ? "#10b981" : installed ? c.primary : c.textMuted,
+                              }}
+                            >
+                              {badge}
+                            </span>
+                          </div>
+                        </button>
+                      </React.Fragment>
+                    )
+                  })
+                })()}
               </div>
             )}
           </div>

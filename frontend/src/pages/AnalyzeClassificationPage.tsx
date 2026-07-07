@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react"
-import { classifyDocuments, getDocumentLibrary, getAvailableModels } from "../api/client"
+import { classifyDocuments, getDocumentLibrary } from "../api/client"
 import { useTheme } from "../context/ThemeContext"
+import { useModel } from "../context/ModelContext"
 import { getTokens } from "../theme/themeTokens"
 
 type DocumentItem = { id: string; filename: string; status: string }
@@ -40,10 +41,9 @@ export const AnalyzeClassificationPage: React.FC = () => {
   const [results, setResults] = useState<ClassResult[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [availableModels, setAvailableModels] = useState<string[]>([])
-  const [selectedModel, setSelectedModel] = useState("")
-
   const [removedTags, setRemovedTags] = useState<Record<string, string[]>>({})
+
+  const { selectedModel, setSelectedModel, availableModels } = useModel()
 
   useEffect(() => {
     const styleId = "classify-anim"
@@ -61,18 +61,15 @@ export const AnalyzeClassificationPage: React.FC = () => {
     let cancelled = false
     setLoadingDocs(true)
     setDocsError(null)
-    Promise.all([
-      getDocumentLibrary().catch((e: any) => { setDocsError(e?.message || "Failed to load documents"); return { documents: [] } }),
-      getAvailableModels().catch(() => ({ installed: [], available: [] })),
-    ]).then(([docsRes, modelsRes]) => {
-      if (cancelled) return
-      setDocuments(docsRes?.documents || docsRes?.items || [])
-      const all = [...new Set([...(modelsRes.installed || []), ...(modelsRes.available || [])])]
-      setAvailableModels(all)
-      if (all.length > 0) setSelectedModel(all[0])
-    }).finally(() => {
-      if (!cancelled) setLoadingDocs(false)
-    })
+    getDocumentLibrary()
+      .catch((e: any) => { setDocsError(e?.message || "Failed to load documents"); return { documents: [] } })
+      .then((docsRes) => {
+        if (cancelled) return
+        setDocuments(docsRes?.documents || docsRes?.items || [])
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDocs(false)
+      })
     return () => { cancelled = true }
   }, [])
 
