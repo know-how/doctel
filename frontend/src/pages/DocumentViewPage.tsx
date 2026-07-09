@@ -43,6 +43,7 @@ import { useModel } from "../context/ModelContext"
 import { getTokens } from "../theme/themeTokens"
 import { RobotSearching } from "../components/RobotSearching"
 import { UserIcon } from "../components/UserIcon"
+import { ModelSelector } from "../components/ModelSelector"
 
 interface DocumentViewPageProps {
   documentId: string | null
@@ -185,8 +186,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     loading: modelsLoading,
     reloadModels,
     v2ModelIds,
+    v2Providers,
   } = useModel()
-  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const [isScopeMenuOpen, setIsScopeMenuOpen] = useState(false)
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   const [historyQuery, setHistoryQuery] = useState("")

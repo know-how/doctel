@@ -10,8 +10,10 @@ from app.routers.deps import (
     Depends,
     JSONResponse,
     get_current_user,
+    get_db,
     User,
     DbSession,
+    AsyncSession,
     settings,
     ollama,
     load_model_cache,
@@ -62,224 +64,153 @@ def _is_generation_model(model: str) -> bool:
 
 
 @router.get("/api/models/available", response_model=ModelsAvailableResponse)
-async def api_models_available():
+async def api_models_available(db: AsyncSession = Depends(get_db)):
+    """
+    Get available models from centralized Model Management system.
+    
+    SOURCE OF TRUTH: Database-managed models ONLY.
+    
+    A model becomes available only when:
+    1. It exists on a provider
+    2. It has been fetched from that provider
+    3. It has been saved in the database
+    4. Administrator has assigned an eligible status (ACTIVE or MAINTENANCE)
+    
+    This endpoint does NOT include hardcoded cloud models.
+    Cloud models must be configured through the Provider system and fetched
+    into the database to appear in this list.
+    """
+    from app.services.model_availability_service import get_available_models, ModelStatus
+    from app.services.model_management_service import get_all_providers, get_task_mapping
+    from app.services import app_config_service as app_cfg
+    from app.services.model_capabilities import get_model_capabilities, get_display_category
     from app.utils.ollama_client import ollama
-    installed: list[str] = []
+    
+    # Get Ollama models (these are still considered "installed" locally)
+    ollama_installed: list[str] = []
     ollama_details: list[dict] = []
     offline = False
     try:
-        installed = await ollama.list_models()
-        update_installed_models(installed)
+        ollama_installed = await ollama.list_models()
+        update_installed_models(ollama_installed)
         ollama_details = await ollama.list_models_detailed()
     except Exception:
         cache = load_model_cache()
-        installed = list(cache.get("installed") or [])
+        ollama_installed = list(cache.get("installed") or [])
         offline = True
-    available = list(settings.available_models or [])
-    installed_set = set(installed)
-    available_set = set(available)
-    merged = list(dict.fromkeys(available + installed))
-    filtered_installed = [m for m in merged if m in installed_set]
-    filtered_available = [m for m in merged if m in available_set or m in installed_set]
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # SOURCE OF TRUTH: Database-managed models ONLY
+    # ═══════════════════════════════════════════════════════════════════════
+    
+    # Get all providers with their models from database
+    v2_providers = await get_all_providers(db)
+    
+    # Get all models with visibility (ACTIVE and MAINTENANCE)
+    db_models = await get_available_models(db, include_maintenance=True)
+    
+    # Build provider-grouped model structure
+    # Only include models where status is ACTIVE or MAINTENANCE
+    selectable_models = []  # ACTIVE only - can be selected/used
+    visible_models = []     # ACTIVE + MAINTENANCE - visible in dropdowns
+    all_model_details = []
+    
+    for model in db_models:
+        model_dict = model.to_dict()
+        visible_models.append(model_dict)
+        if model.is_selectable:
+            selectable_models.append(model_dict)
+        
+        # Build model detail entry
+        detail = {
+            "name": model.model_id,
+            "provider_id": model.provider_id,
+            "size": 0,
+            "size_human": model.pricing_tier or "Cloud",
+            "family": model.provider_id,
+            "parameter_size": model.name,
+            "quantization_level": "API" if model.pricing_tier != "local" else "Local",
+            "modified_at": "",
+            "digest": "",
+            "ready": model.is_selectable,  # Only ACTIVE models are "ready"
+            "capabilities": model.capabilities or get_model_capabilities(model.model_id),
+            "display_category": get_display_category(model.model_id),
+            "status": model.status,
+            "is_selectable": model.is_selectable,
+            "is_visible": model.is_visible,
+            "is_disabled": model.is_disabled,
+            "disabled_reason": model.disabled_reason,
+        }
+        all_model_details.append(detail)
+    
+    # Get selectable model IDs for the flat lists (for backward compatibility)
+    selectable_model_ids = [m["id"] for m in selectable_models]
+    visible_model_ids = [m["id"] for m in visible_models]
+    
+    # Combine with Ollama models that are locally installed
+    # Only include Ollama models that are also in the database as ACTIVE/MAINTENANCE
+    # OR Ollama models that haven't been imported yet (backward compatibility)
+    installed_set = set(ollama_installed)
+    
+    # For backward compatibility: include Ollama models not yet in DB
+    # These will be imported when admin fetches models
+    ollama_only_models = [m for m in ollama_installed if m not in visible_model_ids]
+    
+    # Final lists:
+    # - "installed": All selectable (ACTIVE) models + locally installed Ollama models
+    # - "available": All visible (ACTIVE + MAINTENANCE) models + all Ollama models
+    filtered_installed = list(dict.fromkeys(selectable_model_ids + ollama_installed))
+    filtered_available = list(dict.fromkeys(visible_model_ids + ollama_installed))
+    
+    # Filter out embedding models
     filtered_installed = [m for m in filtered_installed if _is_generation_model(m)]
     filtered_available = [m for m in filtered_available if _is_generation_model(m)]
-
-    # Inject Gemini API entry when a key is configured so it appears in the UI
-    from app.services.gemini_service import GEMINI_MODEL_ID, is_configured as gemini_configured
-    if gemini_configured():
-        if GEMINI_MODEL_ID not in filtered_installed:
-            filtered_installed.append(GEMINI_MODEL_ID)
-        if GEMINI_MODEL_ID not in filtered_available:
-            filtered_available.append(GEMINI_MODEL_ID)
-
-    # Inject DeepSeek API entry when a key is configured
-    from app.services.deepseek_service import DEEPSEEK_MODEL_ID, is_configured as deepseek_configured
-    if deepseek_configured():
-        if DEEPSEEK_MODEL_ID not in filtered_installed:
-            filtered_installed.append(DEEPSEEK_MODEL_ID)
-        if DEEPSEEK_MODEL_ID not in filtered_available:
-            filtered_available.append(DEEPSEEK_MODEL_ID)
-
-    # Inject OpenCode Zen models when API key is configured
-    from app.services.opencode_zen_service import is_configured as zen_configured, get_available_models as zen_models
-    if zen_configured():
-        for zm in zen_models():
-            mid = zm["id"]
-            if mid not in filtered_installed:
-                filtered_installed.append(mid)
-            if mid not in filtered_available:
-                filtered_available.append(mid)
-
-    # Inject HuggingFace models when API key is configured
-    from app.services.huggingface_service import is_configured as hf_configured, get_available_models as hf_models
-    if hf_configured():
-        for hm in hf_models():
-            mid = hm["id"]
-            if mid not in filtered_installed:
-                filtered_installed.append(mid)
-            if mid not in filtered_available:
-                filtered_available.append(mid)
-
-    # Build cloud model detail entries
-    from app.services.model_capabilities import (
-        get_model_capabilities,
-        get_display_category,
-    )
-
-    cloud_details = []
-    if gemini_configured():
-        from app.services.gemini_service import get_display_name as gemini_display
-        cloud_details.append({
-            "name": GEMINI_MODEL_ID,
-            "size": 0,
-            "size_human": "Cloud",
-            "family": "Google Gemini",
-            "parameter_size": settings.gemini_model,
-            "quantization_level": "API",
-            "modified_at": "",
-            "digest": "",
-            "ready": True,
-            "capabilities": get_model_capabilities(GEMINI_MODEL_ID),
-            "display_category": get_display_category(GEMINI_MODEL_ID),
-        })
-
-    if deepseek_configured():
-        from app.services.deepseek_service import get_display_name as deepseek_display
-        cloud_details.append({
-            "name": DEEPSEEK_MODEL_ID,
-            "size": 0,
-            "size_human": "Cloud",
-            "family": "DeepSeek",
-            "parameter_size": settings.deepseek_model,
-            "quantization_level": "API",
-            "modified_at": "",
-            "digest": "",
-            "ready": True,
-            "capabilities": get_model_capabilities(DEEPSEEK_MODEL_ID),
-            "display_category": get_display_category(DEEPSEEK_MODEL_ID),
-        })
-
-    if zen_configured():
-        for zm in zen_models():
-            mid = zm["id"]
-            cloud_details.append({
-                "name": mid,
-                "size": 0,
-                "size_human": "Cloud",
-                "family": zm.get("provider", "OpenCode"),
-                "parameter_size": zm.get("name", ""),
-                "quantization_level": zm.get("tier", ""),
-                "modified_at": "",
-                "digest": "",
-                "ready": True,
-                "capabilities": get_model_capabilities(mid),
-                "display_category": get_display_category(mid),
-                "max_input_tokens": zm.get("maxInputTokens", 128000),
-                "max_output_tokens": zm.get("maxOutputTokens", 16000),
-                "vision": zm.get("vision", False),
-                "tool_calling": zm.get("toolCalling", False),
-            })
-
-    if hf_configured():
-        for hm in hf_models():
-            mid = hm["id"]
-            cloud_details.append({
-                "name": mid,
-                "size": 0,
-                "size_human": "Cloud",
-                "family": hm.get("provider", "HuggingFace"),
-                "parameter_size": hm.get("name", ""),
-                "quantization_level": hm.get("tier", ""),
-                "modified_at": "",
-                "digest": "",
-                "ready": True,
-                "capabilities": get_model_capabilities(mid),
-                "display_category": get_display_category(mid),
-            })
-
-    all_details = ollama_details + cloud_details
-
-    # Inject capabilities into Ollama model details
-    for d in all_details:
+    
+    # Add Ollama model details
+    for d in ollama_details:
         if "capabilities" not in d or not d["capabilities"]:
             d["capabilities"] = get_model_capabilities(d["name"])
         if "display_category" not in d or not d["display_category"]:
             d["display_category"] = get_display_category(d["name"])
-
-    # Mark available-but-not-installed Ollama models as not ready
-    installed_names = {d["name"] for d in ollama_details}
-    available_not_installed = [m for m in filtered_available if m not in installed_names]
-
-    # Load task mapping defaults from V2 if available
+        d["provider_id"] = "ollama"
+        d["status"] = "active"  # Local Ollama models are always active
+        d["is_selectable"] = True
+        d["is_visible"] = True
+        d["is_disabled"] = False
+    
+    # Combine all model details
+    all_details = ollama_details + all_model_details
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # Task defaults and routing configuration
+    # ═══════════════════════════════════════════════════════════════════════
+    
     task_defaults = {}
-    _mgmt_path = Path(settings.base_dir) / "data" / "model_management.json"
-    v2_providers = []
     v2_auto_routing = True
-    if _mgmt_path.exists():
-        try:
-            _raw = _mgmt_path.read_text(encoding="utf-8")
-            _data = json.loads(_raw)
-            _raw_mapping = _data.get("taskMapping", {})
-            for task_type, mapping in _raw_mapping.items():
-                if isinstance(mapping, dict) and mapping.get("modelId"):
-                    task_defaults[task_type] = mapping["modelId"]
-            v2_providers = _data.get("providers", [])
-            v2_auto_routing = _data.get("automaticRouting", True)
-
-            # Inject V2 enabled+visible models into the available lists so
-            # they appear in the UI without needing a separate endpoint call.
-            # Skip models whose underlying provider is unconfigured.
-            def _v2_is_configured(mid: str) -> bool:
-                """Return True if the provider for this model ID has its API key set."""
-                if mid.startswith("go/") or mid.startswith("zen/"):
-                    return zen_configured() or bool(os.getenv("OPENCODE_GO_API_KEY") or os.getenv("OPENCODE_ZEN_API_KEY"))
-                if mid.startswith("huggingface/"):
-                    return hf_configured()
-                if mid == GEMINI_MODEL_ID:
-                    return gemini_configured()
-                if mid == DEEPSEEK_MODEL_ID:
-                    return deepseek_configured()
-                return True
-
-            for p in v2_providers:
-                for m in p.get("models", []):
-                    mid = m.get("id", "")
-                    if not mid:
-                        continue
-                    if not _v2_is_configured(mid):
-                        continue
-                    if m.get("enabled") and m.get("visibleToUsers"):
-                        if mid not in filtered_installed:
-                            filtered_installed.append(mid)
-                        if mid not in filtered_available:
-                            filtered_available.append(mid)
-                    # Also add to all_details for capability/display info
-                    v2_detail = {
-                        "name": mid,
-                        "size": 0,
-                        "size_human": "Cloud",
-                        "family": p.get("name", m.get("name", "")),
-                        "parameter_size": m.get("name", ""),
-                        "quantization_level": m.get("pricingTier", "API"),
-                        "modified_at": "",
-                        "digest": "",
-                        "ready": m.get("enabled", False),
-                        "capabilities": m.get("capabilities", m.get("forTasks", [])),
-                        "display_category": get_display_category(mid),
-                    }
-                    existing_names = {d["name"] for d in all_details}
-                    if mid not in existing_names:
-                        all_details.append(v2_detail)
-        except Exception as e:
-            logger.warning("Failed to load V2 data from %s: %s", _mgmt_path, e)
-    else:
-        logger.info("V2 management file not found at %s", _mgmt_path)
-
+    try:
+        v2_auto_routing = await app_cfg.get_setting_bool(db, "routing.automatic", True)
+        
+        # Get task mappings - only include mappings to ACTIVE models
+        task_mappings = await get_task_mapping(db)
+        for task_type, mapping in task_mappings.items():
+            if mapping and mapping.get("modelId"):
+                model_id = mapping["modelId"]
+                # Only include if model is ACTIVE (selectable)
+                if any(m["id"] == model_id for m in selectable_models):
+                    task_defaults[task_type] = model_id
+    except Exception as e:
+        logger.warning("Failed to load task mappings: %s", e)
+    
+    # Determine default model from database configuration or first selectable
+    default_model = await app_cfg.get_setting(db, "models.default", None)
+    if not default_model and selectable_model_ids:
+        default_model = selectable_model_ids[0]
+    
     return {
         "installed": filtered_installed,
         "available": filtered_available,
         "offline": offline,
-        "default_model": (settings.default_model or settings.text_model),
+        "default_model": default_model or settings.default_model or settings.text_model,
         "embed_model": settings.embed_model,
         "vision_model": settings.vision_model,
         "models": all_details,

@@ -86,6 +86,7 @@ def _settings() -> "Settings":
 
 
 def _api_key() -> str:
+    """Get API key from env, then file settings (DB override supported via settings proxy)."""
     val = os.getenv("GEMINI_API_KEY", "").strip()
     if val:
         return val
@@ -93,6 +94,7 @@ def _api_key() -> str:
 
 
 def _model_name() -> str:
+    """Get model name from env, then file settings, then hardcoded default."""
     configured = os.getenv("GEMINI_MODEL", "").strip()
     if configured:
         return _LEGACY_MODEL_ALIASES.get(configured, configured)
@@ -102,6 +104,43 @@ def _model_name() -> str:
 def is_configured() -> bool:
     """Return True if a GEMINI_API_KEY is present in the environment."""
     return bool(_api_key())
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DB-AWARE ASYNC VERSIONS (for use with database-backed configuration)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def get_api_key_db(db: "AsyncSession") -> str:
+    """Get API key with DB override support. Priority: env > DB > file > empty."""
+    val = os.getenv("GEMINI_API_KEY", "").strip()
+    if val:
+        return val
+    
+    from app.services import app_config_service as app_cfg
+    db_val = await app_cfg.get_setting_str(db, "api.gemini_api_key", "")
+    if db_val:
+        return db_val
+    
+    return _settings().gemini_api_key
+
+
+async def get_model_name_db(db: "AsyncSession") -> str:
+    """Get model name with DB override support. Priority: env > DB > file > default."""
+    configured = os.getenv("GEMINI_MODEL", "").strip()
+    if configured:
+        return _LEGACY_MODEL_ALIASES.get(configured, configured)
+    
+    from app.services import app_config_service as app_cfg
+    db_val = await app_cfg.get_setting_str(db, "api.gemini_model", "")
+    if db_val:
+        return db_val
+    
+    return _settings().gemini_model or _DEFAULT_MODEL
+
+
+async def is_configured_db(db: "AsyncSession") -> bool:
+    """Return True if a GEMINI_API_KEY is present (checks env, then DB, then file)."""
+    return bool(await get_api_key_db(db))
 
 
 # ── generation ────────────────────────────────────────────────────────────────

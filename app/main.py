@@ -234,6 +234,17 @@ async def startup():
 
     startup_manager.register("file_watcher", _start_watcher_svc)
 
+    # 3e. Provider health monitor (runs periodic health checks)
+    async def _start_provider_monitor():
+        print("=== STARTUP: _start_provider_monitor starting ===", flush=True)
+        from app.services.provider_monitor_service import start_provider_monitor
+        # Start with 5-minute interval (configurable via settings)
+        start_provider_monitor(interval_minutes=5)
+        print("=== STARTUP: _start_provider_monitor done ===", flush=True)
+        return {"status": "healthy"}
+
+    startup_manager.register("provider_monitor", _start_provider_monitor)
+
     # Start all non-critical services in parallel
     print("=== STARTUP: calling start_non_critical() ===", flush=True)
     non_critical_results = await startup_manager.start_non_critical()

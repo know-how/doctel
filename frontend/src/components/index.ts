@@ -4,3 +4,4 @@
  */
 
 export { Button, Card, Input, Badge, GlassPanel, Divider, Spinner, Text } from "./styled"
+export { ModelSelector } from "./ModelSelector"

@@ -37,11 +37,8 @@ from app.services.model_management_service import (
     add_model_to_provider,
     update_model,
     remove_model_from_provider,
-    # Activation & Visibility
+    # Activation
     set_model_state,
-    set_model_enabled,
-    set_model_visibility,
-    get_visible_chat_models,
     # RBAC
     set_model_allowed_roles,
     set_model_department_restrictions,
@@ -66,11 +63,14 @@ from app.services.model_management_service import (
     # Connection testing
     test_provider_connection,
     fetch_provider_models,
-    TASK_TYPES,
-    VALID_ROLES,
-    ZETDC_DEPARTMENTS,
-    MODEL_STATES,
+    # Database-driven config (loaded dynamically)
+    get_task_types,
+    get_valid_roles,
+    get_departments,
+    get_model_states,
+    validate_task_type,
 )
+from app.services.config_service import update_provider_status, add_health_record as record_health_check, add_sync_log, get_sync_history
 
 router = APIRouter(prefix="/api/models/v2", tags=["model-management"])
 
@@ -124,18 +124,33 @@ async def v2_add_provider(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role(["admin"])),
 ):
-    """Register a new AI provider."""
+    """Register a new AI provider with flexible endpoint configuration."""
     name = (payload.get("name") or "").strip()
     if not name:
         return JSONResponse(status_code=400, content={"error": "name_required"})
+    
+    # Validate base_url if provided
+    base_url = payload.get("base_url", "")
+    if base_url:
+        from app.services.model_management_service import _validate_provider_url
+        is_valid, error_msg = _validate_provider_url(base_url)
+        if not is_valid:
+            return JSONResponse(status_code=400, content={"error": "invalid_base_url", "message": error_msg})
+    
     provider = await add_provider(
         db=db,
         name=name,
         vendor=payload.get("vendor", ""),
-        base_url=payload.get("base_url", ""),
+        base_url=base_url,
         api_key_env=payload.get("api_key_env", ""),
         description=payload.get("description", ""),
         icon=payload.get("icon", "generic"),
+        provider_type=payload.get("provider_type", "openai"),
+        models_endpoint=payload.get("models_endpoint", ""),
+        chat_endpoint=payload.get("chat_endpoint", ""),
+        messages_endpoint=payload.get("messages_endpoint", ""),
+        embeddings_endpoint=payload.get("embeddings_endpoint", ""),
+        health_endpoint=payload.get("health_endpoint", ""),
     )
     return {"provider": provider}
 
@@ -147,9 +162,23 @@ async def v2_update_provider(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role(["admin"])),
 ):
-    """Update a provider's metadata."""
-    allowed = {"name", "vendor", "base_url", "api_key_env", "description", "icon", "status"}
+    """Update a provider's metadata including endpoint configuration."""
+    allowed = {
+        "name", "vendor", "base_url", "api_key_env", "description", "icon", "status",
+        "provider_type", "models_endpoint", "chat_endpoint", "messages_endpoint",
+        "embeddings_endpoint", "health_endpoint"
+    }
     updates = {k: v for k, v in payload.items() if k in allowed}
+    
+    # Validate base_url if being updated
+    if "base_url" in updates:
+        base_url = updates["base_url"]
+        if base_url:
+            from app.services.model_management_service import _validate_provider_url
+            is_valid, error_msg = _validate_provider_url(base_url)
+            if not is_valid:
+                return JSONResponse(status_code=400, content={"error": "invalid_base_url", "message": error_msg})
+    
     result = await update_provider(db, provider_id, updates)
     if not result:
         return JSONResponse(status_code=404, content={"error": "provider_not_found"})
@@ -240,7 +269,6 @@ async def v2_add_model(
         supportsSummary=bool(payload.get("supportsSummary", False)),
         supportsExtraction=bool(payload.get("supportsExtraction", False)),
         enabled=bool(payload.get("enabled", True)),
-        visibleToUsers=bool(payload.get("visibleToUsers", True)),
         state=payload.get("state", "available"),
         pricingTier=payload.get("pricingTier", "free"),
         license=payload.get("license", "Proprietary"),
@@ -294,64 +322,16 @@ async def v2_set_model_state(
 ):
     """Set model activation state."""
     state = (payload.get("state") or "").strip()
-    if state not in MODEL_STATES:
+    model_states = get_model_states()
+    if state not in model_states:
         return JSONResponse(status_code=400, content={
             "error": "invalid_state",
-            "validStates": MODEL_STATES,
+            "validStates": model_states,
         })
     result = await set_model_state(db, provider_id, model_id, state)
     if not result:
         return JSONResponse(status_code=404, content={"error": "model_not_found"})
     return {"model": result}
-
-
-@router.post("/providers/{provider_id}/models/{model_id}/toggle")
-async def v2_toggle_model(
-    provider_id: str = FAPath(...),
-    model_id: str = FAPath(...),
-    payload: dict = Body(...),
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role(["admin"])),
-):
-    """Toggle model enabled/disabled."""
-    enabled = bool(payload.get("enabled", True))
-    result = await set_model_enabled(db, provider_id, model_id, enabled)
-    if not result:
-        return JSONResponse(status_code=404, content={"error": "model_not_found"})
-    return {"model": result, "enabled": enabled}
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Chat Visibility (Layer 6)
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-@router.post("/providers/{provider_id}/models/{model_id}/visibility")
-async def v2_set_visibility(
-    provider_id: str = FAPath(...),
-    model_id: str = FAPath(...),
-    payload: dict = Body(...),
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role(["admin"])),
-):
-    """Toggle whether a model is visible to chat users."""
-    visible = bool(payload.get("visible", True))
-    result = await set_model_visibility(db, provider_id, model_id, visible)
-    if not result:
-        return JSONResponse(status_code=404, content={"error": "model_not_found"})
-    return {"model": result, "visible": visible}
-
-
-@router.get("/chat/models")
-async def v2_visible_chat_models(
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Get models visible to the current user in chat."""
-    role = getattr(user, "role", "general_user") or "general_user"
-    dept = getattr(user, "department", "") or ""
-    models = await get_visible_chat_models(db, user_role=role, user_department=dept)
-    return {"models": models}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -403,7 +383,8 @@ async def v2_get_task_mapping(
 ):
     """Get the task-to-model mapping."""
     mapping = await get_task_mapping(db)
-    return {"taskMapping": mapping, "taskTypes": TASK_TYPES}
+    task_types = get_task_types()
+    return {"taskMapping": mapping, "taskTypes": task_types}
 
 
 @router.put("/task-mapping/{task_type}")
@@ -419,9 +400,10 @@ async def v2_set_task_mapping(
     if not provider_id or not model_id:
         return JSONResponse(status_code=400, content={"error": "providerId_and_modelId_required"})
     if not await set_task_mapping(db, task_type, provider_id, model_id):
+        task_types = get_task_types()
         return JSONResponse(status_code=400, content={
             "error": "invalid_task_type",
-            "validTaskTypes": TASK_TYPES,
+            "validTaskTypes": task_types,
         })
     return {"ok": True}
 
@@ -434,9 +416,10 @@ async def v2_remove_task_mapping(
 ):
     """Remove a task-to-model mapping."""
     if not await remove_task_mapping(db, task_type):
+        task_types = get_task_types()
         return JSONResponse(status_code=400, content={
             "error": "invalid_task_type",
-            "validTaskTypes": TASK_TYPES,
+            "validTaskTypes": task_types,
         })
     return {"ok": True}
 
@@ -568,6 +551,26 @@ async def v2_audit(
     return {"audit": entries, "total": len(entries)}
 
 
+@router.get("/sync-history")
+async def v2_sync_history(
+    provider_id: Optional[str] = Query(None, description="Filter by provider"),
+    limit: int = Query(50, description="Number of sync entries"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role(["admin"])),
+):
+    """Get model synchronization history.
+    
+    Returns a list of synchronization events showing when providers
+    were synced, how many models were added/removed/updated, and
+    the status of each sync operation.
+    """
+    entries = await get_sync_history(db, provider_id=provider_id, limit=limit)
+    return {
+        "syncHistory": [entry.to_dict() for entry in entries],
+        "total": len(entries),
+    }
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Constants/Reference Data
 # ═════════════════════════════════════════════════════════════════════════════
@@ -575,14 +578,19 @@ async def v2_audit(
 
 @router.get("/ref")
 async def v2_reference(
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role(["admin"])),
 ):
     """Get reference data (task types, roles, departments, etc.)."""
+    task_types = get_task_types()
+    valid_roles = get_valid_roles()
+    departments = get_departments()
+    model_states = get_model_states()
     return {
-        "taskTypes": TASK_TYPES,
-        "validRoles": VALID_ROLES,
-        "validDepartments": ZETDC_DEPARTMENTS,
-        "modelStates": MODEL_STATES,
+        "taskTypes": task_types,
+        "validRoles": valid_roles,
+        "validDepartments": departments,
+        "modelStates": model_states,
     }
 
 
@@ -597,7 +605,7 @@ async def v2_test_connection(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role(["admin"])),
 ):
-    """Test connectivity to an AI provider endpoint.
+    """Test connectivity to an AI provider endpoint(s) and update database status.
 
     Accepts direct credentials or a providerId to look up from DB:
     ```json
@@ -608,11 +616,21 @@ async def v2_test_connection(
     }
     ```
     Or: `{"providerId": "ollama"}` to test an existing provider.
+    
+    Tests all configured endpoints (models, chat, messages), updates provider 
+    connection status in database, and records health check history.
     """
+    import datetime
+    
     base_url = body.get("baseUrl") or ""
     api_key = body.get("apiKey") or None
     model = body.get("model") or None
     provider_id = body.get("providerId") or None
+
+    # Endpoint URLs from request or DB
+    models_endpoint = body.get("modelsEndpoint") or None
+    chat_endpoint = body.get("chatEndpoint") or None
+    messages_endpoint = body.get("messagesEndpoint") or None
 
     # Resolve from DB if providerId given
     if provider_id and not base_url:
@@ -620,15 +638,47 @@ async def v2_test_connection(
         if not prov:
             raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
         base_url = prov.get("base_url", "")
+        models_endpoint = prov.get("modelsEndpoint") or models_endpoint
+        chat_endpoint = prov.get("chatEndpoint") or chat_endpoint
+        messages_endpoint = prov.get("messagesEndpoint") or messages_endpoint
         env_var = prov.get("api_key_env", "")
         if env_var:
             api_key = os.environ.get(env_var) or api_key
 
-    return await test_provider_connection(
+    # Perform connection test
+    result = await test_provider_connection(
         base_url=base_url,
         api_key=api_key,
         model=model,
+        models_endpoint=models_endpoint,
+        chat_endpoint=chat_endpoint,
+        messages_endpoint=messages_endpoint,
     )
+    
+    # Update provider status in database if provider_id was provided
+    if provider_id:
+        status = "CONNECTED" if result.get("success") else "DISCONNECTED"
+        await update_provider_status(
+            db=db,
+            provider_id=provider_id,
+            status=status,
+            is_connected=result.get("success", False),
+        )
+        # Record health check
+        await record_health_check(
+            db=db,
+            provider_id=provider_id,
+            model_id=model,
+            latency_ms=result.get("latencyMs"),
+            success=result.get("success", False),
+            error_message=result.get("message", "") if not result.get("success") else "",
+        )
+        # Add sync info to result
+        result["providerId"] = provider_id
+        result["status"] = status
+        result["checkedAt"] = datetime.datetime.utcnow().isoformat()
+    
+    return result
 
 
 @router.post("/fetch-models")
@@ -637,7 +687,7 @@ async def v2_fetch_models(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role(["admin"])),
 ):
-    """Fetch available models from a provider's API.
+    """Fetch available models from a provider's API and synchronize with database.
 
     Accepts direct credentials or a providerId to look up from DB:
     ```json
@@ -647,22 +697,98 @@ async def v2_fetch_models(
     }
     ```
     Or: `{"providerId": "ollama"}` to use an existing provider's config.
+    
+    Uses the configured models_endpoint if available, otherwise falls back to base_url/models.
+    
+    Synchronization:
+    - Provider catalog becomes the source of truth
+    - New models are added to the database
+    - Existing models are updated with new metadata
+    - Removed models are marked as retired
+    - Provider connection status is updated
+    - Sync results are logged
     """
+    import datetime
+    
     base_url = body.get("baseUrl") or ""
     api_key = body.get("apiKey") or None
     provider_id = body.get("providerId") or None
+    models_endpoint = body.get("modelsEndpoint") or None
 
     # Resolve from DB if providerId given
-    if provider_id and not base_url:
+    if provider_id and not base_url and not models_endpoint:
         prov = await get_provider(db, provider_id=provider_id)
         if not prov:
             raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
         base_url = prov.get("base_url", "")
+        models_endpoint = prov.get("modelsEndpoint") or models_endpoint
         env_var = prov.get("api_key_env", "")
         if env_var:
             api_key = os.environ.get(env_var) or api_key
 
-    return await fetch_provider_models(
+    # Perform fetch and sync
+    result = await fetch_provider_models(
         base_url=base_url,
         api_key=api_key,
+        db=db,
+        provider_id=provider_id,
+        models_endpoint=models_endpoint,
     )
+    
+    # Update provider connection status based on fetch success
+    if provider_id:
+        if result.get("success"):
+            await update_provider_status(
+                db=db,
+                provider_id=provider_id,
+                status="CONNECTED",
+                is_connected=True,
+            )
+            # Record successful health check
+            await record_health_check(
+                db=db,
+                provider_id=provider_id,
+                latency_ms=result.get("latencyMs"),
+                success=True,
+            )
+        else:
+            # Don't mark as disconnected on fetch failure - provider may just not support models endpoint
+            pass
+        
+        # Add sync timestamp and provider info
+        result["providerId"] = provider_id
+        result["syncedAt"] = datetime.datetime.utcnow().isoformat()
+        
+        # Record sync log
+        await add_sync_log(
+            db=db,
+            provider_id=provider_id,
+            sync_type="fetch",
+            models_retrieved=result.get("count", 0),
+            models_added=result.get("added", 0),
+            models_removed=result.get("removed", 0),
+            models_updated=result.get("updated", 0),
+            models_unchanged=result.get("unchanged", 0),
+            status="success" if result.get("success") else "failed",
+            error_message=result.get("message", "") if not result.get("success") else "",
+        )
+        
+        # Add user-friendly message
+        total_changes = result.get("added", 0) + result.get("removed", 0) + result.get("updated", 0)
+        if total_changes > 0:
+            result["changesDetected"] = True
+            result["message"] = f"Synchronized {result.get('count', 0)} models: +{result.get('added', 0)} added, -{result.get('removed', 0)} removed, ~{result.get('updated', 0)} updated"
+        else:
+            result["changesDetected"] = False
+            result["message"] = f"No model changes detected. {result.get('unchanged', 0)} models synchronized."
+    
+    return result
+
+
+@router.get("/templates")
+async def v2_provider_templates(
+    user: User = Depends(require_role(["admin"])),
+):
+    """Get available provider templates for quick configuration."""
+    from app.services.model_management_service import list_provider_templates
+    return {"templates": list_provider_templates()}

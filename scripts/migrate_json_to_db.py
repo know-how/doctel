@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-migrate_json_to_db.py — DocTel JSON → MySQL Migration Script
+migrate_json_to_db.py -- DocTel JSON -> MySQL Migration Script
 
 Reads all local JSON configuration files and imports their data into
 the MySQL-backed configuration database using the existing config_service
@@ -39,6 +39,120 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  DDL for config tables (CREATE IF NOT EXISTS to be idempotent)
+# ──────────────────────────────────────────────────────────────────────
+
+DDL_STATEMENTS = [
+    # 1. system_config — key/value store
+    """CREATE TABLE IF NOT EXISTS system_config (
+        `key` VARCHAR(255) NOT NULL PRIMARY KEY,
+        value_json TEXT NOT NULL DEFAULT 'null',
+        description VARCHAR(512) DEFAULT '',
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+
+    # 2. ai_providers — provider registrations
+    """CREATE TABLE IF NOT EXISTS ai_providers (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        provider_id VARCHAR(128) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        vendor VARCHAR(128) DEFAULT '',
+        base_url VARCHAR(512) DEFAULT '',
+        api_key_env VARCHAR(128) DEFAULT '',
+        api_key_value VARCHAR(1024) DEFAULT '',
+        status VARCHAR(50) DEFAULT 'disconnected',
+        is_connected TINYINT(1) DEFAULT 0,
+        last_tested_at DATETIME NULL,
+        description TEXT DEFAULT NULL,
+        icon VARCHAR(64) DEFAULT 'generic',
+        sort_order INT DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_provider_id (provider_id),
+        INDEX idx_provider_id (provider_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+
+    # 3. ai_models — model catalogue per provider
+    """CREATE TABLE IF NOT EXISTS ai_models (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        provider_id INT NOT NULL,
+        model_id VARCHAR(255) NOT NULL,
+        display_name VARCHAR(255) NOT NULL,
+        context_window INT DEFAULT 4096,
+        supports_chat TINYINT(1) DEFAULT 1,
+        supports_vision TINYINT(1) DEFAULT 0,
+        supports_tools TINYINT(1) DEFAULT 0,
+        supports_code TINYINT(1) DEFAULT 0,
+        supports_embedding TINYINT(1) DEFAULT 0,
+        supports_reasoning TINYINT(1) DEFAULT 0,
+        supports_rag TINYINT(1) DEFAULT 0,
+        supports_classification TINYINT(1) DEFAULT 0,
+        supports_summary TINYINT(1) DEFAULT 0,
+        supports_extraction TINYINT(1) DEFAULT 0,
+        supports_audio TINYINT(1) DEFAULT 0,
+        supports_comparison TINYINT(1) DEFAULT 0,
+        enabled TINYINT(1) DEFAULT 1,
+        visible_to_users TINYINT(1) DEFAULT 1,
+        state VARCHAR(50) DEFAULT 'available',
+        is_default TINYINT(1) DEFAULT 0,
+        pricing_tier VARCHAR(64) DEFAULT 'free',
+        license VARCHAR(128) DEFAULT 'Proprietary',
+        allowed_roles TEXT DEFAULT '[]',
+        department_restrictions TEXT DEFAULT '[]',
+        for_tasks TEXT DEFAULT '[]',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (provider_id) REFERENCES ai_providers(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_provider_model (provider_id, model_id),
+        INDEX idx_provider_id (provider_id),
+        INDEX idx_model_id (model_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+
+    # 4. task_mappings -- task type -> model assignments
+    """CREATE TABLE IF NOT EXISTS task_mappings (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        task_type VARCHAR(64) NOT NULL,
+        provider_id_ref VARCHAR(128) NOT NULL,
+        model_id VARCHAR(255) NOT NULL,
+        is_active TINYINT(1) DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_task_type (task_type),
+        INDEX idx_task_type (task_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+
+    # 5. health_records — health ping history
+    """CREATE TABLE IF NOT EXISTS health_records (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        provider_id VARCHAR(128) NOT NULL,
+        model_id VARCHAR(255) NULL,
+        latency_ms FLOAT NULL,
+        success TINYINT(1) DEFAULT 1,
+        tokens_used INT DEFAULT 0,
+        error_message TEXT DEFAULT '',
+        checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_health_provider (provider_id),
+        INDEX idx_health_provider_model (provider_id, model_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+
+    # 6. audit_logs — governance audit trail
+    """CREATE TABLE IF NOT EXISTS audit_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        action VARCHAR(255) NOT NULL,
+        entity_type VARCHAR(128) NOT NULL,
+        entity_id VARCHAR(255) NULL,
+        details_json TEXT DEFAULT NULL,
+        user_id VARCHAR(128) DEFAULT '',
+        user_name VARCHAR(255) DEFAULT '',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_audit_entity (entity_type, entity_id),
+        INDEX idx_audit_action (action),
+        INDEX idx_audit_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+]
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Paths to source files
 # ──────────────────────────────────────────────────────────────────────
 DATA_DIR = PROJECT_ROOT / "localai" / "data"
@@ -60,13 +174,13 @@ PATHS = {
 def _load_json(path: Path) -> Any:
     """Load and return JSON content."""
     if not path.exists():
-        print(f"  ⚠  File not found: {path}")
+        print(f"  [WARN] File not found: {path}")
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        print(f"  ⚠  Error reading {path}: {e}")
+        print(f"  [WARN] Error reading {path}: {e}")
         return None
 
 
@@ -186,7 +300,7 @@ class Migration:
     async def _migrate_system_config(self, db: AsyncSession):
         """Migrate key settings from config.yaml into system_config table."""
         if not CONFIG_YAML.exists():
-            print("  ℹ  config.yaml not found, skipping SystemConfig migration.")
+            print("  [INFO] config.yaml not found, skipping SystemConfig migration.")
             return
 
         import yaml
@@ -246,7 +360,7 @@ class Migration:
                     inserts += 1
 
         self.counts["system_config"] += inserts
-        print(f"  ✓  SystemConfig: {inserts} keys inserted")
+        print(f"  [OK] SystemConfig: {inserts} keys inserted")
 
     # ── Providers & Models from model_management.json ────────────────
 
@@ -257,7 +371,7 @@ class Migration:
             return
 
         providers = data.get("providers", [])
-        print(f"  ℹ  Found {len(providers)} providers in model_management.json")
+        print(f"  [INFO] Found {len(providers)} providers in model_management.json")
 
         for prov in providers:
             pid = prov.get("id", "").strip()
@@ -293,7 +407,7 @@ class Migration:
 
         # Migrate task mappings
         tm = data.get("taskMapping", {})
-        print(f"  ℹ  Found {len(tm)} task mappings in model_management.json")
+        print(f"  [INFO] Found {len(tm)} task mappings in model_management.json")
         for task_type, mapping in tm.items():
             if await self._task_mapping_exists(db, task_type):
                 self.counts["skipped_task_mappings"] += 1
@@ -339,7 +453,7 @@ class Migration:
             # Fetch the PK
             return await self._provider_pk(db, pid)
         except Exception as e:
-            print(f"  ⚠  Failed to insert provider '{pid}': {e}")
+            print(f"  [WARN] Failed to insert provider '{pid}': {e}")
             return None
 
     async def _insert_model(self, provider_id_str: str, m: dict, db: AsyncSession):
@@ -411,10 +525,10 @@ class Migration:
             return
 
         if not isinstance(data, list):
-            print(f"  ⚠  providers.json is not a list (got {type(data).__name__})")
+            print(f"  [WARN] providers.json is not a list (got {type(data).__name__})")
             return
 
-        print(f"  ℹ  Found {len(data)} providers in providers.json")
+        print(f"  [INFO] Found {len(data)} providers in providers.json")
 
         for prov in data:
             pid_raw = prov.get("name", "").strip()
@@ -451,7 +565,7 @@ class Migration:
                     provider_pk = await self._provider_pk(db, pid)
                     self.counts["providers"] += 1
                 except Exception as e:
-                    print(f"  ⚠  Failed to insert provider '{pid}': {e}")
+                    print(f"  [WARN] Failed to insert provider '{pid}': {e}")
                     continue
 
             if not provider_pk:
@@ -523,10 +637,10 @@ class Migration:
             return
 
         if not isinstance(data, list):
-            print(f"  ⚠  model_audit.json is not a list")
+            print(f"  [WARN] model_audit.json is not a list")
             return
 
-        print(f"  ℹ  Found {len(data)} audit entries in model_audit.json")
+        print(f"  [INFO] Found {len(data)} audit entries in model_audit.json")
         inserted = 0
         for entry in data:
             action = entry.get("action", "unknown")
@@ -556,7 +670,7 @@ class Migration:
             inserted += 1
 
         self.counts["audit_entries"] += inserted
-        print(f"  ✓  AuditLog: {inserted} entries inserted")
+        print(f"  [OK] AuditLog: {inserted} entries inserted")
 
     # ── Health records (currently empty, but handle gracefully) ──────
 
@@ -570,10 +684,10 @@ class Migration:
         models = data.get("models", {})
         total = len(providers) + len(models)
         if total == 0:
-            print("  ℹ  model_health.json is empty — no health records to migrate.")
+            print("  [INFO] model_health.json is empty - no health records to migrate.")
             return
 
-        print(f"  ℹ  Found {total} health entries in model_health.json")
+        print(f"  [INFO] Found {total} health entries in model_health.json")
         inserted = 0
 
         # providers keyed by provider_id → {success, latencyMs, errorMessage, ...}
@@ -615,16 +729,23 @@ class Migration:
             inserted += 1
 
         self.counts["health_records"] += inserted
-        print(f"  ✓  HealthRecords: {inserted} records inserted")
+        print(f"  [OK] HealthRecords: {inserted} records inserted")
 
     # ── Main entry point ─────────────────────────────────────────────
 
     async def run(self):
         print(f"\n{'='*60}")
-        print(f"  DocTel JSON → MySQL Migration")
-        print(f"  DB URL: {self.db_url.replace(':', '…', 1)}")
+        print(f"  DocTel JSON -> MySQL Migration")
+        print(f"  DB URL: {self.db_url.replace(':', '***', 1)}")
         print(f"  Dry run: {self.dry_run}")
         print(f"{'='*60}\n")
+
+        # Create tables if they don't exist (idempotent)
+        print("  Creating tables if not present...")
+        async with self.engine.begin() as conn:
+            for ddl in DDL_STATEMENTS:
+                await conn.execute(sa_text(ddl))
+        print("  [OK] Tables ready.\n")
 
         async with self.Session() as db:
             async with db.begin():
@@ -636,7 +757,7 @@ class Migration:
                     await self._migrate_health_records(db)
                 except Exception:
                     traceback.print_exc()
-                    print("\n❌ Migration failed — rolling back.")
+                    print("\n[ERROR] Migration failed - rolling back.")
                     raise
 
         print(f"\n{'='*60}")
@@ -655,7 +776,7 @@ class Migration:
         print(f"{'='*60}\n")
 
         if self.dry_run:
-            print("  ⚠  DRY RUN — no changes were committed.\n")
+            print("  [WARN] DRY RUN - no changes were committed.\n")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -664,7 +785,7 @@ class Migration:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="DocTel JSON → MySQL configuration migration"
+        description="DocTel JSON -> MySQL configuration migration"
     )
     parser.add_argument(
         "--dry-run",

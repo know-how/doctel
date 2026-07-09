@@ -39,7 +39,6 @@ import {
   V2ModelListResponse,
   V2ModelResponse,
   V2TaskMappingResponse,
-  V2VisibleChatModelsResponse,
   V2HealthResponse,
   V2AuditResponse,
   V2RoutingStatusResponse,
@@ -53,7 +52,14 @@ import {
 
 function getApiBaseUrl(): string {
   const raw = (import.meta as any).env.VITE_API_BASE_URL
-  if (typeof raw === "string" && raw.trim()) return raw.trim().replace(/\/+$/, "")
+  if (typeof raw === "string" && raw.trim()) {
+    // In development, use relative URLs to go through Vite proxy
+    // This avoids CORS issues when frontend and backend are on different ports
+    if (import.meta.env.DEV) {
+      return ""
+    }
+    return raw.trim().replace(/\/+$/, "")
+  }
   return ""
 }
 
@@ -1524,24 +1530,6 @@ export async function v2SetModelState(providerId: string, modelId: string, state
   return handleResponse<V2ModelResponse>(res)
 }
 
-export async function v2ToggleModel(providerId: string, modelId: string, enabled: boolean): Promise<V2ModelResponse & { enabled: boolean }> {
-  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/toggle`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
-    body: JSON.stringify({ enabled }),
-  })
-  return handleResponse<V2ModelResponse & { enabled: boolean }>(res)
-}
-
-export async function v2SetVisibility(providerId: string, modelId: string, visible: boolean): Promise<V2ModelResponse & { visible: boolean }> {
-  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/visibility`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
-    body: JSON.stringify({ visible }),
-  })
-  return handleResponse<V2ModelResponse & { visible: boolean }>(res)
-}
-
 export async function v2SetModelRoles(providerId: string, modelId: string, roles: string[]): Promise<V2ModelResponse> {
   const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/roles`, {
     method: "POST",
@@ -1618,11 +1606,6 @@ export async function v2GetReference(): Promise<V2ReferenceResponse> {
   return handleResponse<V2ReferenceResponse>(res)
 }
 
-export async function v2GetVisibleChatModels(): Promise<V2VisibleChatModelsResponse> {
-  const res = await fetch(`${BASE_URL}/api/models/v2/chat/models`, { headers: buildAuthHeaders() })
-  return handleResponse<V2VisibleChatModelsResponse>(res)
-}
-
 export async function v2SelectModelForTask(taskType: string): Promise<V2RoutingSelectResponse> {
   const res = await fetch(`${BASE_URL}/api/models/v2/routing/select/${encodeURIComponent(taskType)}`, {
     headers: buildAuthHeaders(),
@@ -1646,5 +1629,102 @@ export async function v2FetchModels(payload: V2FetchModelsRequest): Promise<V2Fe
     body: JSON.stringify(payload),
   })
   return handleResponse<V2FetchModelsResponse>(res)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Prompt Suggestions API
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export interface PromptSuggestion {
+  id: number
+  title: string
+  prompt_text: string
+  category: string
+  icon: string
+  requires_capability?: string
+  display_order: number
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export async function getRandomPromptSuggestions(
+  count: number = 6,
+  category?: string
+): Promise<{ suggestions: PromptSuggestion[]; count: number }> {
+  const params = new URLSearchParams({ count: String(count) })
+  if (category) params.set("category", category)
+  const res = await fetch(`${BASE_URL}/api/prompt-suggestions/random?${params}`, {
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<{ suggestions: PromptSuggestion[]; count: number }>(res)
+}
+
+export async function getPromptCategories(): Promise<{ categories: string[] }> {
+  const res = await fetch(`${BASE_URL}/api/prompt-suggestions/categories`, {
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<{ categories: string[] }>(res)
+}
+
+export async function listPromptSuggestions(
+  skip: number = 0,
+  limit: number = 100,
+  category?: string,
+  is_enabled?: boolean,
+  search?: string
+): Promise<{ items: PromptSuggestion[]; total: number; skip: number; limit: number }> {
+  const params = new URLSearchParams({ skip: String(skip), limit: String(limit) })
+  if (category) params.set("category", category)
+  if (is_enabled !== undefined) params.set("is_enabled", String(is_enabled))
+  if (search) params.set("search", search)
+  const res = await fetch(`${BASE_URL}/api/prompt-suggestions?${params}`, {
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<{ items: PromptSuggestion[]; total: number; skip: number; limit: number }>(res)
+}
+
+export async function createPromptSuggestion(payload: {
+  title: string
+  prompt_text: string
+  category: string
+  icon?: string
+  requires_capability?: string
+  display_order?: number
+}): Promise<{ suggestion: PromptSuggestion; message: string }> {
+  const res = await fetch(`${BASE_URL}/api/prompt-suggestions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<{ suggestion: PromptSuggestion; message: string }>(res)
+}
+
+export async function updatePromptSuggestion(
+  id: number,
+  payload: Partial<Omit<PromptSuggestion, "id" | "created_at" | "updated_at">>
+): Promise<{ suggestion: PromptSuggestion; message: string }> {
+  const res = await fetch(`${BASE_URL}/api/prompt-suggestions/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<{ suggestion: PromptSuggestion; message: string }>(res)
+}
+
+export async function deletePromptSuggestion(id: number): Promise<{ message: string }> {
+  const res = await fetch(`${BASE_URL}/api/prompt-suggestions/${id}`, {
+    method: "DELETE",
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<{ message: string }>(res)
+}
+
+export async function togglePromptSuggestion(id: number): Promise<PromptSuggestion> {
+  const res = await fetch(`${BASE_URL}/api/prompt-suggestions/${id}/toggle`, {
+    method: "POST",
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<PromptSuggestion>(res)
 }
 

@@ -6,7 +6,13 @@
 
 function getApiBaseUrl(): string {
   const raw = (import.meta as any).env.VITE_API_BASE_URL
-  if (typeof raw === "string" && raw.trim()) return raw.trim().replace(/\/+$/, "")
+  if (typeof raw === "string" && raw.trim()) {
+    // In development, use relative URLs to go through Vite proxy
+    if (import.meta.env.DEV) {
+      return ""
+    }
+    return raw.trim().replace(/\/+$/, "")
+  }
   return ""
 }
 

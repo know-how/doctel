@@ -20,8 +20,10 @@ import { OutputsReportsPage } from "../../pages/OutputsReportsPage"
 import { AdminModelsPage } from "../../pages/AdminModelsPage"
 import { AdminModelManagementPage } from "../../pages/AdminModelManagementPage"
 import { AdminProvidersPage } from "../../pages/AdminProvidersPage"
+import { AdminAppConfigPage } from "../../pages/AdminAppConfigPage"
 import { AdminModelMarketplacePage } from "../../pages/AdminModelMarketplacePage"
 import { AdminPromptsPage } from "../../pages/AdminPromptsPage"
+import { AdminPromptSuggestionsPage } from "../../pages/AdminPromptSuggestionsPage"
 import { AdminContextTokensPage } from "../../pages/AdminContextTokensPage"
 import { AdminIntegrationsPage } from "../../pages/AdminIntegrationsPage"
 import { SystemStatusPage } from "../../pages/SystemStatusPage"
@@ -62,7 +64,13 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
   const { theme: themeName } = useTheme()
   const t = getTokens(themeName)
 
-  const [currentPath, setCurrentPath] = useState("/chat")
+  const [currentPath, setCurrentPath] = useState(() => {
+    // Read initial path from URL on mount
+    if (typeof window !== "undefined") {
+      return window.location.pathname || "/chat"
+    }
+    return "/chat"
+  })
   const [documentId, setDocumentId] = useState<string | null>(null)
   const [workspaceProjectId, setWorkspaceProjectId] = useState<string | null>(null)
   const [introVisible, setIntroVisible] = useState(false)
@@ -156,6 +164,8 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
         return <OutputsExportsPage />
       case "/outputs/reports":
         return <OutputsReportsPage />
+      case "/admin/app-config":
+        return <AdminAppConfigPage />
       case "/admin/models":
         return <AdminModelManagementPage />
       case "/admin/providers":
@@ -164,6 +174,8 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
         return <AdminModelMarketplacePage />
       case "/admin/prompts":
         return <AdminPromptsPage />
+      case "/admin/prompt-suggestions":
+        return <AdminPromptSuggestionsPage />
       case "/admin/context":
         return <AdminContextTokensPage />
       case "/admin/integrations":

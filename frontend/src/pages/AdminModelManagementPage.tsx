@@ -1,9 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import {
   v2GetCatalog,
-  v2ToggleModel,
   v2SetModelState,
-  v2SetVisibility,
   v2SetModelRoles,
   v2SetModelDepartments,
   v2UpdateModel,
@@ -20,6 +18,7 @@ import {
 import { useTheme } from "../context/ThemeContext"
 import { useModel } from "../context/ModelContext"
 import { getTokens } from "../theme/themeTokens"
+import { ModelSelector } from "../components/ModelSelector"
 import type {
   V2CatalogResponse,
   V2Provider,
@@ -218,29 +217,9 @@ export const AdminModelManagementPage: React.FC = () => {
 
   // ── Handlers ──────────────────────────────
 
-  const handleToggleModel = async (providerId: string, modelId: string, enabled: boolean) => {
-    try {
-      await v2ToggleModel(providerId, modelId, enabled)
-      await loadData()
-      broadcastModelChange()
-    } catch (e: any) {
-      setError(e.message)
-    }
-  }
-
   const handleSetState = async (providerId: string, modelId: string, state: string) => {
     try {
       await v2SetModelState(providerId, modelId, state)
-      loadData()
-      broadcastModelChange()
-    } catch (e: any) {
-      setError(e.message)
-    }
-  }
-
-  const handleSetVisibility = async (providerId: string, modelId: string, visible: boolean) => {
-    try {
-      await v2SetVisibility(providerId, modelId, visible)
       loadData()
       broadcastModelChange()
     } catch (e: any) {
@@ -328,6 +307,12 @@ export const AdminModelManagementPage: React.FC = () => {
     try {
       const result = await v2FetchModels({ providerId, baseUrl })
       setFetchResults((prev) => ({ ...prev, [providerId]: result }))
+      
+      // Refresh catalog data if synchronization was successful
+      if (result.success) {
+        await loadData()
+        broadcastModelChange()
+      }
     } catch (e: any) {
       setFetchResults((prev) => ({
         ...prev,
@@ -336,7 +321,7 @@ export const AdminModelManagementPage: React.FC = () => {
     } finally {
       setFetchingProvider(null)
     }
-  }, [])
+  }, [loadData])
 
   // ── Render: Model Catalog (Layers 1-8) ────
 
@@ -357,7 +342,6 @@ export const AdminModelManagementPage: React.FC = () => {
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {providers.map((provider) => {
           const isExpanded = expandedProviders.has(provider.id)
-          const enabledCount = provider.models.filter((m) => m.enabled).length
           return (
             <div key={provider.id} style={{
               borderRadius: 12,
@@ -399,7 +383,7 @@ export const AdminModelManagementPage: React.FC = () => {
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 2 }}>
                     <span style={{ fontSize: 11, color: c.textSecondary }}>
-                      {provider.models.length} models · {enabledCount} enabled
+                      {provider.models.length} models
                     </span>
                     {provider.description && (
                       <span style={{ fontSize: 11, color: c.textMuted }}>{provider.description}</span>
@@ -487,11 +471,23 @@ export const AdminModelManagementPage: React.FC = () => {
                       </span>
                     )}
 
-                    {/* Fetch result count */}
+                    {/* Fetch result count and sync summary */}
                     {fetchResults[provider.id]?.success && fetchResults[provider.id].count !== undefined && (
-                      <span style={{ fontSize: 11, color: c.textSecondary, fontWeight: 600 }}>📦
-                        {" "}{fetchResults[provider.id].count} models available
-                      </span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontSize: 11, color: c.textSecondary, fontWeight: 600 }}>📦
+                          {" "}{fetchResults[provider.id].count} models retrieved from provider
+                        </span>
+                        {(fetchResults[provider.id].added !== undefined ||
+                          fetchResults[provider.id].updated !== undefined ||
+                          fetchResults[provider.id].removed !== undefined) && (
+                          <span style={{ fontSize: 10, color: c.textMuted }}>
+                            Sync: +{fetchResults[provider.id].added || 0} added, {" "}
+                            ↻{fetchResults[provider.id].updated || 0} updated, {" "}
+                            −{fetchResults[provider.id].removed || 0} removed, {" "}
+                            ✓{fetchResults[provider.id].unchanged || 0} unchanged
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
 
@@ -543,34 +539,6 @@ export const AdminModelManagementPage: React.FC = () => {
                           gap: 10,
                           padding: "10px 12px",
                         }}>
-                          {/* Toggle */}
-                          <button
-                            onClick={() => handleToggleModel(provider.id, model.id, !model.enabled)}
-                            style={{
-                              width: 36,
-                              height: 20,
-                              borderRadius: 10,
-                              border: "none",
-                              backgroundColor: model.enabled ? "#22C55E" : c.border,
-                              cursor: "pointer",
-                              position: "relative",
-                              transition: "background 0.2s",
-                              flexShrink: 0,
-                            }}
-                          >
-                            <span style={{
-                              position: "absolute",
-                              top: 2,
-                              left: model.enabled ? 18 : 2,
-                              width: 16,
-                              height: 16,
-                              borderRadius: "50%",
-                              backgroundColor: "#FFF",
-                              transition: "left 0.2s",
-                              boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-                            }} />
-                          </button>
-
                           {/* Model info */}
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -595,25 +563,6 @@ export const AdminModelManagementPage: React.FC = () => {
                           <div style={{ display: "none", gap: 3, flexShrink: 0 }}>
                             <CapabilityBadges model={model} />
                           </div>
-
-                          {/* Visibility toggle */}
-                          <label style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 4,
-                            fontSize: 10,
-                            color: model.visibleToUsers ? c.primary : c.textMuted,
-                            cursor: "pointer",
-                            flexShrink: 0,
-                          }}>
-                            <input
-                              type="checkbox"
-                              checked={model.visibleToUsers}
-                              onChange={(e) => handleSetVisibility(provider.id, model.id, e.target.checked)}
-                              style={{ accentColor: c.primary }}
-                            />
-                            Visible
-                          </label>
 
                           {/* Actions */}
                           <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
@@ -736,6 +685,8 @@ export const AdminModelManagementPage: React.FC = () => {
           <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: c.text }}>Task-to-Model Mapping</h3>
           <p style={{ margin: "4px 0 0", fontSize: 12, color: c.textSecondary }}>
             Assign specific models to each AI task type. Leave unassigned for automatic routing.
+            <br />
+            <strong style={{ color: c.primary }}>Only ACTIVE models are available for task mapping.</strong>
           </p>
         </div>
 
@@ -761,38 +712,22 @@ export const AdminModelManagementPage: React.FC = () => {
                 }}>
                   {taskType.replace(/_/g, " ")}
                 </span>
-                <select
-                  value={current.modelId ? `${current.providerId}::${current.modelId}` : ""}
-                  onChange={(e) => {
-                    const val = e.target.value
-                    if (!val) {
-                      handleSetTaskMapping(taskType, "", "")
-                    } else {
-                      const [pid, mid] = val.split("::")
-                      handleSetTaskMapping(taskType, pid, mid)
-                    }
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: "6px 10px",
-                    borderRadius: 8,
-                    border: `1px solid ${c.border}`,
-                    backgroundColor: c.inputBg,
-                    color: c.text,
-                    fontSize: 12,
-                  }}
-                >
-                  <option value="">— Auto (recommended) —</option>
-                  {providers.map((p) =>
-                    p.models
-                      .filter((m) => m.enabled)
-                      .map((m) => (
-                        <option key={`${p.id}::${m.id}`} value={`${p.id}::${m.id}`}>
-                          {p.name} → {m.name || m.id}
-                        </option>
-                      ))
-                  )}
-                </select>
+                <div style={{ flex: 1 }}>
+                  <ModelSelector
+                    providers={providers}
+                    value={current.modelId || ""}
+                    onChange={(modelId, model, provider) => {
+                      if (!modelId) {
+                        handleSetTaskMapping(taskType, "", "")
+                      } else {
+                        handleSetTaskMapping(taskType, provider?.id || "", modelId)
+                      }
+                    }}
+                    placeholder="— Auto (recommended) —"
+                    selectableOnly={true}
+                    includeLocalModels={true}
+                  />
+                </div>
                 {current.modelName && (
                   <span style={{ fontSize: 11, color: c.textSecondary }}>
                     {current.providerName} · {current.modelName}

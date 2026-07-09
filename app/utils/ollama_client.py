@@ -2,6 +2,7 @@ import httpx
 import json
 import logging
 import asyncio
+import os
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -18,9 +19,24 @@ def _format_size(size_bytes: int) -> str:
         i += 1
     return f"{size:.1f} {units[i]}"
 
+
+def _get_base_url() -> str:
+    """Get Ollama base URL from env, then file settings, then default."""
+    val = os.getenv("DOCINTEL_OLLAMA_BASE_URL", "").strip()
+    if val:
+        return val
+    return settings.ollama_base_url
+
+
 class OllamaClient:
-    def __init__(self):
-        self.base_url = settings.ollama_base_url.rstrip("/")
+    def __init__(self, base_url: str = None):
+        """
+        Initialize Ollama client.
+        
+        Args:
+            base_url: Optional custom base URL. If not provided, uses settings.
+        """
+        self.base_url = (base_url or _get_base_url()).rstrip("/")
         self._retry_delays = (0.0, 0.5, 1.0, 2.0, 4.0)
 
     def _timeout(self, read_seconds: float) -> httpx.Timeout:

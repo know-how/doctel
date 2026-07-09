@@ -20,6 +20,7 @@ from app.routers.deps import (
     UploadFile,
     User,
     DbSession,
+    AsyncSession,
     get_db,
     get_current_user,
     settings,
@@ -40,11 +41,20 @@ router = APIRouter(tags=["charts"])
 # ── Flowchart suggest ────────────────────────────────────────────────────────
 
 
-async def _flowchart_suggest(text: str, model: str = "") -> dict:
+async def _flowchart_suggest(text: str, model: str = "", db: AsyncSession = None) -> dict:
     """Core implementation for flowchart suggestion."""
     if not text:
         return JSONResponse(status_code=400, content={"error": "missing_text"})
-    mdl = (model or settings.default_model or settings.text_model).strip()
+    
+    # Use centralized model resolver
+    from app.services.model_resolver_service import resolve_model
+    if db:
+        resolved = await resolve_model(db, requested_model=model, task_type="chat")
+        mdl = resolved["model_id"]
+    else:
+        # Fallback for backward compatibility
+        mdl = (model or settings.default_model or settings.text_model).strip()
+    
     if not _is_generation_model(mdl):
         return JSONResponse(status_code=400, content={"error": "invalid_generation_model", "model": mdl})
     prompt = (
@@ -60,10 +70,12 @@ async def _flowchart_suggest(text: str, model: str = "") -> dict:
 async def api_flowchart_suggest(
     payload: dict = Body(...),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     return await _flowchart_suggest(
         text=(payload.get("text") or "").strip(),
         model=(payload.get("model") or "").strip(),
+        db=db,
     )
 
 
@@ -71,22 +83,38 @@ async def api_flowchart_suggest(
 async def api_flowcharts_suggest(
     payload: dict = Body(...),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     return await _flowchart_suggest(
         text=(payload.get("text") or "").strip(),
         model=(payload.get("model") or "").strip(),
+        db=db,
     )
 
 
 # ── Flowchart generate ───────────────────────────────────────────────────────
 
 
-async def _flowchart_generate(text: str, diagram_type: str = "flowchart", model: str = "") -> dict:
+async def _flowchart_generate(
+    text: str, 
+    diagram_type: str = "flowchart", 
+    model: str = "",
+    db: AsyncSession = None
+) -> dict:
     """Core implementation for flowchart generation."""
     if not text:
         return JSONResponse(status_code=400, content={"error": "missing_text"})
     dt = (diagram_type or "flowchart").strip().lower()
-    mdl = (model or settings.default_model or settings.text_model).strip()
+    
+    # Use centralized model resolver
+    from app.services.model_resolver_service import resolve_model
+    if db:
+        resolved = await resolve_model(db, requested_model=model, task_type="chat")
+        mdl = resolved["model_id"]
+    else:
+        # Fallback for backward compatibility
+        mdl = (model or settings.default_model or settings.text_model).strip()
+    
     if not _is_generation_model(mdl):
         return JSONResponse(status_code=400, content={"error": "invalid_generation_model", "model": mdl})
     prompt = (
@@ -102,11 +130,13 @@ async def _flowchart_generate(text: str, diagram_type: str = "flowchart", model:
 async def api_flowchart_generate(
     payload: dict = Body(...),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     return await _flowchart_generate(
         text=(payload.get("text") or "").strip(),
         diagram_type=(payload.get("diagram_type") or "flowchart").strip(),
         model=(payload.get("model") or "").strip(),
+        db=db,
     )
 
 
@@ -114,11 +144,13 @@ async def api_flowchart_generate(
 async def api_flowcharts_generate(
     payload: dict = Body(...),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     return await _flowchart_generate(
         text=(payload.get("text") or "").strip(),
         diagram_type=(payload.get("diagram_type") or "flowchart").strip(),
         model=(payload.get("model") or "").strip(),
+        db=db,
     )
 
 

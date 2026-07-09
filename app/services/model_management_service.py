@@ -37,6 +37,7 @@ from app.db.config_models import (
     HealthRecord,
 )
 from app.services import config_service as cfg
+from app.services.model_availability_service import ModelStatus
 
 logger = logging.getLogger(__name__)
 
@@ -48,415 +49,173 @@ VALID_CAPABILITIES = [
     "extraction", "audio", "comparison",
 ]
 
-VALID_ROLES = [
-    "super_admin", "admin", "manager", "engineer",
-    "power_user", "general_user", "guest",
-]
+# ── Provider Templates ───────────────────────────────────────────────────────
+# Pre-configured provider templates for common AI providers
 
-ZETDC_DEPARTMENTS = [
-    "ict", "generation", "transmission", "distribution",
-    "projects", "operations", "finance", "human_resources",
-    "procurement", "customer_services",
-]
+PROVIDER_TEMPLATES = {
+    "openai": {
+        "name": "OpenAI",
+        "vendor": "OpenAI",
+        "provider_type": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "models_endpoint": "https://api.openai.com/v1/models",
+        "chat_endpoint": "https://api.openai.com/v1/chat/completions",
+        "messages_endpoint": "",
+        "embeddings_endpoint": "https://api.openai.com/v1/embeddings",
+        "health_endpoint": "",
+        "icon": "openai",
+    },
+    "anthropic": {
+        "name": "Anthropic",
+        "vendor": "Anthropic",
+        "provider_type": "anthropic",
+        "base_url": "https://api.anthropic.com/v1",
+        "models_endpoint": "",
+        "chat_endpoint": "",
+        "messages_endpoint": "https://api.anthropic.com/v1/messages",
+        "embeddings_endpoint": "",
+        "health_endpoint": "",
+        "icon": "anthropic",
+    },
+    "opencode_go": {
+        "name": "OpenCode Go",
+        "vendor": "OpenCode",
+        "provider_type": "openai",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "models_endpoint": "https://opencode.ai/zen/go/v1/models",
+        "chat_endpoint": "https://opencode.ai/zen/go/v1/chat/completions",
+        "messages_endpoint": "https://opencode.ai/zen/go/v1/messages",
+        "embeddings_endpoint": "",
+        "health_endpoint": "",
+        "icon": "opencode",
+    },
+    "opencode_zen": {
+        "name": "OpenCode Zen",
+        "vendor": "OpenCode",
+        "provider_type": "openai",
+        "base_url": "https://opencode.ai/zen/v1",
+        "models_endpoint": "https://opencode.ai/zen/v1/models",
+        "chat_endpoint": "https://opencode.ai/zen/v1/chat/completions",
+        "messages_endpoint": "https://opencode.ai/zen/v1/messages",
+        "embeddings_endpoint": "",
+        "health_endpoint": "",
+        "icon": "opencode",
+    },
+    "ollama": {
+        "name": "Ollama",
+        "vendor": "Ollama",
+        "provider_type": "openai",
+        "base_url": "http://localhost:11434/v1",
+        "models_endpoint": "http://localhost:11434/v1/models",
+        "chat_endpoint": "http://localhost:11434/v1/chat/completions",
+        "messages_endpoint": "",
+        "embeddings_endpoint": "http://localhost:11434/v1/embeddings",
+        "health_endpoint": "http://localhost:11434/api/tags",
+        "icon": "ollama",
+    },
+    "gemini": {
+        "name": "Google Gemini",
+        "vendor": "Google",
+        "provider_type": "openai",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "models_endpoint": "",
+        "chat_endpoint": "",
+        "messages_endpoint": "",
+        "embeddings_endpoint": "",
+        "health_endpoint": "",
+        "icon": "gemini",
+    },
+    "deepseek": {
+        "name": "DeepSeek",
+        "vendor": "DeepSeek",
+        "provider_type": "openai",
+        "base_url": "https://api.deepseek.com/v1",
+        "models_endpoint": "https://api.deepseek.com/v1/models",
+        "chat_endpoint": "https://api.deepseek.com/v1/chat/completions",
+        "messages_endpoint": "",
+        "embeddings_endpoint": "",
+        "health_endpoint": "",
+        "icon": "deepseek",
+    },
+}
 
-TASK_TYPES = [
-    "chat", "summary", "extraction", "classification",
-    "comparison", "vision", "embedding", "rag", "code_generation",
-]
 
-MODEL_STATES = [
-    "active", "inactive", "installed", "downloading",
-    "error", "maintenance", "retired",
-]
+def get_provider_template(template_id: str) -> Optional[Dict[str, Any]]:
+    """Get a provider template by ID."""
+    return PROVIDER_TEMPLATES.get(template_id)
+
+
+def list_provider_templates() -> List[Dict[str, Any]]:
+    """List all available provider templates."""
+    return [
+        {"id": k, "name": v["name"], "vendor": v["vendor"], "icon": v["icon"]}
+        for k, v in PROVIDER_TEMPLATES.items()
+    ]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATABASE-DRIVEN CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# The following hardcoded enums have been moved to database lookup tables:
+# - VALID_ROLES        → roles table (use lookup_service.get_valid_roles(db))
+# - ZETDC_DEPARTMENTS  → departments table (use lookup_service.get_zetdc_departments(db))
+# - TASK_TYPES         → task_types table (use lookup_service.get_task_types_list(db))
+# - MODEL_STATES       → model_statuses table (use lookup_service.get_model_states_list(db))
+#
+# HEALTH_STATUSES remains as a system enum (operational states).
+#
+# Import lookup_service for database-driven configuration:
+#   from app.services import lookup_service
+#   roles = await lookup_service.get_valid_roles(db)
+#   is_valid = await lookup_service.validate_role(db, "admin")
+# ═══════════════════════════════════════════════════════════════════════════════
 
 HEALTH_STATUSES = ["healthy", "degraded", "unhealthy", "unknown"]
 
-DEFAULT_PROVIDERS = [
-    {
-        "id": "ollama",
-        "name": "Ollama",
-        "vendor": "Ollama",
-        "base_url": "http://localhost:11434",
-        "api_key_env": "",
-        "status": "connected",
-        "description": "Local open-source model runner",
-        "icon": "ollama",
-        "order": 0,
-    },
-    {
-        "id": "google-gemini",
-        "name": "Google Gemini",
-        "vendor": "Google",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "api_key_env": "GEMINI_API_KEY",
-        "status": "disconnected",
-        "description": "Google's Gemini family of models",
-        "icon": "gemini",
-        "order": 1,
-    },
-    {
-        "id": "opencode-go",
-        "name": "OpenCode Go",
-        "vendor": "OpenCode",
-        "base_url": "https://opencode.ai/go/v1",
-        "api_key_env": "OPENCODE_GO_API_KEY",
-        "status": "disconnected",
-        "description": "OpenCode Go API proxy",
-        "icon": "opencode",
-        "order": 2,
-    },
-    {
-        "id": "deepseek",
-        "name": "DeepSeek",
-        "vendor": "DeepSeek",
-        "base_url": "https://api.deepseek.com/v1",
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "status": "disconnected",
-        "description": "DeepSeek AI models",
-        "icon": "deepseek",
-        "order": 3,
-    },
-    {
-        "id": "openai",
-        "name": "OpenAI",
-        "vendor": "OpenAI",
-        "base_url": "https://api.openai.com/v1",
-        "api_key_env": "OPENAI_API_KEY",
-        "status": "disconnected",
-        "description": "OpenAI GPT models",
-        "icon": "openai",
-        "order": 4,
-    },
-    {
-        "id": "anthropic",
-        "name": "Anthropic",
-        "vendor": "Anthropic",
-        "base_url": "https://api.anthropic.com/v1",
-        "api_key_env": "ANTHROPIC_API_KEY",
-        "status": "disconnected",
-        "description": "Anthropic Claude models",
-        "icon": "anthropic",
-        "order": 5,
-    },
-    {
-        "id": "lm-studio",
-        "name": "LM Studio",
-        "vendor": "LM Studio",
-        "base_url": "http://localhost:1234/v1",
-        "api_key_env": "",
-        "status": "disconnected",
-        "description": "Local model server via LM Studio",
-        "icon": "lmstudio",
-        "order": 6,
-    },
-    {
-        "id": "mistral",
-        "name": "Mistral AI",
-        "vendor": "Mistral",
-        "base_url": "https://api.mistral.ai/v1",
-        "api_key_env": "MISTRAL_API_KEY",
-        "status": "disconnected",
-        "description": "Mistral AI cloud models",
-        "icon": "mistral",
-        "order": 7,
-    },
-    {
-        "id": "huggingface",
-        "name": "HuggingFace",
-        "vendor": "HuggingFace",
-        "base_url": "https://api-inference.huggingface.co",
-        "api_key_env": "HUGGINGFACE_API_KEY",
-        "status": "disconnected",
-        "description": "HuggingFace Inference API",
-        "icon": "huggingface",
-        "order": 8,
-    },
-]
+# Backward compatibility: lazy-loaded database values
+# These will be populated from the database on first use
+_valid_roles_cache: List[str] = []
+_departments_cache: List[str] = []
+_task_types_cache: List[str] = []
+_model_states_cache: List[str] = []
 
-DEFAULT_MODELS_BY_PROVIDER: Dict[str, List[Dict[str, Any]]] = {
-    "ollama": [
-        {
-            "id": "qwen3:4b",
-            "name": "Qwen 3 4B",
-            "contextWindow": 32768,
-            "supportsChat": True,
-            "supportsVision": False,
-            "supportsTools": True,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": True,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": True,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "installed",
-            "pricingTier": "free",
-            "license": "Apache 2.0",
-        },
-        {
-            "id": "qwen3:8b",
-            "name": "Qwen 3 8B",
-            "contextWindow": 32768,
-            "supportsChat": True,
-            "supportsVision": False,
-            "supportsTools": True,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": True,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": True,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "installed",
-            "pricingTier": "free",
-            "license": "Apache 2.0",
-        },
-        {
-            "id": "llama3.2",
-            "name": "Llama 3.2",
-            "contextWindow": 8192,
-            "supportsChat": True,
-            "supportsVision": True,
-            "supportsTools": False,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": True,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": True,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "installed",
-            "pricingTier": "free",
-            "license": "Meta Llama 3.2 Community",
-        },
-        {
-            "id": "nomic-embed-text",
-            "name": "Nomic Embed Text",
-            "contextWindow": 8192,
-            "supportsChat": False,
-            "supportsVision": False,
-            "supportsTools": False,
-            "supportsCode": False,
-            "supportsEmbedding": True,
-            "supportsReasoning": False,
-            "supportsRag": True,
-            "supportsClassification": False,
-            "supportsSummary": False,
-            "supportsExtraction": False,
-            "enabled": True,
-            "visibleToUsers": False,
-            "isDefault": True,
-            "forTasks": ["embedding"],
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "installed",
-            "pricingTier": "free",
-            "license": "Apache 2.0",
-        },
-    ],
-    "google-gemini": [
-        {
-            "id": "gemini-2.5-flash",
-            "name": "Gemini 2.5 Flash",
-            "contextWindow": 1048576,
-            "supportsChat": True,
-            "supportsVision": True,
-            "supportsTools": True,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": False,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": False,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "available",
-            "pricingTier": "pay-as-you-go",
-            "license": "Proprietary",
-        },
-        {
-            "id": "gemini-2.5-pro",
-            "name": "Gemini 2.5 Pro",
-            "contextWindow": 1048576,
-            "supportsChat": True,
-            "supportsVision": True,
-            "supportsTools": True,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": False,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": False,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "available",
-            "pricingTier": "pay-as-you-go",
-            "license": "Proprietary",
-        },
-    ],
-    "opencode-go": [
-        {
-            "id": "deepseek-v4-flash-free",
-            "name": "DeepSeek V4 Flash (Free)",
-            "contextWindow": 128000,
-            "supportsChat": True,
-            "supportsVision": False,
-            "supportsTools": True,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": False,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": False,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "available",
-            "pricingTier": "free",
-            "license": "Proprietary",
-        },
-        {
-            "id": "glm-5",
-            "name": "GLM 5",
-            "contextWindow": 128000,
-            "supportsChat": True,
-            "supportsVision": True,
-            "supportsTools": True,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": False,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": False,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "available",
-            "pricingTier": "free",
-            "license": "Proprietary",
-        },
-        {
-            "id": "kimi-k2.6",
-            "name": "Kimi K2.6",
-            "contextWindow": 128000,
-            "supportsChat": True,
-            "supportsVision": True,
-            "supportsTools": True,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": False,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": False,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "available",
-            "pricingTier": "free",
-            "license": "Proprietary",
-        },
-    ],
-    "deepseek": [
-        {
-            "id": "deepseek-v4-pro",
-            "name": "DeepSeek V4 Pro",
-            "contextWindow": 128000,
-            "supportsChat": True,
-            "supportsVision": True,
-            "supportsTools": True,
-            "supportsCode": True,
-            "supportsEmbedding": False,
-            "supportsReasoning": True,
-            "supportsRag": False,
-            "supportsClassification": True,
-            "supportsSummary": True,
-            "supportsExtraction": True,
-            "enabled": False,
-            "visibleToUsers": True,
-            "isDefault": False,
-            "allowedRoles": [],
-            "departmentRestrictions": [],
-            "state": "available",
-            "pricingTier": "pay-as-you-go",
-            "license": "Proprietary",
-        },
-    ],
-}
 
-AUTOMATIC_ROUTING_RULES = {
-    "code_generation": {
-        "description": "Code queries → best code model",
-        "priority_capabilities": ["code", "reasoning"],
-        "preferred_family": "deepseek",
-    },
-    "summary": {
-        "description": "Document summary → general chat model",
-        "priority_capabilities": ["summary", "reasoning"],
-        "preferred_family": "qwen",
-    },
-    "vision": {
-        "description": "Image analysis → vision-capable model",
-        "priority_capabilities": ["vision", "chat"],
-        "preferred_family": "gemini",
-    },
-    "extraction": {
-        "description": "Entity extraction → reasoning model",
-        "priority_capabilities": ["extraction", "reasoning"],
-        "preferred_family": "deepseek",
-    },
-    "chat": {
-        "description": "General chat → default chat model",
-        "priority_capabilities": ["chat"],
-        "preferred_family": None,
-    },
-    "embedding": {
-        "description": "Embedding → embedding-specialized model",
-        "priority_capabilities": ["embedding"],
-        "preferred_family": "nomic",
-    },
-    "rag": {
-        "description": "RAG queries → chat + reasoning model",
-        "priority_capabilities": ["rag", "chat"],
-        "preferred_family": None,
-    },
-    "classification": {
-        "description": "Classification → general model",
-        "priority_capabilities": ["classification"],
-        "preferred_family": None,
-    },
-}
+async def _load_config_from_db(db: AsyncSession) -> None:
+    """Load configuration from database into memory cache."""
+    global _valid_roles_cache, _departments_cache, _task_types_cache, _model_states_cache
+    from app.services import lookup_service
+    _valid_roles_cache = await lookup_service.get_valid_roles(db)
+    _departments_cache = await lookup_service.get_zetdc_departments(db)
+    _task_types_cache = await lookup_service.get_task_types_list(db)
+    _model_states_cache = await lookup_service.get_model_states_list(db)
+
+
+def get_valid_roles() -> List[str]:
+    """Get valid roles. Loads from cache or returns empty list if not loaded."""
+    return _valid_roles_cache
+
+
+def get_departments() -> List[str]:
+    """Get departments. Loads from cache or returns empty list if not loaded."""
+    return _departments_cache
+
+
+def get_task_types() -> List[str]:
+    """Get task types. Loads from cache or returns empty list if not loaded."""
+    return _task_types_cache
+
+
+def get_model_states() -> List[str]:
+    """Get model states. Loads from cache or returns empty list if not loaded."""
+    return _model_states_cache
+
+
+# Deprecated: Use lookup_service directly for database-driven validation
+async def validate_task_type(db: AsyncSession, task_type: str) -> bool:
+    """Validate if a task type exists in the database."""
+    from app.services import lookup_service
+    return await lookup_service.validate_task_type(db, task_type)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -476,6 +235,12 @@ def _provider_to_dict(provider: AIProvider, include_models: bool = True,
         "description": provider.description,
         "icon": provider.icon,
         "order": provider.sort_order,
+        "providerType": provider.provider_type,
+        "modelsEndpoint": provider.models_endpoint,
+        "chatEndpoint": provider.chat_endpoint,
+        "messagesEndpoint": provider.messages_endpoint,
+        "embeddingsEndpoint": provider.embeddings_endpoint,
+        "healthEndpoint": provider.health_endpoint,
     }
     if include_key:
         d["api_key_value"] = provider.api_key_value
@@ -504,9 +269,8 @@ def _model_to_dict(model: AIModel) -> dict:
         "supportsExtraction": model.supports_extraction,
         "supportsAudio": model.supports_audio,
         "supportsComparison": model.supports_comparison,
-        "enabled": model.enabled,
-        "visibleToUsers": model.visible_to_users,
         "state": model.state,
+        "endpointType": model.endpoint_type,
         "isDefault": model.is_default,
         "pricingTier": model.pricing_tier,
         "license": model.license,
@@ -580,8 +344,14 @@ async def add_provider(
     api_key_env: str = "",
     description: str = "",
     icon: str = "generic",
+    provider_type: str = "openai",
+    models_endpoint: str = "",
+    chat_endpoint: str = "",
+    messages_endpoint: str = "",
+    embeddings_endpoint: str = "",
+    health_endpoint: str = "",
 ) -> Dict[str, Any]:
-    """Register a new AI provider."""
+    """Register a new AI provider with flexible endpoint configuration."""
     provider_id = name.lower().replace(" ", "-").replace("_", "-")
     provider = await cfg.add_provider(
         db=db,
@@ -593,6 +363,12 @@ async def add_provider(
         description=description,
         icon=icon,
         sort_order=0,
+        provider_type=provider_type,
+        models_endpoint=models_endpoint,
+        chat_endpoint=chat_endpoint,
+        messages_endpoint=messages_endpoint,
+        embeddings_endpoint=embeddings_endpoint,
+        health_endpoint=health_endpoint,
     )
     return _provider_to_dict(provider, include_models=True)
 
@@ -658,8 +434,6 @@ async def add_model_to_provider(
     supportsExtraction: bool = False,
     supportsAudio: bool = False,
     supportsComparison: bool = False,
-    enabled: bool = True,
-    visibleToUsers: bool = True,
     state: str = "available",
     pricingTier: str = "free",
     license: str = "Proprietary",
@@ -689,8 +463,6 @@ async def add_model_to_provider(
             display_name=name,
             context_window=contextWindow,
             capabilities=capabilities,
-            enabled=enabled,
-            visible_to_users=visibleToUsers,
             state=state,
             pricing_tier=pricingTier,
             license=license,
@@ -721,7 +493,6 @@ async def update_model(db: AsyncSession, provider_id: str, model_id: str,
         "supportsExtraction": "supports_extraction",
         "supportsAudio": "supports_audio",
         "supportsComparison": "supports_comparison",
-        "visibleToUsers": "visible_to_users",
         "isDefault": "is_default",
         "pricingTier": "pricing_tier",
         "allowedRoles": "allowed_roles",
@@ -757,50 +528,8 @@ async def set_model_state(db: AsyncSession, provider_id: str, model_id: str,
     return _model_to_dict(model)
 
 
-async def set_model_enabled(db: AsyncSession, provider_id: str, model_id: str,
-                             enabled: bool) -> Optional[Dict[str, Any]]:
-    """Set model enabled/disabled."""
-    model = await cfg.update_model(db, provider_id, model_id, {"enabled": enabled})
-    if not model:
-        return None
-    return _model_to_dict(model)
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CHAT VISIBILITY (Layer 6)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-async def set_model_visibility(db: AsyncSession, provider_id: str, model_id: str,
-                                visible: bool) -> Optional[Dict[str, Any]]:
-    """Toggle whether a model is visible to chat users."""
-    model = await cfg.update_model(db, provider_id, model_id,
-                                    {"visible_to_users": visible})
-    if not model:
-        return None
-    return _model_to_dict(model)
-
-
-async def get_visible_chat_models(db: AsyncSession, user_role: str = "general_user",
-                                   user_department: str = "") -> List[Dict[str, Any]]:
-    """Get models visible to chat users, filtered by role and department."""
-    visible = await cfg.get_all_visible_chat_models(db)
-    result = []
-    for m in visible:
-        # Check role restrictions
-        allowed_roles = m.get("allowedRoles", [])
-        if allowed_roles and user_role not in allowed_roles:
-            continue
-        # Check department restrictions
-        dept_restrictions = m.get("departmentRestrictions", [])
-        if dept_restrictions and user_department not in dept_restrictions:
-            continue
-        # Include provider info
-        result.append(m)
-    return result
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  ROLE-BASED ACCESS (Layer 7) & DEPARTMENT RESTRICTIONS (Layer 8)
+#  ROLE-BASED ACCESS (Layer 6) & DEPARTMENT RESTRICTIONS (Layer 7)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def set_model_allowed_roles(db: AsyncSession, provider_id: str, model_id: str,
@@ -837,7 +566,8 @@ async def get_task_mapping(db: AsyncSession) -> Dict[str, Any]:
 async def set_task_mapping(db: AsyncSession, task_type: str, provider_id: str,
                             model_id: str) -> bool:
     """Assign a model to a task type."""
-    if task_type not in TASK_TYPES:
+    from app.services import lookup_service
+    if not await lookup_service.validate_task_type(db, task_type):
         return False
     await cfg.set_task_mapping(db, task_type, provider_id, model_id)
     return True
@@ -845,7 +575,8 @@ async def set_task_mapping(db: AsyncSession, task_type: str, provider_id: str,
 
 async def remove_task_mapping(db: AsyncSession, task_type: str) -> bool:
     """Remove a task-to-model mapping."""
-    if task_type not in TASK_TYPES:
+    from app.services import lookup_service
+    if not await lookup_service.validate_task_type(db, task_type):
         return False
     return await cfg.delete_task_mapping(db, task_type)
 
@@ -872,14 +603,20 @@ async def select_best_model_for_task(
     user_role: str = "general_user",
     user_department: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Select the best model for a given task using routing rules."""
-    # 1. Check explicit task mapping
+    """Select the best model for a given task using routing rules.
+    
+    STATUS-DRIVEN SELECTION:
+    - Only ACTIVE models are eligible for auto routing
+    - INACTIVE, MAINTENANCE, and RETIRED models are excluded
+    """
+    # 1. Check explicit task mapping - only if model is ACTIVE
     mapping = await cfg.get_task_mapping_for(task_type, db)
     if mapping and mapping.get("isActive"):
         provider_id = mapping["providerId"]
         model_id = mapping["modelId"]
         model_obj = await _get_model_orm(provider_id, model_id, db)
-        if model_obj and model_obj.enabled:
+        # Model must be ACTIVE to be used (not just enabled)
+        if model_obj and model_obj.state == ModelStatus.ACTIVE:
             # Check role/dept restrictions
             allowed = json.loads(model_obj.allowed_roles) if model_obj.allowed_roles else []
             dept_restr = json.loads(model_obj.department_restrictions) if model_obj.department_restrictions else []
@@ -895,14 +632,14 @@ async def select_best_model_for_task(
                 }
 
     # 2. Automatic routing: find best model by priority capabilities
-    rules = AUTOMATIC_ROUTING_RULES.get(task_type, {})
+    # Note: routing rules are now managed via DB task_mapping table
+    rules = {}
     priority_caps = rules.get("priority_capabilities", [])
     preferred_family = rules.get("preferred_family")
 
-    # Query for enabled, visible models
+    # Query for ACTIVE models only (status-driven, not just enabled)
     query = select(AIModel).where(
-        AIModel.enabled == True,  # noqa: E712
-        AIModel.visible_to_users == True,  # noqa: E712
+        AIModel.state == ModelStatus.ACTIVE,  # noqa: E712
     )
 
     res = await db.execute(query)
@@ -1063,110 +800,200 @@ def _model_capabilities_list(model_dict: dict) -> List[str]:
 
 async def get_marketplace_catalog(db: AsyncSession) -> List[Dict[str, Any]]:
     """Get available models from the marketplace catalog.
-    
-    The marketplace contains DEFAULT_MODELS_BY_PROVIDER models that are not
-    yet installed in the user's DB.
+
+    Note: Hardcoded marketplace data has been removed.
+    All provider and model data is now managed through the database.
+    Returns an empty list; providers add models directly via the DB.
     """
-    # Get existing model IDs so we can exclude already-installed models
-    existing_providers = await cfg.get_all_providers(db)
-    installed_map: Dict[str, set] = {}
-    for prov in existing_providers:
-        installed_map[prov.provider_id] = set()
-        for m in (prov.models or []):
-            installed_map[prov.provider_id].add(m.model_id)
+    _ = db  # DB session kept for future extensibility
+    return []
 
-    catalog = []
-    for prov_id, models_list in DEFAULT_MODELS_BY_PROVIDER.items():
-        installed_set = installed_map.get(prov_id, set())
-        for m_def in models_list:
-            if m_def["id"] not in installed_set:
-                entry = dict(m_def)
-                entry["providerId"] = prov_id
-                entry["capabilities"] = _model_capabilities_list(m_def)
-                catalog.append(entry)
 
-    return catalog
+def _validate_provider_url(base_url: str) -> tuple[bool, str]:
+    """Validate that a provider URL is properly formatted.
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if not base_url or not base_url.strip():
+        return False, "Provider URL is required"
+    
+    url = base_url.strip()
+    
+    # Check for protocol
+    if not url.startswith(("http://", "https://")):
+        return False, "Provider URL must begin with http:// or https://"
+    
+    # Basic URL format check
+    if "://" not in url:
+        return False, "Invalid URL format"
+    
+    return True, ""
 
 
 async def test_provider_connection(
     base_url: str,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    models_endpoint: Optional[str] = None,
+    chat_endpoint: Optional[str] = None,
+    messages_endpoint: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Test connectivity to an AI provider endpoint.
+    """Test connectivity to an AI provider endpoint(s).
 
-    Makes a lightweight API call to validate the base_url and optional api_key.
-    Returns a dict with success status, latency_ms, and any error message.
+    Makes lightweight API calls to validate the configured endpoints.
+    Tests multiple endpoints if configured (models, chat, messages).
+    Returns a dict with success status, latency_ms, and endpoint test results.
     """
     import time
     import httpx
 
-    start = time.monotonic()
-    url = base_url.rstrip("/")
+    # Use specific endpoints if provided, otherwise fall back to base_url
+    test_urls = []
+    endpoint_results = {}
+    
+    if models_endpoint:
+        test_urls.append(("models", models_endpoint))
+    elif base_url:
+        test_urls.append(("models", f"{base_url.rstrip('/')}/models"))
+    
+    if chat_endpoint:
+        test_urls.append(("chat", chat_endpoint))
+    
+    if messages_endpoint:
+        test_urls.append(("messages", messages_endpoint))
 
-    try:
-        # Try the OpenAI-compatible /v1/models endpoint as a lightweight check
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+    if not test_urls:
+        return {
+            "success": False,
+            "latencyMs": 0,
+            "message": "No endpoints configured to test",
+            "endpoints": {},
+        }
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{url}/models", headers=headers)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
-        elapsed_ms = int((time.monotonic() - start) * 1000)
+    all_success = True
+    total_latency = 0
 
-        if resp.status_code < 500:
-            return {
-                "success": True,
-                "statusCode": resp.status_code,
-                "latencyMs": elapsed_ms,
-                "message": "Connection successful",
-            }
-        else:
-            return {
+    for endpoint_name, url in test_urls:
+        # Validate URL
+        is_valid, error_msg = _validate_provider_url(url)
+        if not is_valid:
+            endpoint_results[endpoint_name] = {
                 "success": False,
-                "statusCode": resp.status_code,
-                "latencyMs": elapsed_ms,
-                "message": f"Server error: {resp.status_code}",
+                "message": error_msg,
             }
+            all_success = False
+            continue
 
-    except httpx.ConnectError:
-        elapsed_ms = int((time.monotonic() - start) * 1000)
-        return {
-            "success": False,
-            "latencyMs": elapsed_ms,
-            "message": f"Connection refused — is the service running at {url}?",
-        }
-    except httpx.TimeoutException:
-        elapsed_ms = int((time.monotonic() - start) * 1000)
-        return {
-            "success": False,
-            "latencyMs": elapsed_ms,
-            "message": f"Connection timed out after 10s",
-        }
-    except Exception as e:
-        elapsed_ms = int((time.monotonic() - start) * 1000)
-        return {
-            "success": False,
-            "latencyMs": elapsed_ms,
-            "message": str(e),
-        }
+        start = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # For chat/messages endpoints, just do a HEAD request or OPTIONS
+                if endpoint_name in ("chat", "messages"):
+                    resp = await client.options(url, headers=headers)
+                else:
+                    resp = await client.get(url, headers=headers)
+
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            total_latency += elapsed_ms
+
+            if resp.status_code < 500:
+                endpoint_results[endpoint_name] = {
+                    "success": True,
+                    "statusCode": resp.status_code,
+                    "latencyMs": elapsed_ms,
+                    "message": "Connected",
+                }
+            else:
+                endpoint_results[endpoint_name] = {
+                    "success": False,
+                    "statusCode": resp.status_code,
+                    "latencyMs": elapsed_ms,
+                    "message": f"Server error: {resp.status_code}",
+                }
+                all_success = False
+
+        except httpx.ConnectError:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            endpoint_results[endpoint_name] = {
+                "success": False,
+                "latencyMs": elapsed_ms,
+                "message": f"Connection refused",
+            }
+            all_success = False
+        except httpx.TimeoutException:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            endpoint_results[endpoint_name] = {
+                "success": False,
+                "latencyMs": elapsed_ms,
+                "message": "Connection timed out",
+            }
+            all_success = False
+        except Exception as e:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            endpoint_results[endpoint_name] = {
+                "success": False,
+                "latencyMs": elapsed_ms,
+                "message": str(e),
+            }
+            all_success = False
+
+    return {
+        "success": all_success,
+        "latencyMs": total_latency // len(test_urls) if test_urls else 0,
+        "message": "All endpoints connected" if all_success else "Some endpoints failed",
+        "endpoints": endpoint_results,
+    }
 
 
 async def fetch_provider_models(
     base_url: str,
     api_key: Optional[str] = None,
+    db: Optional[AsyncSession] = None,
+    provider_id: Optional[str] = None,
+    models_endpoint: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Fetch available models from a provider's API.
+    """Fetch available models from a provider's API and synchronize with database.
 
-    Calls the OpenAI-compatible /v1/models endpoint and returns the model list.
-    Returns a dict with success status and available models or error.
+    Calls the configured models endpoint (or /v1/models fallback), fetches the model list,
+    and synchronizes the results with the database:
+    - New models are added
+    - Existing models are updated
+    - Removed models are marked as retired
+    
+    Args:
+        base_url: Provider base URL (fallback if models_endpoint not provided)
+        api_key: Optional API key
+        db: Database session for synchronization
+        provider_id: Provider ID for database synchronization
+        models_endpoint: Specific models endpoint URL (takes precedence over base_url)
+        
+    Returns:
+        Dict with success status, synchronization results, and any errors.
     """
     import time
     import httpx
 
+    # Use models_endpoint if provided, otherwise construct from base_url
+    url_to_fetch = models_endpoint if models_endpoint else f"{base_url.rstrip('/')}/models"
+    
+    # Validate URL
+    is_valid, error_msg = _validate_provider_url(url_to_fetch)
+    if not is_valid:
+        return {
+            "success": False,
+            "latencyMs": 0,
+            "message": error_msg,
+            "newModels": 0,
+            "updatedModels": 0,
+            "retiredModels": 0,
+        }
+
     start = time.monotonic()
-    url = base_url.rstrip("/")
 
     try:
         headers = {"Content-Type": "application/json"}
@@ -1174,18 +1001,33 @@ async def fetch_provider_models(
             headers["Authorization"] = f"Bearer {api_key}"
 
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{url}/models", headers=headers)
+            resp = await client.get(url_to_fetch, headers=headers)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
         if resp.status_code == 200:
             data = resp.json()
             models = data.get("data", data.get("models", []))
+            
+            # Synchronize with database if provider_id is provided
+            sync_stats = {"new": 0, "updated": 0, "retired": 0}
+            if db and provider_id and models:
+                try:
+                    sync_stats = await _sync_provider_models(db, provider_id, models)
+                except Exception as sync_error:
+                    logger.warning(f"Model sync failed for {provider_id}: {sync_error}")
+            
             return {
                 "success": True,
                 "latencyMs": elapsed_ms,
                 "models": models,
                 "count": len(models),
+                "added": sync_stats.get("added", 0),
+                "updated": sync_stats.get("updated", 0),
+                "removed": sync_stats.get("removed", 0),
+                "unchanged": sync_stats.get("unchanged", 0),
+                "preserved": sync_stats.get("preserved", 0),
+                "providerId": provider_id,
             }
         else:
             return {
@@ -1215,15 +1057,195 @@ async def fetch_provider_models(
             "success": False,
             "latencyMs": elapsed_ms,
             "message": str(e),
+            "newModels": 0,
+            "updatedModels": 0,
+            "retiredModels": 0,
         }
+
+
+async def _sync_provider_models(
+    db: AsyncSession,
+    provider_id: str,
+    fetched_models: List[Dict[str, Any]],
+) -> Dict[str, int]:
+    """Full provider-to-database synchronization.
+    
+    Performs a complete refresh where the provider catalog becomes the source of truth:
+    - Preserves admin settings for existing models
+    - Removes or retires models no longer in provider catalog
+    - Adds new models from provider
+    - Updates metadata for existing models
+    
+    Args:
+        db: Database session
+        provider_id: Provider string ID
+        fetched_models: List of models from provider API
+        
+    Returns:
+        Dict with counts of added, updated, removed, and unchanged models
+    """
+    from app.services import config_service as cfg
+    import json
+    
+    stats = {"added": 0, "updated": 0, "removed": 0, "unchanged": 0, "preserved": 0}
+    
+    # Get existing models from database for this provider
+    existing_models = await cfg.get_models_by_provider_id(provider_id, db)
+    existing_by_id = {m.model_id: m for m in existing_models}
+    
+    # Build lookup of fetched models by ID
+    fetched_by_id = {}
+    for model_data in fetched_models:
+        model_id = model_data.get("id") or model_data.get("modelId") or model_data.get("name", "").lower().replace(" ", "-")
+        if model_id:
+            fetched_by_id[model_id] = model_data
+    
+    fetched_ids = set(fetched_by_id.keys())
+    existing_ids = set(existing_by_id.keys())
+    
+    # Determine what needs to change
+    ids_to_add = fetched_ids - existing_ids          # New models
+    ids_to_update = fetched_ids & existing_ids        # Existing models (check for changes)
+    ids_to_remove = existing_ids - fetched_ids        # Obsolete models
+    
+    # STEP 1: Preserve admin settings before making changes
+    preserved_settings = {}
+    for model_id in ids_to_update:
+        existing = existing_by_id[model_id]
+        preserved_settings[model_id] = {
+            "state": existing.state,
+            "is_default": existing.is_default,
+            "endpoint_type": existing.endpoint_type,
+            "pricing_tier": existing.pricing_tier,
+            "allowed_roles": existing.allowed_roles,
+            "department_restrictions": existing.department_restrictions,
+            "for_tasks": existing.for_tasks,
+        }
+    
+    # STEP 2: Remove obsolete models (mark as retired to preserve history)
+    for model_id in ids_to_remove:
+        existing = existing_by_id[model_id]
+        # Only mark as retired if currently active or available
+        if existing.state in ("active", "available", "installed"):
+            await cfg.update_model(db, provider_id, model_id, {"state": "retired"})
+            stats["removed"] += 1
+            logger.info(f"Model {model_id} retired (no longer in {provider_id} catalog)")
+    
+    # STEP 3: Add new models
+    for model_id in ids_to_add:
+        model_data = fetched_by_id[model_id]
+        
+        # Extract model info
+        model_name = model_data.get("name") or model_data.get("id") or model_id
+        context_window = model_data.get("context_window", 4096)
+        if isinstance(context_window, str):
+            try:
+                context_window = int(context_window)
+            except:
+                context_window = 4096
+        
+        # Determine capabilities from provider data
+        capabilities = model_data.get("capabilities", [])
+        supports_chat = model_data.get("supports_chat", "chat" in capabilities or True)
+        supports_vision = model_data.get("supports_vision", "vision" in capabilities or False)
+        supports_code = model_data.get("supports_code", "code" in capabilities or False)
+        supports_embedding = model_data.get("supports_embedding", "embedding" in capabilities or False)
+        supports_reasoning = model_data.get("supports_reasoning", "reasoning" in capabilities or False)
+        
+        # Determine endpoint type based on provider type
+        endpoint_type = "chat"  # default
+        
+        await cfg.add_model(
+            db=db,
+            provider_id_str=provider_id,
+            model_id=model_id,
+            display_name=model_name,
+            context_window=context_window,
+            capabilities={
+                "chat": supports_chat,
+                "vision": supports_vision,
+                "code": supports_code,
+                "embedding": supports_embedding,
+                "reasoning": supports_reasoning,
+            },
+            state="active",
+            pricing_tier=model_data.get("pricing_tier", "free"),
+        )
+        stats["added"] += 1
+        logger.info(f"Model {model_id} added from {provider_id}")
+    
+    # STEP 4: Update existing models (preserve admin settings)
+    for model_id in ids_to_update:
+        model_data = fetched_by_id[model_id]
+        existing = existing_by_id[model_id]
+        preserved = preserved_settings[model_id]
+        
+        # Extract model info
+        model_name = model_data.get("name") or model_data.get("id") or model_id
+        context_window = model_data.get("context_window", 4096)
+        if isinstance(context_window, str):
+            try:
+                context_window = int(context_window)
+            except:
+                context_window = 4096
+        
+        # Check what needs updating
+        updates = {}
+        
+        # Update metadata if changed
+        if existing.display_name != model_name:
+            updates["display_name"] = model_name
+        if existing.context_window != context_window:
+            updates["context_window"] = context_window
+        
+        # Update capabilities if provider reports different
+        capabilities = model_data.get("capabilities", [])
+        supports_chat = model_data.get("supports_chat", "chat" in capabilities or True)
+        supports_vision = model_data.get("supports_vision", "vision" in capabilities or False)
+        supports_code = model_data.get("supports_code", "code" in capabilities or False)
+        
+        if existing.supports_chat != supports_chat:
+            updates["supports_chat"] = supports_chat
+        if existing.supports_vision != supports_vision:
+            updates["supports_vision"] = supports_vision
+        if existing.supports_code != supports_code:
+            updates["supports_code"] = supports_code
+        
+        # Preserve admin settings - don't overwrite state, is_default, etc.
+        # Admin settings are intentionally NOT in the updates dict
+        
+        if updates:
+            await cfg.update_model(db, provider_id, model_id, updates)
+            stats["updated"] += 1
+            logger.info(f"Model {model_id} updated from {provider_id}")
+        else:
+            stats["unchanged"] += 1
+        
+        # Count preserved settings
+        stats["preserved"] += 1
+    
+    logger.info(
+        f"Provider {provider_id} sync complete: "
+        f"{stats['added']} added, {stats['updated']} updated, "
+        f"{stats['removed']} removed, {stats['unchanged']} unchanged"
+    )
+    
+    return stats
 
 
 async def get_full_catalog(db: AsyncSession) -> Dict[str, Any]:
     """Get full catalog including providers, models, task mapping, and marketplace."""
+    from app.services import lookup_service
+    
     providers = await get_all_providers(db)
     task_mapping = await get_task_mapping(db)
     routing = await is_automatic_routing_enabled(db)
     marketplace = await get_marketplace_catalog(db)
+    
+    # Load database-driven configuration
+    task_types = await lookup_service.get_task_type_codes(db, include_inactive=False)
+    valid_roles = await lookup_service.get_role_codes(db, include_inactive=False)
+    valid_departments = await lookup_service.get_department_codes(db, include_inactive=False)
 
     # Enrich providers with health
     enriched_providers = []
@@ -1235,10 +1257,10 @@ async def get_full_catalog(db: AsyncSession) -> Dict[str, Any]:
         "providers": enriched_providers,
         "taskMapping": task_mapping,
         "automaticRouting": routing,
-        "taskTypes": TASK_TYPES,
-        "validRoles": VALID_ROLES,
-        "validDepartments": ZETDC_DEPARTMENTS,
+        "taskTypes": task_types,
+        "validRoles": valid_roles,
+        "validDepartments": valid_departments,
         "validCapabilities": VALID_CAPABILITIES,
-        "automaticRoutingRules": AUTOMATIC_ROUTING_RULES,
+        "automaticRoutingRules": {},
         "marketplace": marketplace,
     }

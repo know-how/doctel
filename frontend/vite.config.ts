@@ -17,7 +17,6 @@ export default defineConfig(({ mode }) => {
       proxy: {
         "/api": proxyConfig,
         "/auth": proxyConfig,
-        "/admin": proxyConfig,
         "/users": proxyConfig,
         "/documents": proxyConfig,
         "/projects": proxyConfig,

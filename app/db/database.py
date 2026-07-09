@@ -20,9 +20,6 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
 
-# Import config models so they register with Base.metadata
-from app.db import config_models  # noqa: F401
-
 logger = logging.getLogger(__name__)
 
 # ── Detect database type ────────────────────────────────────────────────────
@@ -53,11 +50,14 @@ def _build_engine() -> AsyncEngine:
 
 engine = _build_engine()
 
+Base = declarative_base()
+
+# Import config models so they register with Base.metadata
+from app.db import config_models  # noqa: F401
+
 AsyncSessionLocal = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )
-
-Base = declarative_base()
 
 
 # Encryption-at-rest is not supported with MySQL

@@ -57,10 +57,12 @@ export const sidebarConfig: NavItem[] = [
     path: "/admin",
     roles: ["admin"],
     children: [
+      { id: "admin-app-config", label: "App Config", icon: "⚙️", path: "/admin/app-config" },
       { id: "admin-models", label: "Models", icon: "🤖", path: "/admin/models" },
       { id: "admin-providers", label: "Providers", icon: "🏢", path: "/admin/providers" },
       { id: "admin-marketplace", label: "Model Marketplace", icon: "🛒", path: "/admin/marketplace" },
       { id: "admin-prompts", label: "Prompts", icon: "💬", path: "/admin/prompts" },
+      { id: "admin-prompt-suggestions", label: "New Chat Prompts", icon: "✨", path: "/admin/prompt-suggestions" },
       { id: "admin-context", label: "Context & Tokens", icon: "🔢", path: "/admin/context" },
       { id: "admin-integrations", label: "Integrations", icon: "🔌", path: "/admin/integrations" },
       { id: "admin-system", label: "System Status", icon: "📊", path: "/admin/system" },

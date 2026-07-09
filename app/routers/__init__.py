@@ -27,6 +27,7 @@ def include_routers(app) -> None:
     from .audio import router as audio_router
     from .charts import router as charts_router
     from .admin import router as admin_router
+    from .admin_config import router as admin_config_router
     from .training import router as training_router
     from .sync import router as sync_router
     from .team import router as team_router
@@ -35,6 +36,8 @@ def include_routers(app) -> None:
     from .compat import router as compat_router
     from .model_management import router as model_mgmt_router
     from .system_diagnostics import router as system_diag_router
+    from .config_lookup import router as config_lookup_router
+    from .prompt_suggestions import router as prompt_suggestions_router
 
     app.include_router(health_router)
     app.include_router(auth_router)
@@ -49,6 +52,7 @@ def include_routers(app) -> None:
     app.include_router(audio_router)
     app.include_router(charts_router)
     app.include_router(admin_router)
+    app.include_router(admin_config_router)
     app.include_router(training_router)
     app.include_router(sync_router)
     app.include_router(team_router)
@@ -57,6 +61,8 @@ def include_routers(app) -> None:
     app.include_router(compat_router)
     app.include_router(model_mgmt_router)
     app.include_router(system_diag_router)
+    app.include_router(config_lookup_router)
+    app.include_router(prompt_suggestions_router)
 
 
 __all__ = [

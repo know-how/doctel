@@ -10,6 +10,7 @@ Tables:
   - AIModel             Model catalogue per provider
   - TaskMapping         Task-type → model assignments
   - HealthRecord        Health ping history per provider/model
+  - SyncLog             Model synchronization history
   - AuditLog            Governance audit trail
 """
 
@@ -91,6 +92,15 @@ class AIProvider(Base):
     description = Column(Text, default="")
     icon = Column(String(64), default="generic")
     sort_order = Column(Integer, default=0)
+    
+    # Provider Type & Endpoints (for flexible provider architecture)
+    provider_type = Column(String(64), default="openai")  # openai | anthropic | custom
+    models_endpoint = Column(String(512), default="")  # /models endpoint
+    chat_endpoint = Column(String(512), default="")    # /chat/completions endpoint
+    messages_endpoint = Column(String(512), default="")  # /messages endpoint (Anthropic-style)
+    embeddings_endpoint = Column(String(512), default="")  # /embeddings endpoint
+    health_endpoint = Column(String(512), default="")  # Health check endpoint
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -111,6 +121,12 @@ class AIProvider(Base):
             "description": self.description,
             "icon": self.icon,
             "order": self.sort_order,
+            "providerType": self.provider_type,
+            "modelsEndpoint": self.models_endpoint,
+            "chatEndpoint": self.chat_endpoint,
+            "messagesEndpoint": self.messages_endpoint,
+            "embeddingsEndpoint": self.embeddings_endpoint,
+            "healthEndpoint": self.health_endpoint,
             "createdAt": self.created_at.isoformat() if self.created_at else None,
             "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -152,11 +168,12 @@ class AIModel(Base):
     supports_audio = Column(Boolean, default=False)
     supports_comparison = Column(Boolean, default=False)
 
-    # Visibility & state
-    enabled = Column(Boolean, default=True)
-    visible_to_users = Column(Boolean, default=True)
+    # Activation & state
     state = Column(String(50), default="available")  # available | installed | active | retired | ...
     is_default = Column(Boolean, default=False)
+
+    # Endpoint routing (for flexible provider architecture)
+    endpoint_type = Column(String(32), default="chat")  # chat | messages | custom
 
     # Metadata
     pricing_tier = Column(String(64), default="free")
@@ -192,10 +209,9 @@ class AIModel(Base):
             "supportsExtraction": self.supports_extraction,
             "supportsAudio": self.supports_audio,
             "supportsComparison": self.supports_comparison,
-            "enabled": self.enabled,
-            "visibleToUsers": self.visible_to_users,
             "state": self.state,
             "isDefault": self.is_default,
+            "endpointType": self.endpoint_type,
             "pricingTier": self.pricing_tier,
             "license": self.license,
             "allowedRoles": json.loads(self.allowed_roles) if self.allowed_roles else [],
@@ -266,6 +282,46 @@ class HealthRecord(Base):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SyncLog — Model synchronization history
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SyncLog(Base):
+    """Records model catalog synchronization events."""
+    __tablename__ = "sync_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider_id = Column(String(128), nullable=False, index=True)
+    sync_type = Column(String(32), default="fetch")  # fetch | import | manual
+    models_retrieved = Column(Integer, default=0)
+    models_added = Column(Integer, default=0)
+    models_removed = Column(Integer, default=0)
+    models_updated = Column(Integer, default=0)
+    models_unchanged = Column(Integer, default=0)
+    status = Column(String(32), default="success")  # success | failed | partial
+    error_message = Column(Text, default="")
+    synced_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_sync_provider_time", "provider_id", "synced_at"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "providerId": self.provider_id,
+            "syncType": self.sync_type,
+            "modelsRetrieved": self.models_retrieved,
+            "modelsAdded": self.models_added,
+            "modelsRemoved": self.models_removed,
+            "modelsUpdated": self.models_updated,
+            "modelsUnchanged": self.models_unchanged,
+            "status": self.status,
+            "errorMessage": self.error_message,
+            "syncedAt": self.synced_at.isoformat() if self.synced_at else None,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # AuditLog — Governance audit trail
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -297,4 +353,171 @@ class AuditLog(Base):
             "userId": self.user_id,
             "userName": self.user_name,
             "createdAt": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOOKUP TABLES — Database-driven configuration (replaces hardcoded enums)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Role — User roles lookup table
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Role(Base):
+    """User roles lookup table (replaces VALID_ROLES hardcoded array)."""
+    __tablename__ = "roles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, default="")
+    is_system = Column(Boolean, default=False)  # System roles cannot be deleted
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "code": self.code,
+            "name": self.name,
+            "description": self.description,
+            "isSystem": self.is_system,
+            "isActive": self.is_active,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Department — Organization departments lookup table
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Department(Base):
+    """Organization departments lookup table (replaces ZETDC_DEPARTMENTS hardcoded array)."""
+    __tablename__ = "departments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, default="")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "code": self.code,
+            "name": self.name,
+            "description": self.description,
+            "isActive": self.is_active,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TaskType — AI task types lookup table
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TaskType(Base):
+    """AI task types lookup table (replaces TASK_TYPES hardcoded array)."""
+    __tablename__ = "task_types"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, default="")
+    display_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "code": self.code,
+            "name": self.name,
+            "description": self.description,
+            "displayOrder": self.display_order,
+            "isActive": self.is_active,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ModelStatus — Model status lookup table
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ModelStatus(Base):
+    """Model status lookup table (replaces MODEL_STATES hardcoded array)."""
+    __tablename__ = "model_statuses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(64), unique=True, nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    description = Column(Text, default="")
+    is_selectable = Column(Boolean, default=True)  # Can users select models in this status?
+    is_visible = Column(Boolean, default=True)     # Is this status visible in dropdowns?
+    display_order = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "code": self.code,
+            "name": self.name,
+            "description": self.description,
+            "isSelectable": self.is_selectable,
+            "isVisible": self.is_visible,
+            "displayOrder": self.display_order,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROMPT SUGGESTIONS — Dynamic rotating prompt suggestions for New Chat
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PromptSuggestion(Base):
+    """Dynamic prompt suggestions for the New Chat page.
+    
+    Replaces hardcoded prompt buttons with database-driven suggestions
+    that can be managed by administrators and rotate dynamically.
+    """
+    __tablename__ = "prompt_suggestions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(255), nullable=False)  # Display text (e.g., "Explain ZETDC net metering policy")
+    prompt_text = Column(Text, nullable=False)   # Actual prompt sent to model
+    category = Column(String(64), default="general")  # policy | safety | reports | languages | general
+    enabled = Column(Boolean, default=True)
+    display_order = Column(Integer, default=0)
+    icon = Column(String(64), default="💬")  # Emoji or icon identifier
+    requires_capability = Column(String(64), nullable=True)  # Optional: vision | audio | video | code
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_prompt_suggestions_category", "category"),
+        Index("idx_prompt_suggestions_enabled", "enabled", "display_order"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "promptText": self.prompt_text,
+            "category": self.category,
+            "enabled": self.enabled,
+            "displayOrder": self.display_order,
+            "icon": self.icon,
+            "requiresCapability": self.requires_capability,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -18,6 +18,7 @@ import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
 import { useModel } from "../context/ModelContext"
 import { isCloudModel } from "../utils/modelUtils"
+import { ModelSelector } from "../components/ModelSelector"
 
 type Message = {
   id: string | number
@@ -51,7 +52,7 @@ export const AnalyzeChatPage: React.FC = () => {
   const [docsError, setDocsError] = useState<string | null>(null)
 
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, modelDetails, loading: loadingModels, setModelForTask } = useModel()
+  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, modelDetails, loading: loadingModels, setModelForTask, v2Providers } = useModel()
 
   // On mount, ensure we have the best model for document analysis / RAG
   useEffect(() => {
@@ -69,8 +70,6 @@ export const AnalyzeChatPage: React.FC = () => {
   const [isSessionMenuOpen, setIsSessionMenuOpen] = useState(false)
   const [sessionLoading, setSessionLoading] = useState(false)
 
-  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
-  const modelMenuRef = useRef<HTMLDivElement>(null)
   const sessionMenuRef = useRef<HTMLDivElement>(null)
   const [docSearch, setDocSearch] = useState("")
   const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>(SUGGESTED_PROMPTS)
@@ -212,17 +211,6 @@ export const AnalyzeChatPage: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    if (!isModelMenuOpen) return
-    const handler = (e: MouseEvent) => {
-      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
-        setIsModelMenuOpen(false)
-      }
-    }
-    document.addEventListener("mousedown", handler)
-    return () => document.removeEventListener("mousedown", handler)
-  }, [isModelMenuOpen])
-
-  useEffect(() => {
     if (!isSessionMenuOpen) return
     const handler = (e: MouseEvent) => {
       if (sessionMenuRef.current && !sessionMenuRef.current.contains(e.target as Node)) {
@@ -282,11 +270,9 @@ export const AnalyzeChatPage: React.FC = () => {
 
   const handleModelChange = async (model: string) => {
     if (!model || model === selectedModel) {
-      setIsModelMenuOpen(false)
       return
     }
     setSelectedModel(model)
-    setIsModelMenuOpen(false)
     if (sessionId) {
       try {
         await setChatSessionModel(sessionId, model)
@@ -605,73 +591,16 @@ export const AnalyzeChatPage: React.FC = () => {
 
       {/* Top toolbar: model + sessions */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <div style={{ position: "relative" }} ref={modelMenuRef}>
-          <button
-            onClick={() => setIsModelMenuOpen((v) => !v)}
+        <div style={{ width: "280px" }}>
+          <ModelSelector
+            providers={v2Providers}
+            value={selectedModel}
+            onChange={(modelId) => handleModelChange(modelId)}
+            placeholder="Select Model"
             disabled={isWaiting}
-            style={{
-              ...btnToolbarStyle(colors),
-              opacity: isWaiting ? 0.5 : 1,
-            }}
-          >
-            Model: {modelLabel(selectedModel) || "Select"}
-            <span style={{ marginLeft: 6, fontSize: 10 }}>&#9660;</span>
-          </button>
-          {isModelMenuOpen && (
-            <div style={{
-              position: "absolute",
-              top: 40,
-              left: 0,
-              minWidth: 220,
-              maxHeight: 300,
-              overflowY: "auto",
-              backgroundColor: isDark ? "#1a1f35" : "#fff",
-              border: `1px solid ${colors.border}`,
-              borderRadius: 10,
-              boxShadow: isDark ? "0 8px 32px rgba(0,0,0,0.5)" : "0 8px 32px rgba(0,0,0,0.1)",
-              zIndex: 1000,
-              padding: 6,
-            }}>
-              {availableModels.map((m, i) => (
-                <div
-                  key={i}
-                  onClick={() => handleModelChange(m)}
-                  style={{
-                    padding: "8px 12px",
-                    borderRadius: 6,
-                    cursor: "pointer",
-                    fontSize: 13,
-                    backgroundColor: m === selectedModel ? colors.surfaceActive : "transparent",
-                    color: colors.text,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 8,
-                  }}
-                >
-                  <span>{modelLabel(m)}</span>
-                  <span style={{ display: "flex", gap: 3, flexShrink: 0 }}>
-                    {(modelCapabilities[m] || []).slice(0, 3).map(cap => (
-                      <span
-                        key={cap}
-                        style={{
-                          fontSize: 9,
-                          padding: "1px 4px",
-                          borderRadius: 3,
-                          border: `1px solid ${colors.border}`,
-                          backgroundColor: isDark ? colors.surface : "#F8FAFC",
-                          color: colors.textMuted,
-                          lineHeight: "14px",
-                        }}
-                      >
-                        {cap === "reasoning" ? "🧠" : cap === "vision" ? "👁️" : cap === "audio" ? "🎤" : cap === "code" ? "💻" : cap === "fast" ? "⚡" : cap === "large" ? "🐘" : cap}
-                      </span>
-                    ))}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
+            selectableOnly={true}
+            includeLocalModels={true}
+          />
         </div>
 
         <div style={{ position: "relative" }} ref={sessionMenuRef}>

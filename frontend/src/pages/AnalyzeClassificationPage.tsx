@@ -3,6 +3,7 @@ import { classifyDocuments, getDocumentLibrary } from "../api/client"
 import { useTheme } from "../context/ThemeContext"
 import { useModel } from "../context/ModelContext"
 import { getTokens } from "../theme/themeTokens"
+import { ModelSelector } from "../components/ModelSelector"
 
 type DocumentItem = { id: string; filename: string; status: string }
 type ClassResult = {
@@ -43,7 +44,7 @@ export const AnalyzeClassificationPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [removedTags, setRemovedTags] = useState<Record<string, string[]>>({})
 
-  const { selectedModel, setSelectedModel, availableModels } = useModel()
+  const { selectedModel, setSelectedModel, availableModels, v2Providers } = useModel()
 
   useEffect(() => {
     const styleId = "classify-anim"
@@ -251,20 +252,18 @@ export const AnalyzeClassificationPage: React.FC = () => {
         display: "flex", alignItems: "center", gap: 12,
       }}>
         <span style={{ fontSize: 13, fontWeight: 600 }}>Model</span>
-        <select
-          value={selectedModel}
-          onChange={(e) => setSelectedModel(e.target.value)}
-          style={{
-            padding: "6px 12px", borderRadius: 8,
-            border: `1px solid ${c.border}`,
-            backgroundColor: c.inputBg, color: c.text,
-            fontSize: 13, fontFamily: "inherit", outline: "none",
-          }}
-        >
-          {availableModels.map((m, i) => (
-            <option key={i} value={m} style={{ backgroundColor: c.bgSecondary, color: c.text }}>{m}</option>
-          ))}
-        </select>
+        <div style={{ width: "280px" }}>
+          <ModelSelector
+            providers={v2Providers}
+            value={selectedModel || ""}
+            onChange={(modelId) => setSelectedModel(modelId)}
+            placeholder="Select Model"
+            selectableOnly={true}
+            capabilityFilter="classification"
+            includeLocalModels={true}
+            localModels={availableModels}
+          />
+        </div>
       </div>
 
       {/* Rules textarea */}

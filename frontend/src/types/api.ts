@@ -382,17 +382,18 @@ export interface V2ModelMetadata {
   supportsClassification: boolean
   supportsSummary: boolean
   supportsExtraction: boolean
-  enabled: boolean
-  visibleToUsers: boolean
+  state: string  // active | inactive | installed | available | maintenance | retired | downloading | error
   isDefault: boolean
   allowedRoles: string[]
   departmentRestrictions: string[]
-  state: string
   pricingTier: string
   license: string
   forTasks?: string[]
   capabilities?: string[]
   health?: V2HealthSummary
+  // Status-driven availability (computed from state)
+  isSelectable?: boolean  // true when state in ['active', 'installed', 'available']
+  isVisible?: boolean     // true when state in ['active', 'installed', 'available', 'maintenance']
 }
 
 export interface V2Provider {
@@ -407,6 +408,13 @@ export interface V2Provider {
   order: number
   models: V2ModelMetadata[]
   health?: V2HealthSummary
+  // Provider endpoint configuration
+  providerType?: string
+  modelsEndpoint?: string
+  chatEndpoint?: string
+  messagesEndpoint?: string
+  embeddingsEndpoint?: string
+  healthEndpoint?: string
 }
 
 export interface V2HealthSummary {
@@ -466,10 +474,6 @@ export interface V2ModelResponse {
 export interface V2TaskMappingResponse {
   taskMapping: Record<string, { providerId: string; modelId: string }>
   taskTypes: string[]
-}
-
-export interface V2VisibleChatModelsResponse {
-  models: (V2ModelMetadata & { provider_name: string; provider_id: string })[]
 }
 
 export interface V2HealthResponse {
@@ -540,4 +544,11 @@ export interface V2FetchModelsResponse {
   count?: number
   statusCode?: number
   message?: string
+  providerId?: string
+  // Full synchronization results
+  added?: number
+  updated?: number
+  removed?: number
+  unchanged?: number
+  preserved?: number
 }

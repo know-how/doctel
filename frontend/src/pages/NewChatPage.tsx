@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from "react"
 import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
-import { chatGlobally, chatGloballyStream, getAvailableModels, createChatSession, getChatMessages, setChatSessionModel, transcribeAudio, askVision, uploadDocument, uploadDocumentWithProgress } from "../api/client"
+import { chatGlobally, chatGloballyStream, getAvailableModels, createChatSession, getChatMessages, setChatSessionModel, transcribeAudio, askVision, uploadDocument, uploadDocumentWithProgress, getRandomPromptSuggestions, PromptSuggestion } from "../api/client"
 import { useModel } from "../context/ModelContext"
-import { ModelConfigPanel } from "../components/ModelConfigPanel"
+import { ModelSelector } from "../components/ModelSelector"
 import { isCloudModel } from "../utils/modelUtils"
 
 interface Citation {
@@ -54,6 +54,7 @@ const formatDate = (iso?: string) => {
 export const NewChatPage: React.FC = () => {
   const { theme } = useTheme()
   const t = getTokens(theme)
+  const c = t.colors
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
@@ -65,12 +66,42 @@ export const NewChatPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [uploadStatusMsg, setUploadStatusMsg] = useState<string | null>(null)
   const [capabilityWarning, setCapabilityWarning] = useState<string | null>(null)
+  const [promptSuggestions, setPromptSuggestions] = useState<PromptSuggestion[]>([])
+  const [loadingPrompts, setLoadingPrompts] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const chatEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const { selectedModel: model, setSelectedModel: setModel, availableModels: models, modelCapabilities, modelLabels, modelDetails, loading: loadingModels, setModelForTask, v2ModelIds } = useModel()
+  const { selectedModel: model, setSelectedModel: setModel, availableModels: models, modelCapabilities, modelLabels, modelDetails, loading: loadingModels, setModelForTask, v2Providers, taskDefaults } = useModel()
+
+  // Load random prompt suggestions on mount
+  useEffect(() => {
+    const loadPrompts = async () => {
+      setLoadingPrompts(true)
+      try {
+        // Get model capabilities to filter prompts
+        const capabilities: string[] = []
+        if (model) {
+          const caps = modelCapabilities[model]
+          if (caps?.includes("vision")) capabilities.push("vision")
+          if (caps?.includes("audio")) capabilities.push("audio")
+          if (caps?.includes("code")) capabilities.push("code")
+        }
+        
+        const response = await getRandomPromptSuggestions(6)
+        setPromptSuggestions(response.suggestions)
+      } catch (e) {
+        console.warn("Failed to load prompt suggestions:", e)
+        // Fallback to empty array - will show default UI
+        setPromptSuggestions([])
+      } finally {
+        setLoadingPrompts(false)
+      }
+    }
+    
+    loadPrompts()
+  }, [model, modelCapabilities])
 
   // On mount, ensure we have the best chat-optimized model
   useEffect(() => {
@@ -415,58 +446,111 @@ export const NewChatPage: React.FC = () => {
           : "radial-gradient(ellipse at 50% 0%, rgba(11,78,162,0.04) 0%, transparent 50%), radial-gradient(ellipse at 80% 100%, rgba(0,151,178,0.02) 0%, transparent 40%)",
       }} />
 
-      {/* Header */}
+      {/* Header - Professional Enterprise Layout */}
       <div style={{
         flexShrink: 0, position: "relative", zIndex: 10,
-        padding: `${t.spacing.lg}px 40px`,
-        borderBottom: `1px solid ${t.colors.border}`,
-        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "20px 32px",
+        borderBottom: `1px solid ${c.border}`,
+        backgroundColor: c.bg,
       }}>
-        <div>
-          <h1 style={{
-            fontSize: 22, fontWeight: 800, color: t.colors.text, margin: 0,
-            letterSpacing: "-0.3px",
-            background: `linear-gradient(135deg, ${t.colors.text} 0%, ${t.colors.primary} 100%)`,
-            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-            backgroundClip: "text",
-          }}>
-            New Chat
-          </h1>
-          <p style={{ fontSize: 12, color: t.colors.textMuted, margin: "3px 0 0 0" }}>
-            Chatting with {modelLabels[model] || model || "AI"} · {messages.length} messages
-          </p>
-          {model && modelCapabilities[model] && modelCapabilities[model].length > 0 && (
-            <div style={{ display: "flex", gap: 4, marginTop: 4, alignItems: "center" }}>
-              <span style={{ fontSize: 10, color: t.colors.textMuted, fontWeight: 500, marginRight: 2 }}>Tools:</span>
-              {modelCapabilities[model].map(cap => {
-                const icon = cap === "reasoning" ? "🧠" : cap === "vision" ? "👁️" : cap === "audio" ? "🎤" : cap === "code" ? "💻" : cap === "fast" ? "⚡" : cap === "large" ? "🐘" : "🔧"
-                const label = cap === "reasoning" ? "Reasoning" : cap === "vision" ? "Vision" : cap === "audio" ? "Audio" : cap === "code" ? "Code" : cap === "fast" ? "Fast" : cap === "large" ? "Large" : cap
-                return (
-                  <span key={cap} style={{
-                    fontSize: 10, padding: "1px 6px", borderRadius: 4,
-                    border: `1px solid ${t.colors.border}`,
-                    backgroundColor: t.colors.surface,
-                    color: t.colors.textSecondary, lineHeight: "16px",
-                    display: "inline-flex", alignItems: "center", gap: 3,
-                  }}>
-                    {icon} {label}
-                  </span>
-                )
-              })}
-            </div>
-          )}
+        <div style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: "24px",
+        }}>
+          {/* Left: Title and Session Info */}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1 style={{
+              fontSize: "24px",
+              fontWeight: 700,
+              color: c.text,
+              margin: 0,
+              letterSpacing: "-0.5px",
+              lineHeight: 1.2,
+            }}>
+              New Chat
+            </h1>
+            
+            <p style={{ 
+              fontSize: "13px", 
+              color: c.textSecondary, 
+              margin: "6px 0 0 0",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+            }}>
+              <span>Chatting with</span>
+              <span style={{ 
+                fontWeight: 600, 
+                color: c.primary,
+                backgroundColor: c.primary + "15",
+                padding: "2px 10px",
+                borderRadius: "6px",
+                fontSize: "12px",
+              }}>
+                {modelLabels[model] || model || "AI"}
+              </span>
+              <span style={{ color: c.border }}>•</span>
+              <span>{messages.length} messages</span>
+            </p>
+            
+            {/* Capability Icons */}
+            {model && modelCapabilities[model] && modelCapabilities[model].length > 0 && (
+              <div style={{ 
+                display: "flex", 
+                gap: "6px", 
+                marginTop: "10px", 
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}>
+                {modelCapabilities[model].map(cap => {
+                  const icon = cap === "reasoning" ? "🧠" : 
+                    cap === "vision" ? "🖼" : 
+                    cap === "audio" ? "🎤" : 
+                    cap === "code" ? "💻" : 
+                    cap === "fast" ? "⚡" : 
+                    cap === "large" ? "🐘" : 
+                    cap === "embedding" ? "📌" :
+                    cap === "video" ? "🎥" :
+                    cap === "tools" ? "🔧" :
+                    "📄"
+                  return (
+                    <span key={cap} style={{
+                      fontSize: "11px",
+                      padding: "4px 10px",
+                      borderRadius: "8px",
+                      backgroundColor: c.surface,
+                      color: c.textSecondary,
+                      border: `1px solid ${c.border}`,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "5px",
+                      fontWeight: 500,
+                    }}>
+                      {icon}
+                      <span style={{ textTransform: "capitalize" }}>{cap}</span>
+                    </span>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+          
+          {/* Right: Compact Model Selector */}
+          <div style={{ flexShrink: 0, width: "380px", maxWidth: "100%" }}>
+            <ModelSelector
+              providers={v2Providers}
+              value={model || ""}
+              onChange={(modelId) => { handleModelChange(modelId); setCapabilityWarning(null); }}
+              placeholder={models.length > 0 ? "Select model" : "No models available"}
+              selectableOnly={true}
+              includeLocalModels={true}
+              localModels={models}
+              disabled={models.length === 0}
+            />
+          </div>
         </div>
-        {models.length > 0 && (
-          <ModelConfigPanel
-            selectedModel={model}
-            availableModels={models}
-            modelCapabilities={modelCapabilities}
-            modelLabels={modelLabels}
-            onSelect={(m) => { handleModelChange(m); setCapabilityWarning(null); }}
-            loading={loadingModels}
-            v2ModelIds={v2ModelIds}
-          />
-        )}
       </div>
 
       {/* Messages area */}
@@ -509,37 +593,73 @@ export const NewChatPage: React.FC = () => {
               reports, or request responses in Shona — no document upload needed.
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center", maxWidth: 500 }}>
-              {[
-                { label: "ZETDC outage reporting process", icon: "⚡" },
-                { label: "Explain ZETDC net metering policy", icon: "📋" },
-                { label: "Summarize in Shona", icon: "🇿🇼" },
-                { label: "ZETDC safety procedures", icon: "🏗️" },
-              ].map((q) => (
-                <button
-                  key={q.label}
-                  onClick={() => handleSend(q.label)}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 8,
-                    background: t.colors.cardBg,
-                    color: t.colors.text, border: `1px solid ${t.colors.border}`,
-                    borderRadius: 24, padding: "10px 18px", fontSize: 13,
-                    cursor: "pointer", transition: "all 0.2s ease",
-                    whiteSpace: "nowrap",
-                  }}
-                  onMouseEnter={(e) => {
-                    const el = e.target as HTMLElement
-                    el.style.background = t.colors.surfaceActive
-                    el.style.borderColor = t.colors.primary + "60"
-                  }}
-                  onMouseLeave={(e) => {
-                    const el = e.target as HTMLElement
-                    el.style.background = t.colors.cardBg
-                    el.style.borderColor = t.colors.border
-                  }}
-                >
-                  <span>{q.icon}</span> {q.label}
-                </button>
-              ))}
+              {loadingPrompts ? (
+                // Loading state
+                <div style={{ color: t.colors.textMuted, fontSize: 14 }}>
+                  Loading suggestions...
+                </div>
+              ) : promptSuggestions.length > 0 ? (
+                // Dynamic prompts from database
+                promptSuggestions.map((q) => (
+                  <button
+                    key={q.id}
+                    onClick={() => handleSend(q.prompt_text)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      background: t.colors.cardBg,
+                      color: t.colors.text, border: `1px solid ${t.colors.border}`,
+                      borderRadius: 24, padding: "10px 18px", fontSize: 13,
+                      cursor: "pointer", transition: "all 0.2s ease",
+                      whiteSpace: "nowrap",
+                    }}
+                    onMouseEnter={(e) => {
+                      const el = e.target as HTMLElement
+                      el.style.background = t.colors.surfaceActive
+                      el.style.borderColor = t.colors.primary + "60"
+                    }}
+                    onMouseLeave={(e) => {
+                      const el = e.target as HTMLElement
+                      el.style.background = t.colors.cardBg
+                      el.style.borderColor = t.colors.border
+                    }}
+                  >
+                    <span>{q.icon}</span> {q.title}
+                  </button>
+                ))
+              ) : (
+                // Fallback prompts if API fails
+                [
+                  { label: "ZETDC outage reporting process", icon: "⚡" },
+                  { label: "Explain ZETDC net metering policy", icon: "📋" },
+                  { label: "Summarize in Shona", icon: "🇿🇼" },
+                  { label: "ZETDC safety procedures", icon: "🏗️" },
+                ].map((q) => (
+                  <button
+                    key={q.label}
+                    onClick={() => handleSend(q.label)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      background: t.colors.cardBg,
+                      color: t.colors.text, border: `1px solid ${t.colors.border}`,
+                      borderRadius: 24, padding: "10px 18px", fontSize: 13,
+                      cursor: "pointer", transition: "all 0.2s ease",
+                      whiteSpace: "nowrap",
+                    }}
+                    onMouseEnter={(e) => {
+                      const el = e.target as HTMLElement
+                      el.style.background = t.colors.surfaceActive
+                      el.style.borderColor = t.colors.primary + "60"
+                    }}
+                    onMouseLeave={(e) => {
+                      const el = e.target as HTMLElement
+                      el.style.background = t.colors.cardBg
+                      el.style.borderColor = t.colors.border
+                    }}
+                  >
+                    <span>{q.icon}</span> {q.label}
+                  </button>
+                ))
+              )}
             </div>
           </div>
         )}

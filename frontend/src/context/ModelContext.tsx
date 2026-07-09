@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react"
-import { getAvailableModels, getModelCapabilities, getModelLabels, v2SelectModelForTask, v2GetVisibleChatModels } from "../api/client"
+import { getAvailableModels, getModelCapabilities, getModelLabels, v2SelectModelForTask } from "../api/client"
 import type { OllamaModelDetail, ModelsAvailableResponse, V2Provider } from "../types/api"
 
 const MODEL_KEY = "docintel_selected_model"
@@ -78,26 +78,30 @@ export function ModelProvider({ children }: { children: ReactNode }) {
       // Build consolidated model list: installed + available + V2-provided models
       const all: string[] = [...new Set([...(res.installed || []), ...(res.available || [])])]
 
-      // Filter out V2-managed models that are not visible/enabled for chat
+      // Include V2-managed models that are selectable (active, installed, available)
+      // Also include MAINTENANCE models (visible but disabled for selection)
       let filteredModels = all
       const v2provs = res.v2_providers || []
+      const VISIBLE_STATES = ['active', 'installed', 'available', 'maintenance']
       if (v2provs.length > 0) {
-        const v2ManagedModels = new Set<string>()
+        const v2VisibleModels = new Set<string>()
         for (const p of v2provs) {
           for (const m of p.models || []) {
-            v2ManagedModels.add(m.id)
+            // ACTIVE, INSTALLED, AVAILABLE, and MAINTENANCE models are visible
+            if (VISIBLE_STATES.includes(m.state)) {
+              v2VisibleModels.add(m.id)
+            }
           }
         }
-        try {
-          const visRes = await v2GetVisibleChatModels()
-          const visibleV2Models = new Set(visRes.models.map((m) => m.id))
-          filteredModels = all.filter((modelId) => {
-            if (!v2ManagedModels.has(modelId)) return true
-            return visibleV2Models.has(modelId)
-          })
-        } catch {
-          // Fall through with unfiltered list
-        }
+        filteredModels = all.filter((modelId) => {
+          // If not a V2-managed model, keep it (legacy behavior)
+          const isV2Managed = v2provs.some((p: any) => 
+            (p.models || []).some((m: any) => m.id === modelId)
+          )
+          if (!isV2Managed) return true
+          // For V2-managed models, only keep if visible
+          return v2VisibleModels.has(modelId)
+        })
       }
       setAvailableModels(filteredModels)
       setModelDetails(res.models || [])

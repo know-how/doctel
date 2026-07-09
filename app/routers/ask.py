@@ -256,14 +256,23 @@ async def ask_global(
         generate as hf_generate,
     )
 
-    # Pre-compute chosen model before Ollama check (needed for cloud bypass)
-    _session_model_pre = (s.model_name or "").strip() or None
-    _default_model_pre = (settings.default_model or settings.text_model).strip()
-    chosen_model = requested_model or _session_model_pre or _default_model_pre
-    _using_gemini = (chosen_model == GEMINI_MODEL_ID)
-    _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID)
-    _using_zen = chosen_model.startswith("zen/") or chosen_model.startswith("go/")
-    _using_hf = chosen_model.startswith("huggingface/")
+    # Use centralized model resolver instead of direct settings access
+    from app.services.model_resolver_service import resolve_model
+    
+    resolved = await resolve_model(
+        db,
+        requested_model=requested_model,
+        task_type="chat",
+        session_model=(s.model_name or "").strip() or None,
+    )
+    chosen_model = resolved["model_id"]
+    provider_type = resolved.get("provider_type", "ollama")
+    
+    # Use provider_type from resolver as the single source of truth
+    _using_gemini = provider_type == "gemini"
+    _using_deepseek = provider_type == "deepseek"
+    _using_zen = provider_type == "opencode"
+    _using_hf = provider_type == "huggingface"
     _using_cloud = (chosen_model == "cloud")
 
     if _using_gemini and not gemini_configured():
@@ -546,16 +555,26 @@ async def ask_global_stream(
         from app.services.deepseek_service import DEEPSEEK_MODEL_ID, is_configured as deepseek_configured
         from app.services.opencode_zen_service import is_configured as zen_configured
         from app.services.huggingface_service import is_configured as hf_configured
+        from app.services.model_resolver_service import resolve_model
 
-        chosen_model = requested_model or (settings.default_model or settings.text_model).strip()
-        print(f"chosen_model: '{chosen_model}'", flush=True)
-        _using_gemini = (chosen_model == GEMINI_MODEL_ID)
-        _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID)
-        _using_zen = chosen_model.startswith("zen/") or chosen_model.startswith("go/")
-        _using_hf = chosen_model.startswith("huggingface/")
+        # Use centralized model resolver
+        resolved = await resolve_model(
+            db,
+            requested_model=requested_model,
+            task_type="chat",
+        )
+        chosen_model = resolved["model_id"]
+        provider_type = resolved.get("provider_type", "ollama")
+        print(f"chosen_model: '{chosen_model}' (source: {resolved['source']}, provider: {provider_type})", flush=True)
+        
+        # Use provider_type from resolver as the single source of truth
+        _using_gemini = provider_type == "gemini"
+        _using_deepseek = provider_type == "deepseek"
+        _using_zen = provider_type == "opencode"
+        _using_hf = provider_type == "huggingface"
         _using_cloud = (chosen_model == "cloud")
         is_cloud = _using_gemini or _using_deepseek or _using_zen or _using_hf or _using_cloud
-        print(f"_using_zen: {_using_zen}, _using_hf: {_using_hf}, is_cloud: {is_cloud}", flush=True)
+        print(f"_using_gemini: {_using_gemini}, _using_deepseek: {_using_deepseek}, _using_zen: {_using_zen}, _using_hf: {_using_hf}, is_cloud: {is_cloud}", flush=True)
 
         if not is_cloud:
             print("RETURNING 400: not cloud", flush=True)
@@ -1049,12 +1068,16 @@ async def ask_document_stream(
     from app.services.deepseek_service import DEEPSEEK_MODEL_ID, is_configured as deepseek_configured
     from app.services.opencode_zen_service import is_configured as zen_configured
     from app.services.huggingface_service import is_configured as hf_configured
+    from app.services.model_resolver_service import _get_provider_type
 
     chosen_model = requested_model or (settings.default_model or settings.text_model).strip()
-    _using_gemini = (chosen_model == GEMINI_MODEL_ID)
-    _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID)
-    _using_zen = chosen_model.startswith("zen/") or chosen_model.startswith("go/")
-    _using_hf = chosen_model.startswith("huggingface/")
+    provider_type = _get_provider_type(chosen_model)
+    
+    # Use provider_type as the single source of truth
+    _using_gemini = provider_type == "gemini"
+    _using_deepseek = provider_type == "deepseek"
+    _using_zen = provider_type == "opencode"
+    _using_hf = provider_type == "huggingface"
     _using_cloud = (chosen_model == "cloud")
     is_cloud = _using_gemini or _using_deepseek or _using_zen or _using_hf or _using_cloud
 

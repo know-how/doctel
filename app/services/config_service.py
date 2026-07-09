@@ -29,6 +29,7 @@ from app.db.config_models import (
     AIModel,
     TaskMapping,
     HealthRecord,
+    SyncLog,
     AuditLog,
 )
 
@@ -167,8 +168,14 @@ async def add_provider(
     description: str = "",
     icon: str = "generic",
     sort_order: int = 0,
+    provider_type: str = "openai",
+    models_endpoint: str = "",
+    chat_endpoint: str = "",
+    messages_endpoint: str = "",
+    embeddings_endpoint: str = "",
+    health_endpoint: str = "",
 ) -> AIProvider:
-    """Create a new provider."""
+    """Create a new provider with flexible endpoint configuration."""
     exists = await get_provider_by_id(provider_id, db)
     if exists:
         raise ValueError(f"Provider '{provider_id}' already exists")
@@ -185,6 +192,12 @@ async def add_provider(
         description=description,
         icon=icon,
         sort_order=sort_order,
+        provider_type=provider_type,
+        models_endpoint=models_endpoint,
+        chat_endpoint=chat_endpoint,
+        messages_endpoint=messages_endpoint,
+        embeddings_endpoint=embeddings_endpoint,
+        health_endpoint=health_endpoint,
     )
     db.add(provider)
     await db.commit()
@@ -205,7 +218,8 @@ async def update_provider(
     safe_fields = {
         "name", "vendor", "base_url", "api_key_env", "api_key_value",
         "description", "icon", "sort_order", "status", "is_connected",
-        "last_tested_at",
+        "last_tested_at", "provider_type", "models_endpoint", "chat_endpoint",
+        "messages_endpoint", "embeddings_endpoint", "health_endpoint",
     }
     for field, value in updates.items():
         if field in safe_fields:
@@ -280,8 +294,6 @@ async def add_model(
     display_name: str,
     context_window: int = 4096,
     capabilities: Optional[dict[str, bool]] = None,
-    enabled: bool = True,
-    visible_to_users: bool = True,
     state: str = "available",
     pricing_tier: str = "free",
     license: str = "Proprietary",
@@ -314,8 +326,6 @@ async def add_model(
         supports_extraction=caps.get("extraction", False),
         supports_audio=caps.get("audio", False),
         supports_comparison=caps.get("comparison", False),
-        enabled=enabled,
-        visible_to_users=visible_to_users,
         state=state,
         is_default=is_default,
         pricing_tier=pricing_tier,
@@ -345,8 +355,7 @@ async def update_model(
         return None
 
     safe_fields = {
-        "display_name", "context_window", "enabled", "visible_to_users",
-        "state", "is_default", "pricing_tier", "license",
+        "display_name", "context_window", "state", "is_default", "pricing_tier", "license",
         "supports_chat", "supports_vision", "supports_tools", "supports_code",
         "supports_embedding", "supports_reasoning", "supports_rag",
         "supports_classification", "supports_summary", "supports_extraction",
@@ -378,13 +387,12 @@ async def delete_model(db: AsyncSession, provider_id_str: str, model_id: str) ->
     return True
 
 
-async def get_all_visible_chat_models(db: AsyncSession) -> List[dict]:
-    """Get all models that support chat and are visible to users."""
+async def get_all_enabled_chat_models(db: AsyncSession) -> List[dict]:
+    """Get all models that support chat and are active."""
     res = await db.execute(
         select(AIModel).where(
             AIModel.supports_chat == True,  # noqa: E712
-            AIModel.visible_to_users == True,  # noqa: E712
-            AIModel.enabled == True,  # noqa: E712
+            AIModel.state.in_(['active', 'available']),  # Use state instead of enabled
         )
     )
     models = res.scalars().all()
@@ -402,9 +410,9 @@ async def get_all_visible_chat_models(db: AsyncSession) -> List[dict]:
 
 
 async def get_all_enabled_models(db: AsyncSession) -> List[dict]:
-    """Get all enabled models regardless of visibility."""
+    """Get all active/available models regardless of visibility."""
     res = await db.execute(
-        select(AIModel).where(AIModel.enabled == True).order_by(AIModel.display_name)  # noqa: E712
+        select(AIModel).where(AIModel.state.in_(['active', 'available'])).order_by(AIModel.display_name)  # noqa: E712
     )
     return [m.to_dict() for m in res.scalars().all()]
 
@@ -489,7 +497,7 @@ async def select_best_model_for_task(task_type: str, db: AsyncSession) -> Option
         provider = await get_provider_by_id(provider_id, db)
         if provider:
             model = await get_model_by_model_id(provider.id, model_id, db)
-            if model and model.enabled:
+            if model and model.state in ('active', 'available'):
                 return {
                     "providerId": provider_id,
                     "modelId": model_id,
@@ -514,7 +522,7 @@ async def select_best_model_for_task(task_type: str, db: AsyncSession) -> Option
             res = await db.execute(
                 select(AIModel).where(
                     col_attr == True,  # noqa: E712
-                    AIModel.enabled == True,  # noqa: E712
+                    AIModel.state.in_(['active', 'available']),  # noqa: E712
                 ).limit(1)
             )
             model = res.scalar_one_or_none()
@@ -577,7 +585,7 @@ async def get_health_summary(db: AsyncSession) -> dict:
     providers = await get_all_providers(db)
     summary = {}
     for prov in providers:
-        records = await get_health_history(prov.provider_id, limit=5)
+        records = await get_health_history(db, prov.provider_id, limit=5)
         latest = records[0] if records else None
         summary[prov.provider_id] = {
             "status": prov.status,
@@ -588,6 +596,58 @@ async def get_health_summary(db: AsyncSession) -> dict:
             "recentChecks": len(records),
         }
     return summary
+
+
+# Alias for backward compatibility
+record_health_check = add_health_record
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SYNC LOG
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def add_sync_log(
+    db: AsyncSession,
+    provider_id: str,
+    sync_type: str = "fetch",
+    models_retrieved: int = 0,
+    models_added: int = 0,
+    models_removed: int = 0,
+    models_updated: int = 0,
+    models_unchanged: int = 0,
+    status: str = "success",
+    error_message: str = "",
+) -> SyncLog:
+    """Record a model synchronization event."""
+    log = SyncLog(
+        provider_id=provider_id,
+        sync_type=sync_type,
+        models_retrieved=models_retrieved,
+        models_added=models_added,
+        models_removed=models_removed,
+        models_updated=models_updated,
+        models_unchanged=models_unchanged,
+        status=status,
+        error_message=error_message,
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(log)
+    return log
+
+
+async def get_sync_history(
+    db: AsyncSession,
+    provider_id: Optional[str] = None,
+    limit: int = 50,
+) -> List[SyncLog]:
+    """Get recent synchronization history."""
+    q = select(SyncLog).order_by(SyncLog.synced_at.desc())
+    if provider_id:
+        q = q.where(SyncLog.provider_id == provider_id)
+    q = q.limit(limit)
+    res = await db.execute(q)
+    return list(res.scalars().all())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

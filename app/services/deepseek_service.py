@@ -59,6 +59,7 @@ def _settings() -> "Settings":
 
 
 def _api_key() -> str:
+    """Get API key from env, then file settings (DB override supported via settings proxy)."""
     val = os.getenv("DEEPSEEK_API_KEY", "").strip()
     if val:
         return val
@@ -66,6 +67,7 @@ def _api_key() -> str:
 
 
 def _model_name() -> str:
+    """Get model name from env, then file settings, then hardcoded default."""
     val = os.getenv("DEEPSEEK_MODEL", "").strip()
     if val:
         return val
@@ -73,9 +75,56 @@ def _model_name() -> str:
 
 
 def _base_url() -> str:
+    """Get base URL from env, then file settings, then hardcoded default."""
     val = os.getenv("DEEPSEEK_BASE_URL", "").strip()
     if val:
         return _normalize_base_url(val)
+    return _normalize_base_url(_settings().deepseek_base_url or _DEFAULT_BASE_URL)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DB-AWARE ASYNC VERSIONS (for use with database-backed configuration)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def get_api_key_db(db: "AsyncSession") -> str:
+    """Get API key with DB override support. Priority: env > DB > file > empty."""
+    val = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if val:
+        return val
+    
+    from app.services import app_config_service as app_cfg
+    db_val = await app_cfg.get_setting_str(db, "api.deepseek_api_key", "")
+    if db_val:
+        return db_val
+    
+    return _settings().deepseek_api_key
+
+
+async def get_model_name_db(db: "AsyncSession") -> str:
+    """Get model name with DB override support. Priority: env > DB > file > default."""
+    val = os.getenv("DEEPSEEK_MODEL", "").strip()
+    if val:
+        return val
+    
+    from app.services import app_config_service as app_cfg
+    db_val = await app_cfg.get_setting_str(db, "api.deepseek_model", "")
+    if db_val:
+        return db_val
+    
+    return _settings().deepseek_model or _DEFAULT_MODEL
+
+
+async def get_base_url_db(db: "AsyncSession") -> str:
+    """Get base URL with DB override support. Priority: env > DB > file > default."""
+    val = os.getenv("DEEPSEEK_BASE_URL", "").strip()
+    if val:
+        return _normalize_base_url(val)
+    
+    from app.services import app_config_service as app_cfg
+    db_val = await app_cfg.get_setting_str(db, "api.deepseek_base_url", "")
+    if db_val:
+        return _normalize_base_url(db_val)
+    
     return _normalize_base_url(_settings().deepseek_base_url or _DEFAULT_BASE_URL)
 
 
