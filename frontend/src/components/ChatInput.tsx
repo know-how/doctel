@@ -12,13 +12,6 @@ interface ChatInputProps {
   isTranscribing: boolean
   onToggleRecording: () => void
   onAttachFile: () => void
-  attachedFile: File | null
-  attachedPreview: string | null
-  onClearAttachment: () => void
-  capabilityWarning: string | null
-  onDismissWarning: () => void
-  uploadProgress: number | null
-  uploadStatusMsg: string | null
   model: string | null
 }
 
@@ -33,142 +26,12 @@ const ChatInput: React.FC<ChatInputProps> = ({
   isTranscribing,
   onToggleRecording,
   onAttachFile,
-  attachedFile,
-  attachedPreview,
-  onClearAttachment,
-  capabilityWarning,
-  onDismissWarning,
-  uploadProgress,
-  uploadStatusMsg,
   model,
 }) => {
   const inputRef = React.useRef<HTMLTextAreaElement>(null)
 
   return (
     <>
-      {/* Hidden file input */}
-      <input
-        ref={React.useRef<HTMLInputElement>(null)}
-        type="file"
-        accept="image/*,application/pdf,text/plain,.docx,.doc"
-        onChange={() => {}} // handled by onAttachFile callback
-        style={{ display: "none" }}
-      />
-
-      {/* Attachment preview */}
-      {attachedFile && (
-        <div style={{
-          flexShrink: 0, position: "relative", zIndex: 2,
-          padding: "0 40px 6px",
-        }}>
-          <div style={{
-            maxWidth: 860, margin: "0 auto",
-            display: "flex", alignItems: "center", gap: 10,
-            background: t.colors.cardBg,
-            borderRadius: t.radii.md,
-            padding: "8px 14px",
-            border: `1px solid ${t.colors.border}`,
-          }}>
-            {attachedPreview ? (
-              <img src={attachedPreview} alt="preview" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />
-            ) : (
-              <span style={{ fontSize: 18 }}>📎</span>
-            )}
-            <span style={{
-              flex: 1, fontSize: 13, color: t.colors.text,
-              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            }}>
-              {attachedFile.name}
-            </span>
-            <button
-              onClick={onClearAttachment}
-              style={{
-                background: "none", border: "none", color: t.colors.error,
-                cursor: "pointer", fontSize: 16, padding: "2px 6px",
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Capability warning */}
-      {capabilityWarning && (
-        <div style={{
-          flexShrink: 0, position: "relative", zIndex: 2,
-          padding: "0 40px 6px",
-        }}>
-          <div style={{
-            maxWidth: 860, margin: "0 auto",
-            background: "#FEF3C7", borderRadius: t.radii.md,
-            padding: "8px 14px",
-            border: "1px solid #F59E0B",
-            display: "flex", alignItems: "center", gap: 8,
-          }}>
-            <span style={{ fontSize: 14 }}>⚠️</span>
-            <span style={{ flex: 1, fontSize: 12, color: "#92400E", lineHeight: 1.4 }}>
-              {capabilityWarning}
-            </span>
-            <button
-              onClick={onDismissWarning}
-              style={{
-                background: "none", border: "none", color: "#92400E",
-                cursor: "pointer", fontSize: 14, padding: "2px 4px", opacity: 0.6,
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Upload progress bar */}
-      {(uploadProgress !== null || uploadStatusMsg) && (
-        <div style={{
-          flexShrink: 0, position: "relative", zIndex: 2,
-          padding: "0 40px 6px",
-        }}>
-          <div style={{
-            maxWidth: 860, margin: "0 auto",
-            background: t.colors.cardBg,
-            borderRadius: t.radii.md,
-            padding: "10px 14px",
-            border: `1px solid ${t.colors.border}`,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: uploadProgress !== null ? 6 : 0 }}>
-              <span style={{ fontSize: 14 }}>📄</span>
-              <span style={{
-                flex: 1, fontSize: 13, color: t.colors.text,
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-              }}>
-                {uploadStatusMsg || "Uploading..."}
-              </span>
-              {uploadProgress !== null && (
-                <span style={{ fontSize: 12, color: t.colors.textMuted, fontVariantNumeric: "tabular-nums" }}>
-                  {uploadProgress}%
-                </span>
-              )}
-            </div>
-            {uploadProgress !== null && (
-              <div style={{
-                width: "100%", height: 6,
-                background: t.colors.border,
-                borderRadius: 3, overflow: "hidden",
-              }}>
-                <div style={{
-                  width: `${uploadProgress}%`,
-                  height: "100%",
-                  background: `linear-gradient(90deg, ${t.colors.primary}, ${t.colors.primaryHover})`,
-                  borderRadius: 3,
-                  transition: "width 0.3s ease",
-                }} />
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Input area */}
       <div style={{
         flexShrink: 0, position: "relative", zIndex: 2,
@@ -231,9 +94,9 @@ const ChatInput: React.FC<ChatInputProps> = ({
                 title="Attach file or image"
                 style={{
                   width: 38, height: 38, borderRadius: "50%",
-                  background: attachedFile ? t.colors.primary + "20" : "transparent",
-                  color: attachedFile ? t.colors.primary : t.colors.textMuted,
-                  border: attachedFile ? `1px solid ${t.colors.primary}60` : `1px solid ${t.colors.border}`,
+                  background: "transparent",
+                  color: t.colors.textMuted,
+                  border: `1px solid ${t.colors.border}`,
                   cursor: "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center",
                   flexShrink: 0, fontSize: 14,
@@ -277,19 +140,19 @@ const ChatInput: React.FC<ChatInputProps> = ({
               </span>
               <button
                 onClick={onSend}
-                disabled={loading || (!input.trim() && !attachedFile)}
+                disabled={loading || !input.trim()}
                 style={{
                   width: 38, height: 38, borderRadius: "50%",
-                  background: loading || (!input.trim() && !attachedFile)
+                  background: loading || !input.trim()
                     ? "transparent"
                     : `linear-gradient(135deg, ${t.colors.primary}, ${t.colors.primaryHover})`,
-                  color: loading || (!input.trim() && !attachedFile) ? t.colors.textMuted : "#FFFFFF",
+                  color: loading || !input.trim() ? t.colors.textMuted : "#FFFFFF",
                   border: "none",
-                  cursor: loading || (!input.trim() && !attachedFile) ? "default" : "pointer",
+                  cursor: loading || !input.trim() ? "default" : "pointer",
                   display: "flex", alignItems: "center", justifyContent: "center",
                   flexShrink: 0, fontSize: 16, fontWeight: 700,
                   transition: "all 0.2s ease",
-                  opacity: loading || (!input.trim() && !attachedFile) ? 0.3 : 1,
+                  opacity: loading || !input.trim() ? 0.3 : 1,
                 }}
               >
                 ↑

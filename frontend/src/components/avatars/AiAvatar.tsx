@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { AvatarState, avatarStates, type AvatarStateConfig } from "./avatarStates";
-import { useTheme } from "../../theme/ThemeContext";
+import { useTheme } from "../../context/ThemeContext";
 import { getTokens, type ThemeTokens } from "../../theme/themeTokens";
 
 interface AiAvatarProps {

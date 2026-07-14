@@ -5,7 +5,7 @@
     "qwen3:4b",
     "nomic-embed-text"
   ],
-  "updated_at": 1784029973,
+  "updated_at": 1784035094,
   "pulls": {
     "llama3.2:3b-instruct": {
       "state": "in_progress",

@@ -1,7 +1,7 @@
 import React from "react"
 import { ThemeTokens } from "../theme/themeTokens"
 import { PromptSuggestion } from "../api/client"
-import AiAvatar from "./avatars/AiAvatar"
+import { AiAvatar } from "./avatars/AiAvatar"
 
 /* ── Props ── */
 interface WelcomeScreenProps {
