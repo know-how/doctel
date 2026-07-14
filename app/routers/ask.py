@@ -86,6 +86,8 @@ async def _stream_cloud_answer(
                 if isinstance(chunk, str):
                     yield {"type": "content", "content": chunk}
                 elif isinstance(chunk, dict):
+                    if chunk.get("type") == "reasoning":
+                        logger.info("[REASONING_EMITTED] layer=_stream_cloud_answer/zen model=%s", chosen_model)
                     yield chunk
                 else:
                     yield {"type": "content", "content": str(chunk)}
@@ -105,6 +107,8 @@ async def _stream_cloud_answer(
                 if isinstance(chunk, str):
                     yield {"type": "content", "content": chunk}
                 else:
+                    if isinstance(chunk, dict) and chunk.get("type") == "reasoning":
+                        logger.info("[REASONING_EMITTED] layer=_stream_cloud_answer/gateway model=%s", chosen_model)
                     yield chunk
         except Exception as e:
             import traceback
@@ -444,9 +448,10 @@ async def ask_global(
         answer_text = None
         fallback_source = None
         cloud_error = None
+        reasoning_text_fb = ""
         try:
             if is_cloud_provider:
-                answer_text = await asyncio.wait_for(
+                answer_text, reasoning_text_fb = await asyncio.wait_for(
                     gateway_generate(db, question, model_id=chosen_model, system=sys_prompt),
                     timeout=120.0,
                 )
@@ -454,6 +459,7 @@ async def ask_global(
                     fallback_source = "gateway"
             elif chosen_model in present:
                 answer_text = await ollama.generate(chosen_model, question, system=sys_prompt)
+                reasoning_text_fb = ""
                 if answer_text:
                     fallback_source = "ollama_direct"
         except asyncio.TimeoutError:
@@ -495,6 +501,7 @@ async def ask_global(
 
         rag = {
             "answer_text": answer_text,
+            "reasoning_text": reasoning_text_fb,
             "citations": rag.get("citations", []) if rag else [],
             "cross_references": (
                 rag.get("cross_references", []) if rag else []
@@ -557,6 +564,7 @@ async def ask_global(
         cross_references=cross_refs_list,
         used_model=rag.get("used_model", ""),
         session_id=session_uuid,
+        reasoning=reasoning_text or None,
     )
 
 
@@ -715,7 +723,10 @@ async def ask_global_stream(
                 from sqlalchemy import select as sa_sel
 
                 # Step 1: Find model in ai_models
-                model = (await db.execute(sa_sel(AIModel).where(AIModel.model_id == chosen_model))).scalar_one_or_none()
+                matches = (await db.execute(sa_sel(AIModel).where(AIModel.model_id == chosen_model))).scalars().all()
+                if len(matches) > 1:
+                    logger.warning("[DUPLICATE_MODEL] model_id=%s row_count=%d", chosen_model, len(matches))
+                model = matches[0] if matches else None
                 if not model:
                     bare = chosen_model.split("/")[-1] if "/" in chosen_model else chosen_model
                     model = (await db.execute(sa_sel(AIModel).where(AIModel.model_id.ilike(f"%{bare}%")))).scalars().first()
@@ -757,9 +768,10 @@ async def ask_global_stream(
                             full_text += event_content
                         elif event_type == "reasoning":
                             reasoning_text += event_content
-                            # Log reasoning tokens as they arrive
-                            if len(reasoning_text) < 200 or len(reasoning_text) % 500 == 0:
-                                logger.info("[REASONING] stream — received %d chars so far", len(reasoning_text))
+                            logger.info(
+                                "[REASONING_STREAMED] model=%s reasoning_len=%d",
+                                chosen_model, len(reasoning_text),
+                            )
                         data = json.dumps({
                             "type": event_type,
                             "content": event_content,
@@ -1270,6 +1282,10 @@ async def ask_document_stream(
                             full_text += event_content
                         elif event_type == "reasoning":
                             reasoning_text += event_content
+                            logger.info(
+                                "[REASONING_STREAMED] model=%s reasoning_len=%d",
+                                chosen_model, len(reasoning_text),
+                            )
                         data = json.dumps({
                             "type": event_type,
                             "content": event_content,

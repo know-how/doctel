@@ -136,8 +136,8 @@ async def chat_completion(
     model: str,
     prompt: str,
     system: Optional[str] = None,
-) -> str:
-    """POST to /chat/completions, return full response text."""
+) -> tuple[str, str]:
+    """POST to /chat/completions, return (response_text, reasoning_text)."""
     client = _get_client()
     messages: list = []
     if system:
@@ -238,9 +238,9 @@ async def chat_completion(
     print(f"[OpenAI-Adapter] RAW RESPONSE:\n{json.dumps(data, ensure_ascii=False, default=str)[:2000]}", flush=True)
 
     content = _extract_content(data)
+    reasoning_text = _extract_reasoning(data)
     if not content:
-        reasoning = _extract_reasoning(data)
-        if reasoning and system:
+        if reasoning_text and system:
             logger.info("Reasoning-only response, retrying without system prompt")
             fallback_messages = [{"role": "user", "content": prompt}]
             fallback_body = {"model": model, "messages": fallback_messages, "temperature": 0.3, "max_tokens": 2048}
@@ -248,8 +248,11 @@ async def chat_completion(
             if resp2.status_code < 400:
                 data2 = resp2.json()
                 content = _extract_content(data2)
+                # Capture reasoning from fallback response too
+                if not reasoning_text:
+                    reasoning_text = _extract_reasoning(data2)
 
-    return content
+    return content, reasoning_text or ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -406,7 +406,7 @@ async def generate(
     source_type: str = "message",
     retrieval_strategy: Optional[str] = None,
     retrieved_chunks_json: Optional[str] = None,
-) -> str:
+) -> tuple[str, str]:
     """
     Single entry point for all provider text generation.
     All parameters come from the database — no env vars, no hardcoded IDs.
@@ -448,7 +448,7 @@ async def generate(
     try:
         if adapter == "openai_compatible":
             from app.services.openai_compatible_adapter import chat_completion
-            response_text = await chat_completion(
+            response_text, reasoning_text = await chat_completion(
                 url=url,
                 api_key=provider["api_key_value"],
                 model=model_id,
@@ -463,6 +463,7 @@ async def generate(
                 prompt=prompt,
                 system=system,
             )
+            reasoning_text = ""
         elif adapter == "anthropic":
             from app.services.anthropic_adapter import chat_completion as anthropic_chat
             response_text = await anthropic_chat(
@@ -472,6 +473,7 @@ async def generate(
                 prompt=prompt,
                 system=system,
             )
+            reasoning_text = ""
         else:
             raise ProviderNotFoundError(f"Unknown adapter '{adapter}' for vendor '{provider['vendor']}'")
 
@@ -488,7 +490,7 @@ async def generate(
                 prompt=prompt,
                 system=system,
                 response_text=response_text,
-                reasoning_text="",
+                reasoning_text=reasoning_text,
                 duration_ms=duration_ms,
                 tokens_input=tokens_input,
                 tokens_output=tokens_output,
@@ -503,7 +505,7 @@ async def generate(
                 error_message=error_message,
             )
 
-        return response_text
+        return response_text, reasoning_text
 
     except ProviderError as pe:
         # Re-raise ProviderError unchanged - it has structured error info
@@ -646,6 +648,12 @@ async def generate_stream(
                 collected_content.append(chunk["content"])
             elif chunk["type"] == "reasoning":
                 collected_reasoning.append(chunk["content"])
+                total_reasoning_len = sum(len(r) for r in collected_reasoning)
+                logger.info(
+                    "[REASONING_RECEIVED] model=%s reasoning_len=%d preview=%.100s",
+                    model_id, total_reasoning_len, chunk["content"][:100],
+                )
+                logger.info("[REASONING_EMITTED] model=%s type=reasoning", model_id)
             yield chunk
     except ProviderError as pe:
         # Re-raise ProviderError unchanged - it has structured error info

@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -16,6 +17,16 @@ from app.services.embedding_service import (
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
+
+_GREETING_PATTERN = re.compile(
+    r"^(hi|hello|hey|good morning|good afternoon|good evening|"
+    r"how are you|thanks|thank you)[\s!?.]*$",
+    re.IGNORECASE,
+)
+
+def _is_greeting(text: str) -> bool:
+    """Return True if *text* is a simple greeting that should skip RAG retrieval."""
+    return bool(_GREETING_PATTERN.match(text.strip()))
 
 def _dedupe_keep_order(items: list[dict]) -> list[dict]:
     seen: set[tuple] = set()
@@ -47,6 +58,21 @@ async def get_rag_answer_scoped(
         project_ids,
         document_id,
     )
+
+    # ── Greeting detection — skip RAG entirely for simple greetings ────
+    if _is_greeting(user_query):
+        logger.info("[RAG_GREETING] greeting_detected — input=%r | skipping RAG retrieval", user_query)
+        return {
+            "answer_text": "Hello from DocTel, your ZETDC AI assistant. How can I help you today?",
+            "reasoning_text": "",
+            "mermaid_code": "",
+            "drawing_prompt": "",
+            "citations": [],
+            "cross_references": [],
+            "used_model": "greeting-detection",
+            "embedding_mismatch": False,
+            "embedding_mismatch_docs": [],
+        }
 
     if not project_ids:
         logger.warning("[RAG] project_ids is EMPTY — no projects to search in ChromaDB")
@@ -294,7 +320,7 @@ async def get_rag_answer_scoped(
         chosen, provider_type, provider_id, len(user_prompt),
     )
     try:
-        answer_text = await gateway_generate(db, user_prompt, model_id=chosen, system=system_prompt)
+        answer_text, reasoning_text = await gateway_generate(db, user_prompt, model_id=chosen, system=system_prompt)
     except (ProviderNotFoundError, ProviderNotConfiguredError):
         # Model not in DB or provider not configured — use Ollama
         if chosen.startswith("kimi"):
@@ -308,6 +334,7 @@ async def get_rag_answer_scoped(
             chosen,
         )
         answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
+        reasoning_text = ""
     except Exception as gateway_err:
         if chosen.startswith("kimi"):
             logger.warning(
@@ -320,6 +347,7 @@ async def get_rag_answer_scoped(
             chosen, gateway_err,
         )
         answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
+        reasoning_text = ""
 
     mermaid_code = ""
     drawing_prompt = ""
@@ -356,6 +384,7 @@ async def get_rag_answer_scoped(
     )
     return {
         "answer_text": answer_text,
+        "reasoning_text": reasoning_text,
         "mermaid_code": mermaid_code,
         "drawing_prompt": drawing_prompt,
         "citations": citations,
