@@ -122,6 +122,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const chevronIcon = (id: string) =>
     expandedSections.has(id) ? "▼" : "▶"
 
+  const [hoveredTooltip, setHoveredTooltip] = useState<{
+    text: string
+    rect: DOMRect
+  } | null>(null)
+
   return (
     <>
       {/* ── Mobile hamburger button ── */}
@@ -189,6 +194,60 @@ export const Sidebar: React.FC<SidebarProps> = ({
             transform: translateX(0) !important;
             width: 340px !important;
           }
+        }
+
+        /* ── Collapsed sidebar tooltip ── */
+        .docintel-tt {
+          position: fixed;
+          z-index: 99999;
+          background: ${t.colors.glass};
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          border: 1px solid ${t.colors.border};
+          border-radius: ${t.radii.md};
+          padding: 6px 12px;
+          font-size: 12px;
+          font-weight: 600;
+          color: ${t.colors.text};
+          white-space: nowrap;
+          box-shadow: ${t.shadows.lg};
+          pointer-events: none;
+          animation: docintel-tt-in 0.15s ease-out;
+        }
+        @keyframes docintel-tt-in {
+          from { opacity: 0; transform: translateY(-50%) translateX(-4px); }
+          to { opacity: 1; transform: translateY(-50%) translateX(0); }
+        }
+
+        /* ── FAB for mobile ── */
+        .docintel-fab {
+          display: none;
+          position: fixed;
+          bottom: 24px;
+          right: 24px;
+          z-index: 999;
+          width: 56px;
+          height: 56px;
+          border-radius: 50%;
+          border: 1px solid ${t.colors.border};
+          background: ${t.colors.glass};
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          color: ${t.colors.text};
+          font-size: 24px;
+          cursor: pointer;
+          box-shadow: ${t.shadows.lg};
+          align-items: center;
+          justify-content: center;
+          transition: all 0.2s ease;
+          line-height: 1;
+          padding: 0;
+        }
+        .docintel-fab:active {
+          transform: scale(0.92);
+        }
+        @media (max-width: 768px) {
+          .docintel-fab { display: flex !important; }
         }
       `}</style>
 
@@ -349,7 +408,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       onNavigate(item.path)
                     }
                   }}
-                  title={collapsed ? item.label : undefined}
+                  onMouseEnter={(e) => {
+                    if (collapsed) {
+                      const rect = (
+                        e.currentTarget as HTMLElement
+                      ).getBoundingClientRect()
+                      setHoveredTooltip({
+                        text: item.label,
+                        rect,
+                      })
+                    }
+                  }}
+                  onMouseLeave={() => setHoveredTooltip(null)}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -582,7 +652,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             onClick={toggleTheme}
-            title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+            onMouseEnter={(e) => {
+              ;(e.currentTarget as HTMLElement).style.background =
+                t.colors.surfaceHover
+              ;(e.currentTarget as HTMLElement).style.color = t.colors.text
+              if (collapsed) {
+                const rect = (
+                  e.currentTarget as HTMLElement
+                ).getBoundingClientRect()
+                setHoveredTooltip({
+                  text: isDark ? "Light mode" : "Dark mode",
+                  rect,
+                })
+              }
+            }}
+            onMouseLeave={(e) => {
+              ;(e.currentTarget as HTMLElement).style.background = "transparent"
+              ;(e.currentTarget as HTMLElement).style.color =
+                t.colors.textSecondary
+              setHoveredTooltip(null)
+            }}
             style={{
               display: "flex",
               alignItems: "center",
@@ -598,16 +687,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
               cursor: "pointer",
               width: "100%",
               transition: `all ${TRANSITION}`,
-            }}
-            onMouseEnter={(e) => {
-              ;(e.currentTarget as HTMLElement).style.background =
-                t.colors.surfaceHover
-              ;(e.currentTarget as HTMLElement).style.color = t.colors.text
-            }}
-            onMouseLeave={(e) => {
-              ;(e.currentTarget as HTMLElement).style.background = "transparent"
-              ;(e.currentTarget as HTMLElement).style.color =
-                t.colors.textSecondary
             }}
           >
             <span
@@ -656,7 +735,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 fontSize: 12,
                 flexShrink: 0,
               }}
-              title={displayName || "User"}
+              onMouseEnter={(e) => {
+                if (collapsed) {
+                  const rect = (
+                    e.currentTarget as HTMLElement
+                  ).getBoundingClientRect()
+                  setHoveredTooltip({
+                    text: displayName || "User",
+                    rect,
+                  })
+                }
+              }}
+              onMouseLeave={() => setHoveredTooltip(null)}
             >
               {avatarLetter}
             </div>
@@ -695,7 +785,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             onClick={onLogout}
-            title="Logout"
+            onMouseEnter={(e) => {
+              ;(e.currentTarget as HTMLElement).style.background =
+                `${t.colors.error}1F`
+              ;(e.currentTarget as HTMLElement).style.color = t.colors.error
+              ;(e.currentTarget as HTMLElement).style.borderColor =
+                `${t.colors.error}60`
+              if (collapsed) {
+                const rect = (
+                  e.currentTarget as HTMLElement
+                ).getBoundingClientRect()
+                setHoveredTooltip({
+                  text: "Logout",
+                  rect,
+                })
+              }
+            }}
+            onMouseLeave={(e) => {
+              ;(e.currentTarget as HTMLElement).style.background =
+                `${t.colors.error}0D`
+              ;(e.currentTarget as HTMLElement).style.color =
+                `${t.colors.error}CC`
+              ;(e.currentTarget as HTMLElement).style.borderColor =
+                `${t.colors.error}30`
+              setHoveredTooltip(null)
+            }}
             style={{
               display: "flex",
               alignItems: "center",
@@ -711,21 +825,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
               cursor: "pointer",
               width: "100%",
               transition: `all ${TRANSITION}`,
-            }}
-            onMouseEnter={(e) => {
-              ;(e.currentTarget as HTMLElement).style.background =
-                `${t.colors.error}1F`
-              ;(e.currentTarget as HTMLElement).style.color = t.colors.error
-              ;(e.currentTarget as HTMLElement).style.borderColor =
-                `${t.colors.error}60`
-            }}
-            onMouseLeave={(e) => {
-              ;(e.currentTarget as HTMLElement).style.background =
-                `${t.colors.error}0D`
-              ;(e.currentTarget as HTMLElement).style.color =
-                `${t.colors.error}CC`
-              ;(e.currentTarget as HTMLElement).style.borderColor =
-                `${t.colors.error}30`
             }}
           >
             <span
@@ -743,6 +842,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       )}
     </aside>
+
+      {/* ── Tooltip for collapsed mode ── */}
+      {hoveredTooltip && (
+        <div
+          className="docintel-tt"
+          style={{
+            left: hoveredTooltip.rect.right + 12,
+            top: hoveredTooltip.rect.top + hoveredTooltip.rect.height / 2,
+          }}
+        >
+          {hoveredTooltip.text}
+        </div>
+      )}
+
+      {/* ── FAB for mobile ── */}
+      <button
+        className="docintel-fab"
+        onClick={onToggleMobileMenu}
+        aria-label="Open menu"
+      >
+        ☰
+      </button>
     </>
   )
 }

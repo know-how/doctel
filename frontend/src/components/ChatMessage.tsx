@@ -1,6 +1,8 @@
 import React from "react"
 import { getTokens, ThemeTokens } from "../theme/themeTokens"
 import SourceCitationCard from "./SourceCitationCard"
+import { AiAvatar } from "./avatars/AiAvatar"
+import type { AvatarState } from "./avatars/avatarStates"
 
 /* ── Shared types (mirrored from NewChatPage.tsx) ── */
 export interface Citation {
@@ -76,6 +78,16 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
   const isError = msg.uiStatus === "error"
   const showAvatar = !prevMsg || prevMsg.role !== msg.role
 
+  const mapUiStatusToAvatarState = (status: Message["uiStatus"]): AvatarState => {
+    switch (status) {
+      case "waiting": return "thinking"
+      case "streaming": return "speaking"
+      case "done": return "idle"
+      case "error": return "error"
+      default: return "idle"
+    }
+  }
+
   return (
     <div style={{ marginBottom: showAvatar ? 28 : 8 }}>
       {/* Date separator for long gaps */}
@@ -104,19 +116,16 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
         {/* Avatar */}
         {showAvatar ? (
           <div style={{
-            width: 38, height: 38, borderRadius: "50%", flexShrink: 0,
+            width: 38, height: 38, flexShrink: 0,
             display: "flex", alignItems: "center", justifyContent: "center",
-            background: isUser
-              ? `linear-gradient(135deg, ${t.colors.primary}, ${t.colors.primaryHover})`
-              : `linear-gradient(135deg, ${t.colors.secondary}20, ${t.colors.primary}25)`,
-            border: isUser
-              ? `2px solid ${t.colors.primary}60`
-              : `2px solid ${t.colors.border}`,
-            boxShadow: isUser
-              ? `0 2px 12px ${t.colors.primary}30`
-              : isWaiting ? `0 0 20px ${t.colors.primary}40` : "none",
-            marginTop: 2,
-            transition: "box-shadow 0.3s",
+            ...(isUser ? {
+              borderRadius: "50%",
+              background: `linear-gradient(135deg, ${t.colors.primary}, ${t.colors.primaryHover})`,
+              border: `2px solid ${t.colors.primary}60`,
+              boxShadow: `0 2px 12px ${t.colors.primary}30`,
+            } : {
+              marginTop: 2,
+            }),
           }}>
             {isUser ? (
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -124,12 +133,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                 <circle cx="12" cy="7" r="4" />
               </svg>
             ) : (
-              <svg width="17" height="17" viewBox="0 0 48 48" fill="none">
-                <rect x="14" y="8" width="20" height="24" rx="6" stroke={t.colors.primary} strokeWidth="2.5" fill="none"/>
-                <circle cx="24" cy="20" r="3" fill={t.colors.primary} opacity="0.7"/>
-                <line x1="24" y1="25" x2="24" y2="30" stroke={t.colors.primary} strokeWidth="2" strokeLinecap="round"/>
-                <line x1="19" y1="30" x2="29" y2="30" stroke={t.colors.primary} strokeWidth="2" strokeLinecap="round" opacity="0.5"/>
-              </svg>
+              <AiAvatar state={mapUiStatusToAvatarState(msg.uiStatus)} size={38} />
             )}
           </div>
         ) : (
