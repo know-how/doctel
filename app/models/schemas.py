@@ -134,6 +134,15 @@ class Citation(BaseModel):
     full_text_available: bool | None = None
     distance: float | None = None  # Relevance score (lower is better)
 
+    # ── Enterprise permission & action URLs ────────────────────────────────
+    can_view: bool = False
+    can_download: bool = False
+    open_url: str | None = None
+    download_url: str | None = None
+    preview_url: str | None = None
+    source_type: str | None = None
+    project_id: str | None = None
+
 
 class CrossReference(BaseModel):
     """Cross reference to a document"""

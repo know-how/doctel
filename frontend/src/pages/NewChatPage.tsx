@@ -1,33 +1,11 @@
 import React, { useState, useEffect, useRef } from "react"
 import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
-import { chatGlobally, chatGloballyStream, getAvailableModels, createChatSession, getChatMessages, setChatSessionModel, transcribeAudio, askVision, uploadDocument, uploadDocumentWithProgress, getRandomPromptSuggestions, PromptSuggestion } from "../api/client"
+import { chatGlobally, chatGloballyStream, createChatSession, getChatMessages, setChatSessionModel, transcribeAudio, askVision, uploadDocumentWithProgress, getRandomPromptSuggestions, PromptSuggestion } from "../api/client"
 import { useModel } from "../context/ModelContext"
-import { ModelSelector } from "../components/ModelSelector"
+import { ChatHeader, WelcomeScreen, ChatMessage, ChatInput } from "../components"
+import type { Message, Citation, AttachmentMeta } from "../components/ChatMessage"
 import { isCloudModel } from "../utils/modelUtils"
-
-interface Citation {
-  filename?: string
-  chunk_index?: number
-  text?: string
-}
-
-interface AttachmentMeta {
-  name: string
-  type: "image" | "document" | "audio"
-  dataUrl?: string
-}
-
-interface Message {
-  id: number | string
-  role: "user" | "assistant" | "system"
-  content: string
-  reasoning?: string
-  uiStatus: "waiting" | "streaming" | "done" | "error"
-  citations: Citation[]
-  createdAt?: string
-  attachment?: AttachmentMeta | null
-}
 
 const generateId = () => `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
@@ -844,27 +822,42 @@ export const NewChatPage: React.FC = () => {
                           <div>{renderContent(msg.content)}</div>
                         ) : null}
 
-                        {/* Citations */}
+                        {/* Citations — premium source cards */}
                         {msg.citations && msg.citations.length > 0 && (
                           <div style={{
-                            marginTop: 12, paddingTop: 10,
+                            marginTop: 14, paddingTop: 12,
                             borderTop: `1px solid ${t.colors.border}`,
-                            display: "flex", flexWrap: "wrap", gap: 6,
-                            alignItems: "center",
                           }}>
-                            <span style={{ fontSize: 10.5, color: t.colors.textMuted, fontWeight: 600 }}>
-                              Sources
+                            <span style={{
+                              fontSize: 10.5, color: t.colors.textMuted,
+                              fontWeight: 600, letterSpacing: "0.04em",
+                              textTransform: "uppercase", display: "block",
+                              marginBottom: 10,
+                            }}>
+                              Sources ({msg.citations.length})
                             </span>
-                            {msg.citations.map((c, ci) => (
-                              <span key={ci} style={{
-                                fontSize: 10.5, fontWeight: 500,
-                                background: isUser ? "rgba(255,255,255,0.15)" : t.colors.surfaceActive,
-                                color: isUser ? "rgba(255,255,255,0.85)" : t.colors.textSecondary,
-                                borderRadius: 6, padding: "3px 8px",
-                              }}>
-                                {c.filename || `Chunk ${(c.chunk_index ?? ci) + 1}`}
-                              </span>
-                            ))}
+                            <div style={{
+                              display: "flex", flexDirection: "column",
+                              gap: 8,
+                            }}>
+                              {msg.citations.map((c, ci) => (
+                                <SourceCitationCard
+                                  key={ci}
+                                  filename={c.filename}
+                                  chunk_index={c.chunk_index}
+                                  text={c.text}
+                                  full_text_available={c.full_text_available}
+                                  distance={c.distance}
+                                  can_view={c.can_view}
+                                  can_download={c.can_download}
+                                  open_url={c.open_url}
+                                  download_url={c.download_url}
+                                  preview_url={c.preview_url}
+                                  source_type={c.source_type}
+                                  project_id={c.project_id}
+                                />
+                              ))}
+                            </div>
                           </div>
                         )}
 

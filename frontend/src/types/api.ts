@@ -71,9 +71,25 @@ export interface ChatRequest {
   force_diagram?: boolean
 }
 
+export interface Citation {
+  filename: string
+  chunk_index: number
+  text: string
+  full_text_available?: boolean
+  distance?: number
+  /** Enterprise permission / action fields – present on enriched responses */
+  can_view?: boolean
+  can_download?: boolean
+  open_url?: string
+  download_url?: string
+  preview_url?: string
+  source_type?: string
+  project_id?: string | number
+}
+
 export interface ChatAskOkResponse {
   answer: string
-  citations: { filename: string; chunk_index: number; text: string; full_text_available?: boolean; distance?: number }[]
+  citations: Citation[]
   cross_references?: { filename: string; reason: string }[]
   used_model: string
   session_id: string
@@ -101,7 +117,7 @@ export interface ChatMessage {
   content: string
   reasoning?: string
   status: "pending" | "done" | "failed"
-  citations: { filename: string; chunk_index: number; text: string; full_text_available?: boolean; distance?: number }[]
+  citations: Citation[]
   created_at: string
 }
 

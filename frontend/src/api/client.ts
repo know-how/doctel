@@ -576,7 +576,7 @@ export async function chartsBuild(payload: {
 }
 
 export async function downloadDocumentFile(documentId: string): Promise<Blob> {
-  const res = await fetch(`${BASE_URL}/documents/${documentId}/file`, {
+  const res = await fetch(`${BASE_URL}/api/documents/${encodeURIComponent(documentId)}/download`, {
     headers: buildAuthHeaders(),
   })
   return handleBlobResponse(res)

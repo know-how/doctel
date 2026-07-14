@@ -35,6 +35,14 @@ from app.routers.deps import (
     enqueue_ingest,
 )
 
+from app.services.document_permission_service import (
+    assert_can_view,
+    assert_can_download,
+    assert_can_preview,
+)
+from app.services.audit_service import log_interaction
+from app.db.models import Chunk
+
 logger = __import__("logging").getLogger(__name__)
 
 router = APIRouter(tags=["documents"])
@@ -49,7 +57,11 @@ async def _download_document_file(document_id: str, user: User, db: AsyncSession
     doc = result.scalar_one_or_none()
     if not doc:
         return JSONResponse(status_code=404, content={"error": "Document not found"})
-    await _assert_document_workspace_access(doc, user, db)
+    await assert_can_download(doc, user, db)
+    await log_interaction(
+        db, user.id, "download_document", "document", f"doc_{doc.id}",
+        {"filename": doc.filename, "project_id": doc.project_id},
+    )
     path = FPath(doc.path)
     if not path.exists():
         return JSONResponse(status_code=404, content={"error": "file_missing"})
@@ -124,6 +136,70 @@ async def list_documents(
 @router.get("/api/documents/{document_id}/download")
 async def download_document_file_api(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     return await _download_document_file(document_id=document_id, user=user, db=db)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/documents/{document_id}/preview/{chunk_index} — preview a chunk
+# ---------------------------------------------------------------------------
+@router.get("/api/documents/{document_id}/preview/{chunk_index}")
+async def preview_chunk(
+    document_id: str,
+    chunk_index: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    doc_int = _parse_document_id(document_id)
+    doc_res = await db.execute(select(Document).where(Document.id == doc_int))
+    doc = doc_res.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    await assert_can_preview(doc, user, db)
+    result = await db.execute(
+        select(Chunk).where(Chunk.document_id == doc_int, Chunk.chunk_index == chunk_index)
+    )
+    chunk = result.scalar_one_or_none()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    await log_interaction(
+        db, user.id, "preview_document", "document", f"doc_{doc.id}",
+        {"filename": doc.filename, "chunk_index": chunk_index, "project_id": doc.project_id},
+    )
+    return {
+        "chunk_index": chunk.chunk_index,
+        "text": chunk.text,
+        "document_id": document_id,
+        "filename": doc.filename,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/documents/{document_id}/viewer — view document inline in browser
+# ---------------------------------------------------------------------------
+@router.get("/api/documents/{document_id}/viewer")
+async def view_document_inline(
+    document_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    doc_int = _parse_document_id(document_id)
+    doc_res = await db.execute(select(Document).where(Document.id == doc_int))
+    doc = doc_res.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    await assert_can_view(doc, user, db)
+    await log_interaction(
+        db, user.id, "view_document", "document", f"doc_{doc.id}",
+        {"filename": doc.filename, "project_id": doc.project_id},
+    )
+    path = FPath(doc.path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="file_missing")
+    return FileResponse(
+        str(path),
+        media_type=doc.mime_type or "application/octet-stream",
+        filename=doc.filename,
+        headers={"Content-Disposition": f'inline; filename="{doc.filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

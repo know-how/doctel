@@ -58,6 +58,8 @@ from app.routers.deps import (
     logger,
 )
 
+from app.services.document_permission_service import enrich_citations
+
 router = APIRouter(tags=["ask"])
 
 
@@ -544,6 +546,9 @@ async def ask_global(
     else:
         # Empty or already processed
         cross_refs_list = cross_refs
+    # Enrich citations with permission info and action URLs
+    if rag.get("citations"):
+        rag["citations"] = await enrich_citations(rag["citations"], user, db)
     # Map citations to response format with all new fields
     citation_objects = []
     for c in rag.get("citations", []):
@@ -556,6 +561,13 @@ async def ask_global(
                 snippet=c.get("text", ""),  # Backward compatibility
                 full_text_available=c.get("full_text_available"),
                 distance=c.get("distance"),
+                can_view=c.get("can_view"),
+                can_download=c.get("can_download"),
+                open_url=c.get("open_url"),
+                download_url=c.get("download_url"),
+                preview_url=c.get("preview_url"),
+                source_type=c.get("source_type"),
+                project_id=c.get("project_id"),
             ))
     
     return AskResponse(
@@ -681,6 +693,9 @@ async def ask_global_stream(
                     )
 
             citations_list = rag_result.get("citations", [])
+            # Enrich citations with permission info and action URLs
+            if citations_list:
+                citations_list = await enrich_citations(citations_list, user, db)
             rag_context = "\n\n".join(
                 f"Source: {c.get('filename', 'Unknown')}, Chunk {c.get('chunk_index', 0)}\nContent: {(c.get('text', '') or '')[:1500]}"
                 for c in citations_list
@@ -1083,6 +1098,9 @@ async def ask_document(
             "cross_references": [],
             "used_model": result.get("used_model", chosen_model),
         }
+        # Enrich citations with permission info and action URLs (BEFORE DB save)
+        if rag.get("citations"):
+            rag["citations"] = await enrich_citations(rag["citations"], user, db)
         user_msg.status = "done"
         db.add(user_msg)
         assistant = DbMessage(
@@ -1119,6 +1137,13 @@ async def ask_document(
                     snippet=c.get("text", ""),  # Backward compatibility
                     full_text_available=c.get("full_text_available"),
                     distance=c.get("distance"),
+                    can_view=c.get("can_view"),
+                    can_download=c.get("can_download"),
+                    open_url=c.get("open_url"),
+                    download_url=c.get("download_url"),
+                    preview_url=c.get("preview_url"),
+                    source_type=c.get("source_type"),
+                    project_id=c.get("project_id"),
                 ))
         
         return AskResponse(
