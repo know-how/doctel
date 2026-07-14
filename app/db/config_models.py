@@ -84,9 +84,9 @@ class AIProvider(Base):
     name = Column(String(255), nullable=False)
     vendor = Column(String(128), default="")
     base_url = Column(String(512), default="")
-    api_key_env = Column(String(128), default="")      # env var name for key
     api_key_value = Column(String(1024), default="")    # stored key (encrypted at rest in future)
     status = Column(String(50), default="disconnected")  # connected | disconnected | error
+    visible_to_users = Column(Boolean, default=True, nullable=False)
     is_connected = Column(Boolean, default=False)
     last_tested_at = Column(DateTime(timezone=True), nullable=True)
     description = Column(Text, default="")
@@ -114,8 +114,8 @@ class AIProvider(Base):
             "name": self.name,
             "vendor": self.vendor,
             "base_url": self.base_url,
-            "api_key_env": self.api_key_env,
             "status": self.status,
+            "visibleToUsers": self.visible_to_users,
             "isConnected": self.is_connected,
             "lastTestedAt": self.last_tested_at.isoformat() if self.last_tested_at else None,
             "description": self.description,
@@ -170,6 +170,7 @@ class AIModel(Base):
 
     # Activation & state
     state = Column(String(50), default="available")  # available | installed | active | retired | ...
+    visible_to_users = Column(Boolean, default=True, nullable=False)
     is_default = Column(Boolean, default=False)
 
     # Endpoint routing (for flexible provider architecture)
@@ -210,6 +211,7 @@ class AIModel(Base):
             "supportsAudio": self.supports_audio,
             "supportsComparison": self.supports_comparison,
             "state": self.state,
+            "visibleToUsers": self.visible_to_users,
             "isDefault": self.is_default,
             "endpointType": self.endpoint_type,
             "pricingTier": self.pricing_tier,
@@ -512,12 +514,12 @@ class PromptSuggestion(Base):
         return {
             "id": self.id,
             "title": self.title,
-            "promptText": self.prompt_text,
+            "prompt_text": self.prompt_text,
             "category": self.category,
             "enabled": self.enabled,
-            "displayOrder": self.display_order,
+            "display_order": self.display_order,
             "icon": self.icon,
-            "requiresCapability": self.requires_capability,
-            "createdAt": self.created_at.isoformat() if self.created_at else None,
-            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+            "requires_capability": self.requires_capability,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

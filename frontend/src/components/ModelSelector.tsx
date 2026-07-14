@@ -274,7 +274,7 @@ export function ModelSelector({
           name: "Local (Ollama)",
           vendor: "Ollama",
           base_url: "http://localhost:11434",
-          api_key_env: "",
+          api_key_value: "",
           status: "active",
           description: "Locally hosted models",
           icon: "cpu",

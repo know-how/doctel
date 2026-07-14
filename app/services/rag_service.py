@@ -9,6 +9,11 @@ from app.db.models import Message, Session, Chunk, Document
 from app.utils.ollama_client import ollama
 from app.utils.chroma_client import chroma
 from app.services.model_router import select_text_model
+from app.services.embedding_service import (
+    generate_embedding,
+    resolve_embedding_model,
+)
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +38,29 @@ async def get_rag_answer_scoped(
     force_diagram: bool = False,
     source_types: Optional[List[str]] = None,
 ):
-    query_embedding = await ollama.embed(settings.embed_model, user_query)
+    logger.info("[RAG] get_rag_answer_scoped called — project_ids=%s, document_id=%s, user_query_prefix=%r, source_types=%s",
+                project_ids, document_id, user_query[:80] if user_query else "", source_types)
+
+    logger.info(
+        "[RAG_TRACE] retrieval_start — question=%r | projects=%s | doc_filter=%s",
+        user_query[:120] if user_query else "",
+        project_ids,
+        document_id,
+    )
+
+    if not project_ids:
+        logger.warning("[RAG] project_ids is EMPTY — no projects to search in ChromaDB")
+    else:
+        logger.info("[RAG] project_ids count=%d, projects=%s", len(project_ids), project_ids)
+
+    query_embedding = await generate_embedding(db, user_query)
+    logger.info("[RAG] Embedding generated — vector length=%d", len(query_embedding) if query_embedding else 0)
+
+    # ── Resolve current embedding model for mismatch detection ────────────
+    current_embedding = await resolve_embedding_model(db)
+    current_provider = current_embedding["provider_name"] if current_embedding else None
+    current_model = current_embedding["model_id"] if current_embedding else None
+    logger.info("[RAG] Current embedding model — provider=%s, model=%s", current_provider, current_model)
 
     results_rows: list[dict] = []
     for pid in [int(p) for p in project_ids if p is not None]:
@@ -44,14 +71,52 @@ async def get_rag_answer_scoped(
             if source_types:
                 where["source_type"] = {"$in": source_types}
             where_clause = where if where else None
+            logger.info("[RAG] ChromaDB query — project_id=%s, top_k=%s, where=%s", pid, settings.top_k, where_clause)
             res = chroma.query(str(pid), query_embedding, top_k=settings.top_k, where=where_clause)
-        except Exception:
+            logger.info("[RAG] ChromaDB result for project %s — res type=%s, keys=%s", pid, type(res).__name__, list(res.keys()) if isinstance(res, dict) else "N/A")
+        except Exception as exc:
+            logger.error("[RAG] ChromaDB query EXCEPTION for project %s: %s", pid, exc, exc_info=True)
             continue
         docs = (res.get("documents") or [[]])[0] if isinstance(res, dict) else []
         metas = (res.get("metadatas") or [[]])[0] if isinstance(res, dict) else []
         dists = (res.get("distances") or [[]])[0] if isinstance(res, dict) else []
+        # ── Raw structure diagnostics ───────────────────────────────────
+        logger.info(
+            "[RAG_RAW] project=%s | docs=%d | metas=%d | dists=%d | "
+            "meta_types=%s",
+            pid,
+            len(docs or []),
+            len(metas or []),
+            len(dists or []),
+            list(dict.fromkeys([type(m).__name__ for m in (metas or []) if m is not None]))[:5],
+        )
+        logger.info("[RAG] Project %s — documents returned=%d, metadatas=%d, distances=%d", pid, len(docs or []), len(metas or []), len(dists or []))
+        null_meta_count = 0
         for i, txt in enumerate(docs or []):
-            meta = metas[i] if i < len(metas) else {}
+            raw_meta = metas[i] if i < len(metas) else None
+            # ── SAFETY: handle None metadata entries from ChromaDB ────
+            if raw_meta is None:
+                null_meta_count += 1
+                if null_meta_count <= 3:
+                    logger.warning(
+                        "[RAG_META] index=%d meta=None — skipping chunk, "
+                        "text_preview=%r",
+                        i,
+                        (txt or "")[:80].replace("\n", " "),
+                    )
+                meta = {}
+            elif not isinstance(raw_meta, dict):
+                null_meta_count += 1
+                if null_meta_count <= 3:
+                    logger.warning(
+                        "[RAG_META] index=%d meta is not dict — type=%s value=%r",
+                        i,
+                        type(raw_meta).__name__,
+                        raw_meta,
+                    )
+                meta = {}
+            else:
+                meta = raw_meta
             dist = dists[i] if i < len(dists) else None
             results_rows.append(
                 {
@@ -64,38 +129,110 @@ async def get_rag_answer_scoped(
                     "distance": float(dist) if dist is not None else 1.0,
                 }
             )
+        if null_meta_count > 0:
+            logger.warning(
+                "[RAG_RETRIEVAL] skipped_null_metadata=%d out of %d docs in project %s",
+                null_meta_count,
+                len(docs or []),
+                pid,
+            )
 
     results_rows.sort(key=lambda r: r.get("distance", 1.0))
     results_rows = results_rows[: max(6, int(settings.top_k or 6))]
+    logger.info("[RAG] results_rows count=%d (after dedup/limit)", len(results_rows))
+    if results_rows:
+        logger.info("[RAG] First result — project_id=%s, document_id=%s, filename=%s, chunk_index=%s, distance=%s",
+                    results_rows[0].get("project_id"), results_rows[0].get("document_id"),
+                    results_rows[0].get("filename"), results_rows[0].get("chunk_index"),
+                    results_rows[0].get("distance"))
+        # ── Detailed per-result log ──────────────────────────────────────
+        for idx, row in enumerate(results_rows[:10]):
+            logger.info(
+                "[RAG_RETRIEVAL] chunk %d — project=%s | doc_id=%s | filename=%s | "
+                "chunk=%s | distance=%.4f | text_len=%d | text_preview=%r",
+                idx,
+                row.get("project_id"),
+                row.get("document_id"),
+                row.get("filename"),
+                row.get("chunk_index"),
+                row.get("distance", 1.0),
+                len(row.get("text", "") or ""),
+                (row.get("text", "") or "")[:80].replace("\n", " "),
+            )
+    else:
+        logger.warning("[RAG] No retrieval results found — ChromaDB returned empty for all project_ids")
+
+    # ── Embedding mismatch detection ──────────────────────────────────────
+    # Compare each document's stored embedding model/provider against the
+    # currently resolved TaskMapping.  A mismatch means the document was
+    # embedded with a different model and may need re-embedding.
+    mismatch_docs: list[dict] = []
+    if current_provider and current_model:
+        seen_doc_ids: set[int] = set()
+        for r in results_rows:
+            did = r.get("document_id")
+            if did is not None:
+                seen_doc_ids.add(int(did))
+        for did in seen_doc_ids:
+            result = await db.execute(select(Document).where(Document.id == did))
+            doc = result.scalar_one_or_none()
+            if doc and (
+                doc.embedding_provider != current_provider
+                or doc.embedding_model != current_model
+            ):
+                mismatch_docs.append({
+                    "document_id": did,
+                    "filename": doc.filename,
+                    "stored_provider": doc.embedding_provider,
+                    "stored_model": doc.embedding_model,
+                    "current_provider": current_provider,
+                    "current_model": current_model,
+                })
 
     citations: list[dict] = []
     context_chunks: list[str] = []
     for r in results_rows:
+        # Store full chunk text in citation (up to 1000 chars for traceability)
+        full_text = r["text"] or ""
         citation: dict = {
             "filename": r["filename"],
             "chunk_index": int(r["chunk_index"] or 0),
-            "text": (r["text"][:200] + "...") if r["text"] else "",
+            "text": full_text[:1000] + ("..." if len(full_text) > 1000 else ""),
+            "full_text_available": len(full_text) <= 1000,
             "project_id": int(r["project_id"]),
             "document_id": int(r["document_id"]) if r.get("document_id") is not None else None,
             "source_type": r.get("source_type", "document"),
+            "distance": r.get("distance", 1.0),
         }
         citations.append(citation)
-        source_label = f"Source: {r['filename']}, Chunk {r['chunk_index']}"
+        # Better formatted context for LLM with clear source attribution
+        source_label = f"📖 SOURCE: {r['filename']} (Chunk {r['chunk_index']})"
         if r.get("source_type") in ("audio", "video"):
             source_label += f" [Type: {r['source_type']}]"
         context_chunks.append(
-            f"{source_label}\nContent: {r['text']}"
+            f"{source_label}\n{'─' * 50}\n{r['text']}\n{'─' * 50}"
         )
 
     citations = _dedupe_keep_order(citations)
     context = "\n\n".join(context_chunks)
+    logger.info("[RAG] Context built — citations count=%d, context length=%d chars, used_files=%s",
+                len(citations), len(context), [c.get("filename") for c in citations if c.get("filename")])
+    if not context or len(context.strip()) == 0:
+        logger.warning("[RAG] No retrieval results found — context is EMPTY after building from %d results_rows", len(results_rows))
+    else:
+        logger.info("[RAG] Context preview (first 300 chars): %s", context[:300])
     used_files = list(dict.fromkeys([c.get("filename") for c in citations if c.get("filename")]))
     cross_refs = [{"filename": f, "reason": "Used as retrieval context"} for f in used_files[1:]]
 
     system_prompt = (
         "You are DocTel (ZETDC), a local, privacy-first analyst. "
         "Use ONLY the provided context to answer. "
-        "Always include short citations like [Doc: <filename>, chunk <n>]. "
+        "CITATION RULES - YOU MUST FOLLOW THESE:\n"
+        "1. When citing information, ALWAYS include the exact quoted text from the source in quotation marks.\n"
+        "2. Format citations like: [Source: filename, Chunk N] immediately after the quote.\n"
+        "3. Example: According to the manual, 'Application for reconnection must be submitted through the Debt Query module' [Source: Dunning Manual.pdf, Chunk 13].\n"
+        "4. Never invent or paraphrase quotes - only use exact text from the provided sources.\n"
+        "5. Multiple citations should each have their own quoted text.\n\n"
         "Use ZETDC terminology (transmission, distribution, substations, feeders, SCADA, HSE, ZERA compliance). "
         "SUMMARY WRITING RULES: When writing summaries, NEVER use asterisks or markdown bold formatting. "
         "NEVER use numbered or bulleted lists. Write summaries as flowing narrative paragraphs in professional prose. "
@@ -117,20 +254,60 @@ async def get_rag_answer_scoped(
     user_prompt = f"Question: {user_query}\n\nContext:\n{context}"
     chosen = model_name or select_text_model("rag")
 
-    # Route to cloud APIs if that model is selected
-    from app.services.gemini_service import GEMINI_MODEL_ID, generate as gemini_generate
-    from app.services.deepseek_service import DEEPSEEK_MODEL_ID, generate as deepseek_generate
-    from app.services.opencode_zen_service import generate as zen_generate
-    from app.services.huggingface_service import generate as hf_generate
-    if chosen == DEEPSEEK_MODEL_ID:
-        answer_text = await deepseek_generate(user_prompt, system=system_prompt)
-    elif chosen == GEMINI_MODEL_ID:
-        answer_text = await gemini_generate(user_prompt, system=system_prompt)
-    elif chosen.startswith("zen/") or chosen.startswith("go/"):
-        answer_text = await zen_generate(user_prompt, model=chosen, system=system_prompt)
-    elif chosen.startswith("huggingface/"):
-        answer_text = await hf_generate(user_prompt, model=chosen, system=system_prompt)
-    else:
+    logger.info(
+        "[RAG_CONTEXT] built — chunk_count=%d | citation_count=%d | context_len=%d | "
+        "user_prompt_len=%d | model=%s",
+        len(results_rows),
+        len(citations),
+        len(context),
+        len(user_prompt),
+        chosen,
+    )
+    logger.info("[RAG_PROMPT] system_prompt=%d chars | user_prompt_first_300=%r",
+                len(system_prompt), user_prompt[:300])
+
+    # ── Resolve the actual provider for this model from the database ──────
+    provider_type = "ollama"
+    provider_id = "unknown"
+    try:
+        from app.services.model_resolver_service import resolve_model
+        resolved = await resolve_model(db, requested_model=chosen, task_type="rag")
+        provider_type = resolved.get("provider_type", "ollama")
+        provider_id = resolved.get("provider_id", "unknown")
+        logger.info(
+            "[RAG_MODEL] model=%s | provider_type=%s | provider_id=%s | source=%s",
+            chosen, provider_type, provider_id, resolved.get("source", "?"),
+        )
+    except Exception as resolve_err:
+        logger.warning("[RAG_MODEL] resolve_model failed for %s: %s", chosen, resolve_err)
+
+    # ── Route generation: ALWAYS try the provider gateway first ──────────
+    # The gateway does a DB lookup: model → ai_models → provider_id → ai_providers.
+    # If the model is NOT in the DB (e.g., a new Ollama model), the gateway
+    # raises ProviderNotFoundError and we fall back to the Ollama client.
+    # This ensures kimi-k2.5, deepseek, gemini, etc. always hit the right
+    # cloud endpoint even when the model resolver incorrectly reports
+    # provider_type=ollama (offline_only mode, missing AIModel record, etc.).
+    from app.services.provider_gateway_service import generate as gateway_generate
+    from app.services.provider_gateway_service import ProviderNotFoundError, ProviderNotConfiguredError
+    logger.info(
+        "[RAG_GENERATE] attempting gateway for model=%s | resolved_type=%s | prompt_len=%d",
+        chosen, provider_type, len(user_prompt),
+    )
+    try:
+        answer_text = await gateway_generate(db, user_prompt, model_id=chosen, system=system_prompt)
+    except (ProviderNotFoundError, ProviderNotConfiguredError):
+        # Model not in DB or provider not configured — use Ollama
+        logger.info(
+            "[RAG_GENERATE] model=%s not in DB — falling back to Ollama (localhost:11434)",
+            chosen,
+        )
+        answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
+    except Exception as gateway_err:
+        logger.error(
+            "[RAG_GENERATE] Gateway error for %s (%s) — falling back to Ollama",
+            chosen, gateway_err,
+        )
         answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
 
     mermaid_code = ""
@@ -148,6 +325,24 @@ async def get_rag_answer_scoped(
         except Exception:
             pass
 
+    logger.info("[RAG] Returning answer — model=%s, answer_length=%d, citations=%d, embedding_mismatch=%s",
+                chosen, len(answer_text) if answer_text else 0, len(citations), len(mismatch_docs) > 0)
+    # ── Permanent diagnostic summary ───────────────────────────────────────
+    # Logged on every RAG call so operators can trace exactly what happened.
+    logger.info(
+        "[RAG_DIAG] question=%r | project_ids=%s | chunks_retrieved=%d | "
+        "document_ids=%s | filenames=%s | citation_count=%d | "
+        "context_length=%d | answer_length=%d | model=%s",
+        user_query[:120] if user_query else "",
+        project_ids,
+        len(results_rows),
+        list(dict.fromkeys([r.get("document_id") for r in results_rows if r.get("document_id")])),
+        list(dict.fromkeys([r.get("filename") for r in results_rows if r.get("filename")])),
+        len(citations),
+        len(context),
+        len(answer_text) if answer_text else 0,
+        chosen,
+    )
     return {
         "answer_text": answer_text,
         "mermaid_code": mermaid_code,
@@ -155,6 +350,8 @@ async def get_rag_answer_scoped(
         "citations": citations,
         "cross_references": cross_refs,
         "used_model": chosen,
+        "embedding_mismatch": len(mismatch_docs) > 0,
+        "embedding_mismatch_docs": mismatch_docs,
     }
 
 async def get_rag_answer(

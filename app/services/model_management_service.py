@@ -116,7 +116,7 @@ PROVIDER_TEMPLATES = {
     "gemini": {
         "name": "Google Gemini",
         "vendor": "Google",
-        "provider_type": "openai",
+        "provider_type": "gemini",
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
         "models_endpoint": "",
         "chat_endpoint": "",
@@ -230,8 +230,8 @@ def _provider_to_dict(provider: AIProvider, include_models: bool = True,
         "name": provider.name,
         "vendor": provider.vendor,
         "base_url": provider.base_url,
-        "api_key_env": provider.api_key_env,
         "status": provider.status,
+        "visibleToUsers": getattr(provider, "visible_to_users", True),
         "description": provider.description,
         "icon": provider.icon,
         "order": provider.sort_order,
@@ -270,6 +270,7 @@ def _model_to_dict(model: AIModel) -> dict:
         "supportsAudio": model.supports_audio,
         "supportsComparison": model.supports_comparison,
         "state": model.state,
+        "visibleToUsers": getattr(model, "visible_to_users", True),
         "endpointType": model.endpoint_type,
         "isDefault": model.is_default,
         "pricingTier": model.pricing_tier,
@@ -333,7 +334,7 @@ async def get_provider(db: AsyncSession, provider_id: str) -> Optional[Dict[str,
     provider = await _get_provider_orm(provider_id, db)
     if not provider:
         return None
-    return _provider_to_dict(provider, include_models=True)
+    return _provider_to_dict(provider, include_models=True, include_key=True)
 
 
 async def add_provider(
@@ -341,7 +342,7 @@ async def add_provider(
     name: str,
     vendor: str = "",
     base_url: str = "",
-    api_key_env: str = "",
+    api_key_value: str = "",
     description: str = "",
     icon: str = "generic",
     provider_type: str = "openai",
@@ -350,6 +351,8 @@ async def add_provider(
     messages_endpoint: str = "",
     embeddings_endpoint: str = "",
     health_endpoint: str = "",
+    visible_to_users: bool = True,
+    sort_order: int = 0,
 ) -> Dict[str, Any]:
     """Register a new AI provider with flexible endpoint configuration."""
     provider_id = name.lower().replace(" ", "-").replace("_", "-")
@@ -359,16 +362,17 @@ async def add_provider(
         name=name,
         vendor=vendor or name,
         base_url=base_url,
-        api_key_env=api_key_env,
+        api_key_value=api_key_value,
         description=description,
         icon=icon,
-        sort_order=0,
+        sort_order=sort_order,
         provider_type=provider_type,
         models_endpoint=models_endpoint,
         chat_endpoint=chat_endpoint,
         messages_endpoint=messages_endpoint,
         embeddings_endpoint=embeddings_endpoint,
         health_endpoint=health_endpoint,
+        visible_to_users=visible_to_users,
     )
     return _provider_to_dict(provider, include_models=True)
 
@@ -498,6 +502,7 @@ async def update_model(db: AsyncSession, provider_id: str, model_id: str,
         "allowedRoles": "allowed_roles",
         "departmentRestrictions": "department_restrictions",
         "forTasks": "for_tasks",
+        "visibleToUsers": "visible_to_users",
     }
     db_updates = {}
     for k, v in updates.items():
@@ -526,6 +531,28 @@ async def set_model_state(db: AsyncSession, provider_id: str, model_id: str,
     if not model:
         return None
     return _model_to_dict(model)
+
+
+async def set_model_visibility(db: AsyncSession, provider_id: str, model_id: str,
+                                visible_to_users: bool) -> Optional[Dict[str, Any]]:
+    """Set whether a model is visible to end users."""
+    model = await cfg.update_model(db, provider_id, model_id,
+                                    {"visible_to_users": visible_to_users})
+    if not model:
+        return None
+    return _model_to_dict(model)
+
+
+async def set_provider_visibility(db: AsyncSession, provider_id: str,
+                                   visible_to_users: bool) -> Optional[Dict[str, Any]]:
+    """Set whether a provider is visible to end users."""
+    provider = await _get_provider_orm(provider_id, db)
+    if not provider:
+        return None
+    provider.visible_to_users = visible_to_users
+    await db.commit()
+    await db.refresh(provider)
+    return _provider_to_dict(provider, include_models=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -616,7 +643,7 @@ async def select_best_model_for_task(
         model_id = mapping["modelId"]
         model_obj = await _get_model_orm(provider_id, model_id, db)
         # Model must be ACTIVE to be used (not just enabled)
-        if model_obj and model_obj.state == ModelStatus.ACTIVE:
+        if model_obj and model_obj.state in [ModelStatus.ACTIVE, ModelStatus.INSTALLED, ModelStatus.AVAILABLE]:
             # Check role/dept restrictions
             allowed = json.loads(model_obj.allowed_roles) if model_obj.allowed_roles else []
             dept_restr = json.loads(model_obj.department_restrictions) if model_obj.department_restrictions else []
@@ -637,9 +664,9 @@ async def select_best_model_for_task(
     priority_caps = rules.get("priority_capabilities", [])
     preferred_family = rules.get("preferred_family")
 
-    # Query for ACTIVE models only (status-driven, not just enabled)
+    # Query for selectable models (active, installed, available — not inactive/retired)
     query = select(AIModel).where(
-        AIModel.state == ModelStatus.ACTIVE,  # noqa: E712
+        AIModel.state.in_([ModelStatus.ACTIVE, ModelStatus.INSTALLED, ModelStatus.AVAILABLE]),
     )
 
     res = await db.execute(query)
@@ -871,6 +898,8 @@ async def test_provider_connection(
             "endpoints": {},
         }
 
+    # Only add Authorization header if api_key is provided
+    # Ollama and local providers don't require API keys
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1231,6 +1260,219 @@ async def _sync_provider_models(
     )
     
     return stats
+
+
+async def fetch_gemini_models(
+    provider: Dict[str, Any],
+    db: AsyncSession,
+) -> Dict[str, Any]:
+    """Fetch models from Google Gemini API using correct query-param auth.
+
+    Gemini API does NOT accept ``Authorization: Bearer`` — it requires
+    ``?key={API_KEY}`` as a query parameter on every request.
+
+    Handles:
+    - Correct auth mechanism (``?key=`` query param, no Bearer header)
+    - Gemini-specific response format (``response["models"]`` array)
+    - ``models/`` prefix stripping from the ``name`` field
+    - Model name → capability mapping (embedding, chat, vision, reasoning)
+    - Sync to DB via ``_sync_provider_models`` (reuses the standard sync logic)
+
+    Args:
+        provider: Provider dict from ``get_provider()`` (must include
+                  ``base_url``, ``api_key_value``, ``provider_id``, ``vendor``, etc.).
+        db: Active database session.
+
+    Returns:
+        Dict with same shape as ``fetch_provider_models``.
+    """
+    import time
+    import httpx
+
+    base_url = (provider.get("base_url") or "").rstrip("/")
+    api_key = (provider.get("api_key_value") or "").strip()
+    provider_id = provider.get("provider_id") or provider.get("id") or ""
+
+    if not base_url:
+        logger.warning("[GEMINI] No base_url configured")
+        return {
+            "success": False,
+            "latencyMs": 0,
+            "message": "No base_url configured for Gemini provider",
+            "count": 0,
+        }
+    if not api_key:
+        logger.warning("[GEMINI] No API key configured")
+        return {
+            "success": False,
+            "latencyMs": 0,
+            "message": "No API key configured for Gemini provider",
+            "count": 0,
+        }
+
+    # Use models_endpoint if explicitly set, otherwise base_url/models
+    models_endpoint = (provider.get("models_endpoint") or "").strip()
+    url = f"{models_endpoint}?key={api_key}" if models_endpoint else f"{base_url}/models?key={api_key}"
+
+    logger.info(f"[GEMINI] Fetching models from {base_url}/models (provider={provider_id})")
+
+    start = time.monotonic()
+
+    try:
+        headers = {"Content-Type": "application/json"}
+        # NOTE: No Authorization header — Gemini API uses ?key= query param exclusively
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=headers)
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            raw_models = data.get("models", [])
+            logger.info(f"[GEMINI] API returned {len(raw_models)} models")
+
+            if not raw_models:
+                return {
+                    "success": True,
+                    "latencyMs": elapsed_ms,
+                    "models": [],
+                    "count": 0,
+                    "message": "Gemini API returned empty models list",
+                    "providerId": provider_id,
+                }
+
+            # ── Normalise Gemini models into _sync_provider_models format ──
+            normalized: list[Dict[str, Any]] = []
+            for m in raw_models:
+                name: str = m.get("name") or ""
+                display_name: str = m.get("displayName") or ""
+
+                # Strip "models/" prefix → "gemini-2.0-flash"
+                model_id = name
+                if name.startswith("models/"):
+                    model_id = name[len("models/"):]
+                if not model_id:
+                    continue
+
+                # Friendly display name
+                if not display_name:
+                    display_name = model_id.replace("-", " ").title()
+
+                # ── Capability detection by model-name pattern ──
+                mlower = model_id.lower()
+
+                if "embedding" in mlower:
+                    # gemini-embedding-*, text-embedding-*
+                    supports_embedding = True
+                    supports_chat = False
+                    supports_vision = False
+                    supports_reasoning = False
+                elif mlower.startswith("gemini-"):
+                    supports_chat = True
+                    supports_vision = True
+                    supports_embedding = False
+                    # Reasoning from 1.5 onward
+                    supports_reasoning = any(
+                        v in mlower for v in ("2.5", "2.0", "1.5")
+                    )
+                else:
+                    supports_chat = True
+                    supports_vision = True
+                    supports_embedding = False
+                    supports_reasoning = False
+
+                context_window = m.get("inputTokenLimit", 8192) or 8192
+                if isinstance(context_window, str):
+                    try:
+                        context_window = int(context_window)
+                    except (ValueError, TypeError):
+                        context_window = 8192
+
+                normalized.append({
+                    "id": model_id,
+                    "name": display_name,
+                    "context_window": context_window,
+                    "supports_chat": supports_chat,
+                    "supports_vision": supports_vision,
+                    "supports_embedding": supports_embedding,
+                    "supports_reasoning": supports_reasoning,
+                })
+
+            logger.info(
+                f"[GEMINI] Normalised {len(normalized)} models — "
+                f"chat={sum(1 for m in normalized if m['supports_chat'])}, "
+                f"vision={sum(1 for m in normalized if m['supports_vision'])}, "
+                f"embedding={sum(1 for m in normalized if m['supports_embedding'])}, "
+                f"reasoning={sum(1 for m in normalized if m['supports_reasoning'])}"
+            )
+
+            # ── Sync to database via the standard sync engine ──
+            sync_stats: Dict[str, int] = {
+                "added": 0, "updated": 0, "removed": 0,
+                "unchanged": 0, "preserved": 0,
+            }
+            if db and provider_id and normalized:
+                try:
+                    sync_stats = await _sync_provider_models(db, provider_id, normalized)
+                    logger.info(
+                        f"[GEMINI] Sync complete: +{sync_stats.get('added', 0)} added, "
+                        f"~{sync_stats.get('updated', 0)} updated, "
+                        f"-{sync_stats.get('removed', 0)} removed"
+                    )
+                except Exception as exc:
+                    logger.warning(f"[GEMINI] Sync failed for {provider_id}: {exc}")
+
+            return {
+                "success": True,
+                "latencyMs": elapsed_ms,
+                "models": normalized,
+                "count": len(normalized),
+                "added": sync_stats.get("added", 0),
+                "updated": sync_stats.get("updated", 0),
+                "removed": sync_stats.get("removed", 0),
+                "unchanged": sync_stats.get("unchanged", 0),
+                "preserved": sync_stats.get("preserved", 0),
+                "providerId": provider_id,
+            }
+
+        # ── Non-200 response ──
+        try:
+            error_detail = resp.text[:300]
+        except Exception:
+            error_detail = f"HTTP {resp.status_code}"
+        logger.error(f"[GEMINI] API error: {resp.status_code} — {error_detail}")
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "statusCode": resp.status_code,
+            "message": f"Gemini API error: {resp.status_code} — {error_detail}",
+        }
+
+    except httpx.ConnectError:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        logger.error(f"[GEMINI] Connection refused — {base_url}")
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": f"Connection refused — check base_url: {base_url}",
+        }
+    except httpx.TimeoutException:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        logger.error("[GEMINI] Connection timed out after 30s")
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": "Connection timed out after 30s",
+        }
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        logger.exception(f"[GEMINI] Unexpected error: {exc}")
+        return {
+            "success": False,
+            "latencyMs": elapsed_ms,
+            "message": f"Gemini fetch error: {str(exc)}",
+        }
 
 
 async def get_full_catalog(db: AsyncSession) -> Dict[str, Any]:

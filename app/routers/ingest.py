@@ -230,6 +230,11 @@ async def ingest_retry(payload: dict = Body(...), user: User = Depends(require_r
     doc.ingest_percent = 0
     doc.ingest_message = "Retry queued"
     doc.error_message = ""
+    # Reset all ingestion state booleans to avoid stale-state issues
+    doc.ingestion_started = False
+    doc.ingestion_completed = False
+    doc.ingestion_failed = False
+    doc.analysis_ready = False
     db.add(doc)
     await db.commit()
     await enqueue_ingest(doc.id)
@@ -377,3 +382,159 @@ async def ingest_stream(document_id: str, user: User = Depends(get_current_user)
             await asyncio.sleep(1.0)
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/ingest/diagnostic/{document_id} – Detailed ingestion diagnostic
+# ---------------------------------------------------------------------------
+@router.get("/api/ingest/diagnostic/{document_id}")
+async def ingest_diagnostic(
+    document_id: str,
+    user: User = Depends(require_role(["admin"])),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Detailed diagnostic endpoint for investigating document ingestion issues.
+    Returns comprehensive information about text extraction, chunking, and embedding.
+    """
+    from app.db.models import Chunk, Embedding
+    from sqlalchemy import func
+    import os
+    
+    doc_int = _parse_document_id(document_id)
+    result = await db.execute(select(DbDocument).where(DbDocument.id == doc_int))
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Get file info
+    file_size = 0
+    file_exists = False
+    try:
+        if doc.path:
+            file_exists = os.path.exists(doc.path)
+            if file_exists:
+                file_size = os.path.getsize(doc.path)
+    except Exception:
+        pass
+    
+    # Count chunks
+    chunk_result = await db.execute(
+        select(func.count(Chunk.id)).where(Chunk.document_id == doc_int)
+    )
+    chunk_count = chunk_result.scalar() or 0
+    
+    # Get sample chunks
+    chunk_sample = []
+    if chunk_count > 0:
+        chunk_res = await db.execute(
+            select(Chunk).where(Chunk.document_id == doc_int).limit(3)
+        )
+        for c in chunk_res.scalars():
+            chunk_sample.append({
+                "chunk_index": c.chunk_index,
+                "text_length": len(c.text) if c.text else 0,
+                "text_preview": (c.text[:200] + "...") if c.text and len(c.text) > 200 else c.text,
+            })
+    
+    # Count embeddings
+    emb_result = await db.execute(
+        select(func.count(Embedding.id)).where(
+            Embedding.id.in_(
+                select(Chunk.embedding_id).where(Chunk.document_id == doc_int)
+            )
+        )
+    )
+    embedding_count = emb_result.scalar() or 0
+    
+    # Check ChromaDB
+    chroma_count = 0
+    try:
+        from app.utils.chroma_client import chroma
+        if doc.project_id:
+            coll = chroma.get_collection(str(doc.project_id))
+            # Count by metadata filter (approximate)
+            all_ids = coll.get()["ids"]
+            chroma_count = len([i for i in all_ids if i.startswith(f"chroma_{doc_int}_")])
+    except Exception as e:
+        chroma_count = f"Error: {str(e)}"
+    
+    return {
+        "document_id": doc_int,
+        "filename": doc.filename,
+        "mime_type": doc.mime_type,
+        "detected_type": doc.detected_type,
+        "status": doc.status,
+        "ingest_step": doc.ingest_step,
+        "ingest_percent": doc.ingest_percent,
+        "ingest_message": doc.ingest_message,
+        "error_message": doc.error_message,
+        "file": {
+            "path": doc.path,
+            "exists": file_exists,
+            "size_bytes": file_size,
+            "size_human": f"{file_size / 1024:.2f} KB" if file_size else "0 KB",
+        },
+        "database": {
+            "chunk_count": chunk_count,
+            "embedding_count": embedding_count,
+            "chunk_sample": chunk_sample,
+        },
+        "chroma": {
+            "project_id": doc.project_id,
+            "estimated_vectors": chroma_count,
+        },
+        "embedding_metadata": {
+            "embedding_provider": doc.embedding_provider,
+            "embedding_model": doc.embedding_model,
+            "embedding_version": doc.embedding_version,
+            "embedded_at": str(doc.embedded_at) if doc.embedded_at else None,
+        },
+        "flags": {
+            "ingestion_started": bool(getattr(doc, "ingestion_started", False)),
+            "ingestion_completed": bool(getattr(doc, "ingestion_completed", False)),
+            "ingestion_failed": bool(getattr(doc, "ingestion_failed", False)),
+            "analysis_ready": bool(getattr(doc, "analysis_ready", False)),
+        },
+        "diagnosis": _diagnose_ingestion(doc, chunk_count, file_size),
+    }
+
+def _diagnose_ingestion(doc, chunk_count: int, file_size: int) -> dict:
+    """Generate diagnostic assessment based on document state."""
+    issues = []
+    recommendations = []
+    
+    if not file_size or file_size == 0:
+        issues.append("File size is 0 or file not found")
+        recommendations.append("Check file exists at path and re-upload")
+    
+    if doc.status == "uploaded":
+        issues.append("Document never started ingestion")
+        recommendations.append("Trigger ingestion manually or restart worker")
+    
+    elif doc.status == "failed":
+        issues.append(f"Ingestion failed at step: {doc.ingest_step}")
+        if doc.error_message:
+            issues.append(f"Error: {doc.error_message}")
+        recommendations.append("Check logs for detailed error, then retry ingestion")
+    
+    elif doc.status == "ingesting":
+        issues.append("Ingestion appears stuck or in progress")
+        recommendations.append("Check if worker is running; may need to restart")
+    
+    elif doc.status in ("completed", "summarized", "embedded") and chunk_count == 0:
+        issues.append("Ingestion completed but NO CHUNKS were created")
+        issues.append("Text extraction likely produced empty or insufficient text")
+        recommendations.append("Check PDF is text-based (not scanned image)")
+        recommendations.append("Verify OCR is available for image-based PDFs")
+        recommendations.append("Re-upload document and check extraction logs")
+    
+    if chunk_count == 0 and doc.ingest_step not in ("extract", "failed"):
+        issues.append(f"No chunks in database despite reaching step: {doc.ingest_step}")
+        recommendations.append("Investigate chunking logic in ingestion pipeline")
+    
+    return {
+        "status": "healthy" if not issues else "issues_found",
+        "issues": issues,
+        "recommendations": recommendations,
+    }

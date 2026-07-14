@@ -154,7 +154,6 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const c = t.colors
   
   // Refs for click-outside detection
-  const modelMenuRef = useRef<HTMLDivElement>(null)
   const scopeMenuRef = useRef<HTMLDivElement>(null)
   const historyMenuRef = useRef<HTMLDivElement>(null)
   const diagramMenuRef = useRef<HTMLDivElement>(null)
@@ -185,10 +184,19 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     offline: modelsOffline,
     loading: modelsLoading,
     reloadModels,
+    setModelForTask,
     v2ModelIds,
     v2Providers,
+    taskDefaults,
   } = useModel()
   const [isScopeMenuOpen, setIsScopeMenuOpen] = useState(false)
+
+  // On mount, apply Task Mapping for RAG — wait until taskDefaults are populated
+  useEffect(() => {
+    if (!modelsLoading && Object.keys(taskDefaults).length > 0) {
+      setModelForTask("rag")
+    }
+  }, [modelsLoading, taskDefaults])
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   const [historyQuery, setHistoryQuery] = useState("")
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -870,11 +878,9 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
 
   const handleModelChange = async (nextModel: string) => {
     if (!nextModel || nextModel === selectedModel) {
-      setIsModelMenuOpen(false)
       return
     }
     setSelectedModel(nextModel)
-    setIsModelMenuOpen(false)
     if (!sessionId) {
       setChatMessages((prev) => [
         ...prev,
@@ -907,7 +913,6 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     setPullPercent(0)
     setPullEta(null)
     setIsPullOpen(true)
-    setIsModelMenuOpen(false)
     window.setTimeout(() => runPull(model), 0)
   }
 
@@ -1119,7 +1124,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         scope: effectiveSearchScope,
       }
 
-      const cloudModel = isCloudModel(selectedModel, modelDetails)
+      const cloudModel = isCloudModel(selectedModel, modelDetails, v2Providers)
 
       if (cloudModel) {
         const streamCallbacks = {
@@ -1137,6 +1142,15 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 window.localStorage.setItem(sessionStorageKey, streamSid)
               }
             }
+          },
+          onReasoning: (reasoning: string) => {
+            setChatMessages((prev) =>
+              prev.map((m) =>
+                m.id === thinkingId
+                  ? { ...m, reasoning: (m.reasoning || "") + reasoning }
+                  : m,
+              ),
+            )
           },
           onDone: (_fullText: string, _model: string, _streamSid: string) => {
             setChatMessages((prev) =>
@@ -1335,17 +1349,6 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   }
 
   // Click-outside handlers for all menus and modals
-  useEffect(() => {
-    if (!isModelMenuOpen) return
-    const handleClickOutside = (e: MouseEvent) => {
-      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
-        setIsModelMenuOpen(false)
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside)
-    return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [isModelMenuOpen])
-
   useEffect(() => {
     if (!isScopeMenuOpen) return
     const handleClickOutside = (e: MouseEvent) => {
@@ -2031,6 +2034,38 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                   </div>
                 )}
 
+                {/* Reasoning / Thinking */}
+                {!isUser && !isSystem && m.reasoning && (
+                  <details style={{ paddingLeft: 36, marginTop: 8 }}>
+                    <summary style={{
+                      cursor: "pointer",
+                      color: "rgba(255,255,255,0.35)",
+                      fontWeight: 600,
+                      fontSize: 10.5,
+                      letterSpacing: "0.3px",
+                      textTransform: "uppercase" as const,
+                      userSelect: "none",
+                      outline: "none",
+                    }}>
+                      💭 Show reasoning
+                    </summary>
+                    <div style={{
+                      marginTop: 6,
+                      padding: "10px 14px",
+                      background: "rgba(255,255,255,0.04)",
+                      borderRadius: 8,
+                      color: "rgba(255,255,255,0.5)",
+                      fontSize: 12,
+                      lineHeight: 1.65,
+                      fontStyle: "italic",
+                      whiteSpace: "pre-wrap",
+                      borderLeft: "3px solid rgba(91,136,255,0.3)",
+                    }}>
+                      {m.reasoning}
+                    </div>
+                  </details>
+                )}
+
                 {/* Timestamp */}
                 {m.created_at && (
                   <div
@@ -2600,197 +2635,16 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               </div>
             )}
           </div>
-          <div style={{ position: "relative", flexShrink: 0 }} ref={modelMenuRef}>
-            <button
-              type="button"
-              onClick={() => setIsModelMenuOpen((v) => !v)}
+          <div style={{ flexShrink: 0, width: "280px" }}>
+            <ModelSelector
+              providers={v2Providers}
+              value={selectedModel}
+              onChange={(modelId) => handleModelChange(modelId)}
+              placeholder="Select model"
               disabled={isWaiting || (modelsOffline && installedModels.length === 0)}
-              title="Select model"
-              style={{
-                height: 38,
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.12)",
-                backgroundColor: "#2A2A2A",
-                color: "#FFFFFF",
-                fontSize: 12,
-                padding: "0 12px",
-                cursor: isWaiting ? "default" : "pointer",
-                opacity: isWaiting ? 0.7 : 1,
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                maxWidth: 260,
-              }}
-            >
-              <span
-                style={{
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {selectedModel ? `Model: ${modelLabel(selectedModel)}` : "Model"}
-              </span>
-              <span style={{ opacity: 0.8 }}>▾</span>
-            </button>
-            {isModelMenuOpen && (
-              <div
-                style={{
-                  position: "absolute",
-                  right: 0,
-                  bottom: 46,
-                  width: 320,
-                  maxHeight: 320,
-                  overflowY: "auto",
-                  backgroundColor: isDark ? c.bgSecondary : "#FFFFFF",
-                  borderRadius: 12,
-                  border: `1px solid ${c.border}`,
-                  boxShadow: isDark ? "0 10px 30px rgba(0,0,0,0.5)" : "0 10px 30px rgba(0,0,0,0.25)",
-                  padding: 10,
-                  zIndex: 80,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 6,
-                }}
-              >
-                {modelsOffline && (
-                  <div style={{ fontSize: 12, color: c.textMuted }}>
-                    Offline (installed models only)
-                  </div>
-                )}
-                {(() => {
-                  const sourceModels = [...new Set(modelsOffline ? installedModels : availableModels)]
-                  const v2Set = v2ModelIds ?? new Set<string>()
-                  const v2Group: string[] = []
-                  const localGroup: string[] = []
-                  for (const m of sourceModels) {
-                    if (v2Set.has(m)) v2Group.push(m)
-                    else localGroup.push(m)
-                  }
-                  interface ModelItem { id: string; group: "v2" | "local" }
-                  const allItems: ModelItem[] = [
-                    ...v2Group.map(m => ({ id: m, group: "v2" as const })),
-                    ...localGroup.map(m => ({ id: m, group: "local" as const })),
-                  ]
-                  const hasV2 = v2Group.length > 0
-                  return allItems.map((item, idx) => {
-                    const { id: m, group } = item
-                    const isV2 = group === "v2"
-                    const isFirstV2 = isV2 && idx === 0
-                    const isFirstLocal = group === "local" && idx > 0 && allItems[idx - 1]?.group === "v2"
-                    const cloudApi = isV2 || isCloudModel(m, modelDetails)
-                    const installed = installedModels.includes(m)
-                    const ps = pullStates[m]
-                    const isPulling =
-                      ps && ps.state && !["success", "failed", "idle"].includes(String(ps.state)) && !installed
-                    const percent = isPulling ? Number(ps.percent || 0) : 0
-                    const badge =
-                      cloudApi
-                        ? "API"
-                        : installed
-                          ? "Installed"
-                          : ps && ps.state === "pending"
-                            ? "Pending…"
-                            : ps && ps.state === "verifying"
-                              ? "Verifying…"
-                              : isPulling
-                                ? `Downloading… ${percent}%`
-                                : "Pull"
-                    return (
-                      <React.Fragment key={m}>
-                        {isFirstLocal && hasV2 && (
-                          <div
-                            style={{
-                              padding: "8px 10px 4px",
-                              fontSize: 10,
-                              fontWeight: 700,
-                              color: c.textMuted,
-                              textTransform: "uppercase",
-                              letterSpacing: "0.6px",
-                              borderTop: `1px solid ${c.border}40`,
-                              marginTop: 4,
-                            }}
-                          >
-                            Local Models
-                          </div>
-                        )}
-                        {isFirstV2 && hasV2 && (
-                          <div
-                            style={{
-                              padding: "0 10px 4px",
-                              fontSize: 10,
-                              fontWeight: 700,
-                              color: c.textMuted,
-                              textTransform: "uppercase",
-                              letterSpacing: "0.6px",
-                            }}
-                          >
-                            Cloud / API Models
-                          </div>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!cloudApi && !installed) {
-                              openPullModal(m)
-                              return
-                            }
-                            handleModelChange(m)
-                          }}
-                          style={{
-                            width: "100%",
-                            textAlign: "left",
-                            padding: "10px 10px",
-                            borderRadius: 10,
-                            border: `1px solid ${c.border}`,
-                            backgroundColor: m === selectedModel ? c.surfaceActive : (isDark ? "transparent" : "#FFFFFF"),
-                            cursor: "pointer",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: 10,
-                          }}
-                        >
-                          <span style={{ fontSize: 13, color: c.text }}>
-                            {isV2 ? "☁️ " : ""}{modelLabel(m)}
-                          </span>
-                          <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, justifyContent: "flex-end" }}>
-                            {(capabilityMap[m] || []).slice(0, 3).map(cap => (
-                              <span
-                                key={cap}
-                                style={{
-                                  fontSize: 10,
-                                  padding: "1px 5px",
-                                  borderRadius: 4,
-                                  border: `1px solid ${c.border}`,
-                                  backgroundColor: isDark ? c.surface : "#F8FAFC",
-                                  color: c.textMuted,
-                                  lineHeight: "16px",
-                                }}
-                              >
-                                {cap === "reasoning" ? "🧠" : cap === "vision" ? "👁️" : cap === "audio" ? "🎤" : cap === "code" ? "💻" : cap === "fast" ? "⚡" : cap === "large" ? "🐘" : cap}
-                              </span>
-                            ))}
-                            <span
-                              style={{
-                                fontSize: 11,
-                                padding: "2px 8px",
-                                borderRadius: 999,
-                                border: `1px solid ${cloudApi ? "#10b981" : installed ? c.primary : c.border}`,
-                                backgroundColor: cloudApi ? (isDark ? "rgba(16,185,129,0.18)" : "#ecfdf5") : installed ? c.surfaceActive : (isDark ? c.surface : "#F4F6F8"),
-                                color: cloudApi ? "#10b981" : installed ? c.primary : c.textMuted,
-                              }}
-                            >
-                              {badge}
-                            </span>
-                          </div>
-                        </button>
-                      </React.Fragment>
-                    )
-                  })
-                })()}
-              </div>
-            )}
+              selectableOnly={true}
+              includeLocalModels={true}
+            />
           </div>
           {isTranscribing && (
             <div style={{

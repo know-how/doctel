@@ -67,60 +67,81 @@ async def _stream_cloud_answer(
     question: str,
     chosen_model: str,
     sys_prompt: Optional[str],
-    _using_gemini: bool,
-    _using_deepseek: bool,
-    _using_zen: bool,
-    _using_hf: bool = False,
-    _using_cloud: bool = False,
+    _using_zen: bool = False,
+    zen_api_key: Optional[str] = None,
+    zen_base_url: Optional[str] = None,
+    db: Optional[AsyncSession] = None,
 ):
-    from app.services.gemini_service import generate_stream as gemini_stream, is_configured as gemini_configured
-    from app.services.deepseek_service import generate_stream as deepseek_stream
-    from app.services.opencode_zen_service import generate_stream as zen_stream, is_configured as zen_configured
-    from app.services.huggingface_service import generate_stream as hf_stream, is_configured as hf_configured
+    """Stream using the provider gateway (database-driven adapter selection).
+    Yields dicts with format: {"type": "content"|"reasoning", "content": str}
+    """
+    from app.services.provider_gateway_service import generate_stream as gateway_stream
 
-    if _using_zen:
+    if _using_zen and zen_api_key:
+        # Use legacy opencode_zen_service for key-based streaming (backward compat)
+        from app.services.opencode_zen_service import generate_stream_with_key as zen_stream_with_key
         try:
-            async for chunk in zen_stream(question, model=chosen_model, system=sys_prompt):
-                yield chunk
+            async for chunk in zen_stream_with_key(question, model=chosen_model, system=sys_prompt, api_key=zen_api_key, base_url=zen_base_url):
+                # Normalize string chunks to dict (backward compat)
+                if isinstance(chunk, str):
+                    yield {"type": "content", "content": chunk}
+                elif isinstance(chunk, dict):
+                    yield chunk
+                else:
+                    yield {"type": "content", "content": str(chunk)}
             return
         except RuntimeError as e:
-            if "balance depleted" in str(e).lower() and gemini_configured():
-                print(f"[ZEN FALLBACK] Zen balance depleted, falling back to Gemini. Error: {e}", flush=True)
-                async for chunk in gemini_stream(question, system=sys_prompt):
-                    yield chunk
+            if "balance depleted" in str(e).lower():
+                print(f"[ZEN FALLBACK] Balance depleted, trying Gemini.", flush=True)
+            else:
+                yield {"type": "content", "content": f"⚠️ Cloud request failed: {e}. Check your API key in Admin > Providers."}
                 return
-            raise
-    if _using_hf:
-        async for chunk in hf_stream(question, model=chosen_model, system=sys_prompt):
-            yield chunk
-    elif _using_deepseek:
-        async for chunk in deepseek_stream(question, system=sys_prompt):
-            yield chunk
-    elif _using_gemini:
-        async for chunk in gemini_stream(question, system=sys_prompt):
-            yield chunk
-    elif _using_cloud:
-        # 'cloud' alias: try cloud providers in priority order until one works
-        printed_provider = False
-        if zen_configured():
-            printed_provider = True
-            async for chunk in zen_stream(question, system=sys_prompt):
-                yield chunk
-            return
-        if hf_configured():
-            printed_provider = True
-            async for chunk in hf_stream(question, system=sys_prompt):
-                yield chunk
-            return
-        if gemini_configured():
-            printed_provider = True
-            async for chunk in gemini_stream(question, system=sys_prompt):
-                yield chunk
-            return
-        if not printed_provider:
-            yield "⚠️ No cloud AI provider is configured. Set up Zen (OPENCODE_GO_API_KEY), HuggingFace (HF_API_KEY), or Gemini (GEMINI_API_KEY) in your .env file."
+
+    # All other providers: use the gateway with DB session
+    if db:
+        try:
+            async for chunk in gateway_stream(db, question, model_id=chosen_model, system=sys_prompt):
+                # Normalize string chunks to dict (backward compat)
+                if isinstance(chunk, str):
+                    yield {"type": "content", "content": chunk}
+                else:
+                    yield chunk
+        except Exception as e:
+            import traceback
+            from app.services.openai_compatible_adapter import ProviderError
+            
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            # Check if it's a structured provider error
+            if isinstance(e, ProviderError):
+                provider_name = getattr(e, 'provider_name', 'unknown')
+                status_code = getattr(e, 'status_code', 0)
+                logger.error(f"[PROVIDER ERROR] {provider_name} returned {status_code}: {error_msg}")
+                user_message = error_msg  # Already formatted by ProviderError
+            else:
+                # Generic error - log full stack trace
+                stack_trace = traceback.format_exc()
+                logger.error(f"[PROVIDER ERROR] {error_type}: {error_msg}\n{stack_trace}")
+                
+                # Check for common error patterns in the message
+                error_lower = error_msg.lower()
+                if "timeout" in error_lower or "timed out" in error_lower:
+                    user_message = "Provider request timed out. Please try again."
+                elif "connection" in error_lower or "unreachable" in error_lower:
+                    user_message = "Provider is unavailable. Please check your network connection."
+                elif "rate limit" in error_lower or "429" in error_lower:
+                    user_message = "Provider rate limit exceeded. Please wait and try again."
+                elif "quota" in error_lower or "credits" in error_lower or "402" in error_lower:
+                    user_message = "Provider credits exhausted. Please add funds to your account."
+                elif "authentication" in error_lower or "api key" in error_lower or "401" in error_lower:
+                    user_message = "Invalid provider API key. Please check your API key in Admin > Providers."
+                else:
+                    user_message = f"Provider error: {error_msg[:200]}"
+            
+            yield {"type": "content", "content": f"⚠️ {user_message}"}
     else:
-        yield ""
+        yield {"type": "content", "content": "⚠️ No database session available for provider routing."}
 
 
 # ── Diagnostics ───────────────────────────────────────────────────────────
@@ -161,7 +182,7 @@ async def ask_diagnostics(
     try:
         import chromadb
         from chromadb.config import Settings as ChromaSettings
-        chroma_path = getattr(settings, "chroma_db_path", "data/chroma")
+        chroma_path = settings.chroma_path
         client = chromadb.PersistentClient(path=chroma_path, settings=ChromaSettings(anonymized_telemetry=False))
         collections = client.list_collections()
         diag["embedding"]["available"] = True
@@ -237,28 +258,11 @@ async def ask_global(
         await db.commit()
 
     from app.utils.ollama_client import ollama
-    from app.services.gemini_service import (
-        GEMINI_MODEL_ID,
-        is_configured as gemini_configured,
-        generate as gemini_generate,
-    )
-    from app.services.deepseek_service import (
-        DEEPSEEK_MODEL_ID,
-        is_configured as deepseek_configured,
-        generate as deepseek_generate,
-    )
-    from app.services.opencode_zen_service import (
-        is_configured as zen_configured,
-        generate as zen_generate,
-    )
-    from app.services.huggingface_service import (
-        is_configured as hf_configured,
-        generate as hf_generate,
-    )
+    from app.services.model_resolver_service import resolve_model, resolve_provider_credentials
+    from app.services.provider_gateway_service import generate as gateway_generate, generate_stream as gateway_generate_stream
 
     # Use centralized model resolver instead of direct settings access
-    from app.services.model_resolver_service import resolve_model
-    
+    logger.info("[ASK] Resolving model for requested_model=%s", requested_model)
     resolved = await resolve_model(
         db,
         requested_model=requested_model,
@@ -267,6 +271,9 @@ async def ask_global(
     )
     chosen_model = resolved["model_id"]
     provider_type = resolved.get("provider_type", "ollama")
+    provider_id = resolved.get("provider_id", "unknown")
+    logger.info("[ASK] Model resolved: chosen_model=%s, provider_type=%s, provider_id=%s, source=%s", 
+                chosen_model, provider_type, provider_id, resolved.get("source"))
     
     # Use provider_type from resolver as the single source of truth
     _using_gemini = provider_type == "gemini"
@@ -274,64 +281,28 @@ async def ask_global(
     _using_zen = provider_type == "opencode"
     _using_hf = provider_type == "huggingface"
     _using_cloud = (chosen_model == "cloud")
+    _using_ollama = provider_type == "ollama"
 
-    if _using_gemini and not gemini_configured():
+    # Resolve credentials from DB using the already-resolved provider_id
+    # This ensures we use the correct provider even if model_id exists in multiple providers
+    logger.info("[ASK] Resolving provider credentials for chosen_model=%s, provider_id=%s", chosen_model, provider_id)
+    creds = await resolve_provider_credentials(db, chosen_model, provider_id_hint=provider_id)
+    logger.info("[ASK] Provider credentials resolved: api_key_present=%s, base_url=%s, creds_provider_id=%s", 
+                bool(creds.get("api_key")), creds.get("base_url"), creds.get("provider_id"))
+
+    # Validate: DB is the source of truth for API keys
+    is_cloud_provider = _using_gemini or _using_deepseek or _using_zen or _using_hf or _using_cloud
+    logger.info("[ASK] Provider classification: is_cloud_provider=%s, _using_ollama=%s", 
+                is_cloud_provider, _using_ollama)
+    if is_cloud_provider and not creds["api_key"]:
         user_msg.status = "failed"
         db.add(user_msg)
         await db.commit()
         return JSONResponse(
             status_code=503,
             content={
-                "error": "gemini_not_configured",
-                "message": "GEMINI_API_KEY is not set. Add it to your .env file and restart.",
-            },
-        )
-
-    if _using_deepseek and not deepseek_configured():
-        user_msg.status = "failed"
-        db.add(user_msg)
-        await db.commit()
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "deepseek_not_configured",
-                "message": "DEEPSEEK_API_KEY is not set. Add it to your .env file and restart.",
-            },
-        )
-
-    if _using_zen and not zen_configured():
-        user_msg.status = "failed"
-        db.add(user_msg)
-        await db.commit()
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "zen_not_configured",
-                "message": "OPENCODE_GO_API_KEY is not set. Get one at https://opencode.ai/go and add it to your .env file.",
-            },
-        )
-
-    if _using_hf and not hf_configured():
-        user_msg.status = "failed"
-        db.add(user_msg)
-        await db.commit()
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "hf_not_configured",
-                "message": "HF_API_KEY is not set. Get one at https://huggingface.co/settings/tokens and add it to your .env file.",
-            },
-        )
-
-    if _using_cloud and not zen_configured() and not hf_configured() and not gemini_configured():
-        user_msg.status = "failed"
-        db.add(user_msg)
-        await db.commit()
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "cloud_not_configured",
-                "message": "No cloud AI provider is configured. Set up Zen (OPENCODE_GO_API_KEY), HuggingFace (HF_API_KEY), or Gemini (GEMINI_API_KEY) in your .env file.",
+                "error": "provider_not_configured",
+                "message": f"No API key found for provider of model '{chosen_model}'. Configure an API key in Admin > Providers.",
             },
         )
 
@@ -353,8 +324,8 @@ async def ask_global(
 
     allowed = set(settings.available_models or []) | present
     if _using_gemini:
-        allowed.add(GEMINI_MODEL_ID)
-        present.add(GEMINI_MODEL_ID)
+        allowed.add(chosen_model)
+        present.add(chosen_model)
     if _using_deepseek:
         allowed.add(chosen_model)
         present.add(chosen_model)
@@ -387,7 +358,34 @@ async def ask_global(
         await db.commit()
 
     rag = None
-    if embed_available and project_ids:
+    # ── RAG TRACE: entry point diagnostics ────────────────────────────────
+    logger.info(
+        "[RAG_TRACE] START — question=%r | session=%s | user=%s | scope=%s | "
+        "project_ids=%s | document_id=%s | model=%s",
+        question[:120] if question else "",
+        session_uuid,
+        user.id if user else "?",
+        scope,
+        project_ids,
+        None,  # document_id for global ask is always None
+        chosen_model,
+    )
+    # ── RAG gate: check ChromaDB has vectors + embedding model is reachable ──
+    # Replaces the fragile "settings.embed_model in present" check which
+    # depends on Ollama listing models quickly enough.  Instead we try
+    # the RAG call and let get_rag_answer_scoped() handle failures gracefully.
+    # If ChromaDB is empty or the embedding model is unavailable, it returns
+    # citations=[] which triggers the fallback below.
+    rag_collections_exist = False
+    try:
+        from app.utils.chroma_client import chroma as _gate_chroma
+        _gate_cols = _gate_chroma.list_collections()
+        rag_collections_exist = any(c.count() > 0 for c in (_gate_cols or []))
+    except Exception:
+        rag_collections_exist = True  # assume yes if we can't check
+    logger.info("[RAG] Gate check: embed_available=%s, projects=%s, chroma_collections_exist=%s",
+                embed_available, bool(project_ids), rag_collections_exist)
+    if embed_available and project_ids and rag_collections_exist:
         try:
             rag = await get_rag_answer_scoped(
                 project_ids,
@@ -398,30 +396,62 @@ async def ask_global(
                 force_policy=force_policy,
                 force_diagram=force_diagram,
             )
-        except Exception:
+        except Exception as rag_exc:
+            logger.warning("[RAG] get_rag_answer_scoped threw exception: %s", rag_exc, exc_info=True)
             rag = None
     if not rag or not rag.get("citations"):
+        # ── Cross-project fallback ──────────────────────────────────────────
+        # When scope="project" and the current project has no indexed chunks,
+        # try searching ALL projects before giving up.  This prevents "please
+        # upload the document" responses when the same document exists (with
+        # embeddings) in a different project.
+        if scope == "project" and project_ids:
+            try:
+                all_project_ids = await _searchable_project_ids(db)
+                if len(all_project_ids) > len(project_ids):
+                    logger.info(
+                        "[RAG] Project-scoped search returned no results; "
+                        "trying cross-project search across %d projects",
+                        len(all_project_ids),
+                    )
+                    rag = await get_rag_answer_scoped(
+                        all_project_ids,
+                        question,
+                        db,
+                        document_id=None,
+                        model_name=chosen_model,
+                        force_policy=force_policy,
+                        force_diagram=force_diagram,
+                    )
+                    logger.info(
+                        "[RAG] Cross-project search returned %d citations",
+                        len(rag.get("citations", [])) if rag else 0,
+                    )
+            except Exception as cross_exc:
+                logger.warning("[RAG] Cross-project search failed: %s", cross_exc)
+
+    if not rag or not rag.get("citations"):
+        if rag is None:
+            logger.warning("[RAG] rag result is None — falling back to direct answer")
+            logger.warning("[RAG_FALLBACK] reason=rag_none | embed_available=%s | project_ids=%s | chroma_collections=%s",
+                           embed_available, project_ids, rag_collections_exist)
+        elif not rag.get("citations"):
+            logger.warning("[RAG] rag result has NO citations — citations=%d, context_length=%d chars",
+                           len(rag.get("citations", [])), len(rag.get("answer_text", "") or ""))
+            logger.warning("[RAG_FALLBACK] reason=no_citations | chunks_retrieved=%d | answer_length=%d",
+                           len(rag.get("citations", [])), len(rag.get("answer_text", "") or ""))
         sys_prompt = (settings.zetdc.system_prompt or "").strip() or None
         answer_text = None
         fallback_source = None
         cloud_error = None
         try:
-            if _using_deepseek:
-                answer_text = await asyncio.wait_for(deepseek_generate(question, system=sys_prompt), timeout=120.0)
+            if is_cloud_provider:
+                answer_text = await asyncio.wait_for(
+                    gateway_generate(db, question, model_id=chosen_model, system=sys_prompt),
+                    timeout=120.0,
+                )
                 if answer_text:
-                    fallback_source = "deepseek_direct"
-            elif _using_gemini:
-                answer_text = await asyncio.wait_for(gemini_generate(question, system=sys_prompt), timeout=120.0)
-                if answer_text:
-                    fallback_source = "gemini_direct"
-            elif _using_zen:
-                answer_text = await asyncio.wait_for(zen_generate(question, model=chosen_model, system=sys_prompt), timeout=120.0)
-                if answer_text:
-                    fallback_source = "zen_direct"
-            elif _using_hf:
-                answer_text = await asyncio.wait_for(hf_generate(question, model=chosen_model, system=sys_prompt), timeout=120.0)
-                if answer_text:
-                    fallback_source = "hf_direct"
+                    fallback_source = "gateway"
             elif chosen_model in present:
                 answer_text = await ollama.generate(chosen_model, question, system=sys_prompt)
                 if answer_text:
@@ -434,32 +464,9 @@ async def ask_global(
             cloud_error = str(_direct_err)
             answer_text = None
 
-        if not answer_text and zen_configured() and not _using_zen:
-            try:
-                answer_text = await asyncio.wait_for(zen_generate(question, system=sys_prompt), timeout=120.0)
-                chosen_model = "zen/deepseek-v4-flash-free"
-                fallback_source = "zen_api"
-            except (asyncio.TimeoutError, Exception) as _zen_err:
-                logger.warning("Zen global fallback failed (%s)", _zen_err)
-                answer_text = None
-
-        if not answer_text and deepseek_configured() and not _using_deepseek:
-            try:
-                answer_text = await asyncio.wait_for(deepseek_generate(question, system=sys_prompt), timeout=120.0)
-                chosen_model = DEEPSEEK_MODEL_ID
-                fallback_source = "deepseek_api"
-            except (asyncio.TimeoutError, Exception) as _deepseek_err:
-                logger.warning("DeepSeek global fallback failed (%s)", _deepseek_err)
-                answer_text = None
-
-        if not answer_text and gemini_configured() and not _using_gemini:
-            try:
-                answer_text = await asyncio.wait_for(gemini_generate(question, system=sys_prompt), timeout=120.0)
-                chosen_model = GEMINI_MODEL_ID
-                fallback_source = "gemini_api"
-            except (asyncio.TimeoutError, Exception) as _gemini_err:
-                logger.warning("Gemini global fallback failed (%s)", _gemini_err)
-                answer_text = None
+        # Fallback: if primary failed and we have a DB key, don't retry — just report the error
+        if not answer_text and is_cloud_provider and creds["api_key"]:
+            pass
 
         if not answer_text:
             try:
@@ -494,12 +501,24 @@ async def ask_global(
             ) + ([{"filename": str(fallback_source), "reason": "Fallback intelligence tier used"}] if fallback_source else []),
             "used_model": chosen_model,
         }
+    # ── RAG RESPONSE summary log ─────────────────────────────────────────
+    logger.info(
+        "[RAG_RESPONSE] answer_length=%d | citation_count=%d | model=%s | "
+        "reasoning=%s",
+        len(rag.get("answer_text", "") or ""),
+        len(rag.get("citations", [])),
+        rag.get("used_model", "?"),
+        "present" if rag.get("answer_text") else "missing",
+    )
     user_msg.status = "done"
     db.add(user_msg)
+    # Get reasoning if available from RAG response
+    reasoning_text = rag.get("reasoning_text", "") if rag else ""
     assistant = DbMessage(
         session_id=s.id,
         role="assistant",
         content=rag.get("answer_text", ""),
+        reasoning=reasoning_text or None,
         status="done",
         citations_json=json.dumps(rag.get("citations", [])),
     )
@@ -518,9 +537,23 @@ async def ask_global(
     else:
         # Empty or already processed
         cross_refs_list = cross_refs
+    # Map citations to response format with all new fields
+    citation_objects = []
+    for c in rag.get("citations", []):
+        if isinstance(c, dict):
+            citation_objects.append(Citation(
+                document_id=str(c.get("document_id")) if c.get("document_id") is not None else None,
+                filename=c.get("filename"),
+                chunk_index=c.get("chunk_index"),
+                text=c.get("text"),
+                snippet=c.get("text", ""),  # Backward compatibility
+                full_text_available=c.get("full_text_available"),
+                distance=c.get("distance"),
+            ))
+    
     return AskResponse(
         answer=rag.get("answer_text", ""),
-        citations=[Citation(**{**c, "document_id": str(c["document_id"])}) if isinstance(c, dict) and c.get("document_id") is not None else c for c in rag.get("citations", [])],
+        citations=citation_objects,
         cross_references=cross_refs_list,
         used_model=rag.get("used_model", ""),
         session_id=session_uuid,
@@ -551,10 +584,6 @@ async def ask_global_stream(
         print(f"requested_model: {requested_model}", flush=True)
         print(f"session_uuid: {session_uuid}", flush=True)
 
-        from app.services.gemini_service import GEMINI_MODEL_ID, is_configured as gemini_configured
-        from app.services.deepseek_service import DEEPSEEK_MODEL_ID, is_configured as deepseek_configured
-        from app.services.opencode_zen_service import is_configured as zen_configured
-        from app.services.huggingface_service import is_configured as hf_configured
         from app.services.model_resolver_service import resolve_model
 
         # Use centralized model resolver
@@ -567,34 +596,16 @@ async def ask_global_stream(
         provider_type = resolved.get("provider_type", "ollama")
         print(f"chosen_model: '{chosen_model}' (source: {resolved['source']}, provider: {provider_type})", flush=True)
         
-        # Use provider_type from resolver as the single source of truth
-        _using_gemini = provider_type == "gemini"
-        _using_deepseek = provider_type == "deepseek"
+        # Determine streaming support from provider metadata
+        from app.services.provider_gateway_service import provider_supports_streaming
+
         _using_zen = provider_type == "opencode"
-        _using_hf = provider_type == "huggingface"
-        _using_cloud = (chosen_model == "cloud")
-        is_cloud = _using_gemini or _using_deepseek or _using_zen or _using_hf or _using_cloud
-        print(f"_using_gemini: {_using_gemini}, _using_deepseek: {_using_deepseek}, _using_zen: {_using_zen}, _using_hf: {_using_hf}, is_cloud: {is_cloud}", flush=True)
+        streaming_supported = provider_supports_streaming(provider_type)
+        print(f"provider_type: {provider_type}, _using_zen: {_using_zen}, streaming_supported: {streaming_supported}", flush=True)
 
-        if not is_cloud:
-            print("RETURNING 400: not cloud", flush=True)
-            return JSONResponse(status_code=400, content={"error": "streaming_only_for_cloud", "message": "Streaming is only supported for cloud models. Use the non-streaming endpoint for local models."})
-
-        if _using_gemini and not gemini_configured():
-            print("RETURNING 503: gemini not configured", flush=True)
-            return JSONResponse(status_code=503, content={"error": "gemini_not_configured"})
-        if _using_deepseek and not deepseek_configured():
-            print("RETURNING 503: deepseek not configured", flush=True)
-            return JSONResponse(status_code=503, content={"error": "deepseek_not_configured"})
-        if _using_zen and not zen_configured():
-            print("RETURNING 503: zen not configured", flush=True)
-            return JSONResponse(status_code=503, content={"error": "zen_not_configured"})
-        if _using_hf and not hf_configured():
-            print("RETURNING 503: hf not configured", flush=True)
-            return JSONResponse(status_code=503, content={"error": "hf_not_configured"})
-        if _using_cloud:
-            # 'cloud' is an alias that uses the fallback chain — no mandatory API key needed
-            pass
+        if not streaming_supported:
+            print("RETURNING 400: streaming not supported", flush=True)
+            return JSONResponse(status_code=400, content={"error": "streaming_not_supported", "message": "The selected provider does not support streaming. Use the non-streaming endpoint or select a different model."})
 
         # Create/reuse session
         s = None
@@ -618,24 +629,158 @@ async def ask_global_stream(
         sys_prompt = (settings.zetdc.system_prompt or "").strip() or None
         final_session_uuid = s.session_uuid
 
+        # ── RAG retrieval for global context ────────────────────────────────
+        scope = (payload.get("scope") or "all").strip().lower()
+        raw_project_id = payload.get("project_id")
+        project_ids: list[int] = []
+        if scope == "project" and raw_project_id is not None:
+            pid = int(raw_project_id)
+            await check_project_access(pid, user, db)
+            await ensure_project_membership(pid, user, db, role_in_project="analyst")
+            project_ids = [pid]
+        else:
+            project_ids = await _searchable_project_ids(db)
+        print(f"[RAG] scope={scope}, project_ids={project_ids}", flush=True)
+
+        rag_context: str | None = None
+        citations_list: list[dict] = []
+        try:
+            # ── Unified RAG retrieval via get_rag_answer_scoped ──────────────
+            # This uses the same code path as ask_global(), ensuring
+            # consistent citation formatting, embedding model resolution,
+            # and context building across all endpoints.
+            from app.services.rag_service import get_rag_answer_scoped as rag_scoped
+
+            rag_result = await rag_scoped(
+                project_ids,
+                question,
+                db,
+                document_id=None,
+                model_name=chosen_model,
+            )
+
+            # ── Cross-project fallback (mirrors ask_global) ──────────────
+            if scope == "project" and not rag_result.get("citations"):
+                all_ids = await _searchable_project_ids(db)
+                if len(all_ids) > len(project_ids):
+                    print(f"[RAG] Project-scoped search empty; cross-project fallback across {len(all_ids)} projects", flush=True)
+                    rag_result = await rag_scoped(
+                        all_ids,
+                        question,
+                        db,
+                        document_id=None,
+                        model_name=chosen_model,
+                    )
+
+            citations_list = rag_result.get("citations", [])
+            rag_context = "\n\n".join(
+                f"Source: {c.get('filename', 'Unknown')}, Chunk {c.get('chunk_index', 0)}\nContent: {(c.get('text', '') or '')[:1500]}"
+                for c in citations_list
+            ) if citations_list else None
+
+            if rag_context:
+                doc_ids = list(dict.fromkeys([c.get("document_id") for c in citations_list if c.get("document_id")]))
+                print(f"[RAG] Retrieved {len(citations_list)} chunks, context={len(rag_context)} chars, doc_ids={doc_ids}", flush=True)
+            else:
+                print(f"[RAG] No chunks retrieved — context is EMPTY", flush=True)
+
+        except Exception as e:
+            print(f"[RAG] Error during retrieval: {e}", flush=True)
+            import traceback as _tb
+            _tb.print_exc()
+
+        # Build augmented question with context
+        augmented_question = question
+        if rag_context:
+            augmented_question = f"Answer the question using ONLY the provided context. Always cite sources.\n\nQuestion: {question}\n\nContext:\n{rag_context}"
+            logger.info(
+                "[RAG_PROMPT] stream — context=%d chars | total_prompt=%d chars | "
+                "chunks=%d | doc_ids=%s",
+                len(rag_context),
+                len(augmented_question),
+                len(citations_list),
+                list(dict.fromkeys([c.get("document_id") for c in citations_list if c.get("document_id")])),
+            )
+            print(f"[RAG] Augmented question built — context={len(rag_context)} chars, total_question_length={len(augmented_question)} chars", flush=True)
+        else:
+            logger.warning("[RAG_FALLBACK] reason=no_context_stream | scope=%s | project_ids=%s", scope, project_ids)
+            print(f"[RAG] No context — sending question without RAG context", flush=True)
+
+        # Resolve API key: model → provider → key (database is SOURCE OF TRUTH)
+        zen_api_key = None
+        zen_base_url = None
+        if _using_zen:
+            try:
+                from app.db.config_models import AIModel, AIProvider
+                from sqlalchemy import select as sa_sel
+
+                # Step 1: Find model in ai_models
+                model = (await db.execute(sa_sel(AIModel).where(AIModel.model_id == chosen_model))).scalar_one_or_none()
+                if not model:
+                    bare = chosen_model.split("/")[-1] if "/" in chosen_model else chosen_model
+                    model = (await db.execute(sa_sel(AIModel).where(AIModel.model_id.ilike(f"%{bare}%")))).scalars().first()
+                print(f"[ZEN DB] model={chosen_model} found={model is not None}", flush=True)
+
+                # Step 2: Get provider by model.provider_id
+                if model:
+                    provider = (await db.execute(sa_sel(AIProvider).where(AIProvider.id == model.provider_id))).scalar_one_or_none()
+                    if provider and provider.api_key_value:
+                        zen_api_key = provider.api_key_value.strip()
+                        zen_base_url = (provider.base_url or "").strip() or None
+                        print(f"[ZEN DB] ✅ KEY via model→provider: {provider.name}, len={len(zen_api_key)}", flush=True)
+
+                # Step 3: Fallback — any provider with a non-empty api_key_value
+                if not zen_api_key:
+                    provider = (await db.execute(
+                        sa_sel(AIProvider).where(AIProvider.api_key_value.isnot(None), AIProvider.api_key_value != "").limit(1)
+                    )).scalars().first()
+                    if provider:
+                        zen_api_key = provider.api_key_value.strip()
+                        zen_base_url = (provider.base_url or "").strip() or None
+                        print(f"[ZEN DB] ⚠️ Fallback key: {provider.name} len={len(zen_api_key)}", flush=True)
+                    else:
+                        print(f"[ZEN DB] ❌ No provider in ai_providers has api_key_value set", flush=True)
+            except Exception as e:
+                import traceback
+                print(f"[ZEN DB] Error: {e}\n{traceback.format_exc()}", flush=True)
+
         async def event_gen():
             full_text = ""
+            reasoning_text = ""
             try:
                 print("=== EVENT_GEN: starting stream ===", flush=True)
                 async with asyncio.timeout(120.0):
-                    async for chunk in _stream_cloud_answer(question, chosen_model, sys_prompt, _using_gemini, _using_deepseek, _using_zen, _using_hf, _using_cloud=_using_cloud):
-                        full_text += chunk
-                        data = json.dumps({"chunk": chunk, "model": chosen_model, "session_id": final_session_uuid})
+                    async for event in _stream_cloud_answer(augmented_question, chosen_model, sys_prompt, _using_zen=_using_zen, zen_api_key=zen_api_key, zen_base_url=zen_base_url, db=db):
+                        event_type = event.get("type", "content") if isinstance(event, dict) else "content"
+                        event_content = event.get("content", "") if isinstance(event, dict) else event
+                        if event_type == "content":
+                            full_text += event_content
+                        elif event_type == "reasoning":
+                            reasoning_text += event_content
+                            # Log reasoning tokens as they arrive
+                            if len(reasoning_text) < 200 or len(reasoning_text) % 500 == 0:
+                                logger.info("[REASONING] stream — received %d chars so far", len(reasoning_text))
+                        data = json.dumps({
+                            "type": event_type,
+                            "content": event_content,
+                            "model": chosen_model,
+                            "session_id": final_session_uuid,
+                        })
                         yield f"data: {data}\n\n"
+                logger.info(
+                    "[RAG_RESPONSE] stream_complete — answer_length=%d | reasoning_length=%d | "
+                    "citation_count=%d | model=%s",
+                    len(full_text), len(reasoning_text), len(citations_list), chosen_model,
+                )
             except asyncio.TimeoutError:
                 err = "The AI model did not respond within 2 minutes. Please try again."
-                yield f"data: {json.dumps({'error': err})}\n\n"
+                yield f"data: {json.dumps({'type': 'content', 'content': err, 'model': chosen_model, 'session_id': final_session_uuid})}\n\n"
                 full_text = f"Error: {err}"
             except Exception as exc:
                 import traceback as tb
                 err_msg = f"{exc}\n{tb.format_exc()}"
                 print(f"=== EVENT_GEN: error: {err_msg} ===", flush=True)
-                yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+                yield f"data: {json.dumps({'type': 'content', 'content': str(exc), 'model': chosen_model, 'session_id': final_session_uuid})}\n\n"
                 full_text = f"Error: {exc}"
 
             try:
@@ -643,8 +788,9 @@ async def ask_global_stream(
                     session_id=s.id,
                     role="assistant",
                     content=full_text,
+                    reasoning=reasoning_text or None,
                     status="done",
-                    citations_json="[]",
+                    citations_json=json.dumps(citations_list),
                 )
                 db.add(assistant)
                 s.updated_at = datetime.datetime.now(datetime.timezone.utc)
@@ -798,81 +944,30 @@ async def ask_document(
                 },
             )
 
-        # Pre-compute chosen model so we can skip Ollama checks for Gemini/DeepSeek/Zen
-        from app.services.gemini_service import (
-            GEMINI_MODEL_ID,
-            is_configured as gemini_configured,
-        )
-        from app.services.deepseek_service import (
-            DEEPSEEK_MODEL_ID,
-            is_configured as deepseek_configured,
-        )
-        from app.services.opencode_zen_service import (
-            is_configured as zen_configured,
-        )
-        from app.services.huggingface_service import (
-            is_configured as hf_configured,
-        )
+        # Pre-compute chosen model
+        from app.services.model_resolver_service import resolve_model, resolve_provider_credentials
         _session_model_pre = (s.model_name or "").strip() or None
-        _default_model_pre = (settings.default_model or settings.text_model).strip()
-        chosen_model = requested_model or _session_model_pre or _default_model_pre
-        _using_gemini = (chosen_model == GEMINI_MODEL_ID)
-        _using_deepseek = (chosen_model == DEEPSEEK_MODEL_ID)
-        _using_zen = chosen_model.startswith("zen/") or chosen_model.startswith("go/")
-        _using_hf = chosen_model.startswith("huggingface/")
+        resolved = await resolve_model(db, requested_model=requested_model or _session_model_pre, task_type="chat", session_model=_session_model_pre)
+        chosen_model = resolved["model_id"]
+        provider_type = resolved.get("provider_type", "ollama")
+        provider_id = resolved.get("provider_id", "unknown")
+        _using_gemini = provider_type == "gemini"
+        _using_deepseek = provider_type == "deepseek"
+        _using_zen = provider_type == "opencode"
+        _using_hf = provider_type == "huggingface"
         _using_cloud = (chosen_model == "cloud")
 
-        if _using_gemini and not gemini_configured():
+        # Validate via DB instead of env vars
+        is_cloud_provider = _using_gemini or _using_deepseek or _using_zen or _using_hf or _using_cloud
+        creds = await resolve_provider_credentials(db, chosen_model, provider_id_hint=provider_id)
+        if is_cloud_provider and not creds["api_key"]:
             user_msg.status = "failed"
             db.add(user_msg)
             await db.commit()
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error": "gemini_not_configured",
-                    "message": "GEMINI_API_KEY is not set. Add it to your .env file and restart.",
-                    "session_id": session_uuid,
-                },
-            )
-
-        if _using_deepseek and not deepseek_configured():
-            user_msg.status = "failed"
-            db.add(user_msg)
-            await db.commit()
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error": "deepseek_not_configured",
-                    "message": "DEEPSEEK_API_KEY is not set. Add it to your .env file and restart.",
-                    "session_id": session_uuid,
-                },
-            )
-
-        if _using_zen and not zen_configured():
-            user_msg.status = "failed"
-            db.add(user_msg)
-            await db.commit()
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error": "zen_not_configured",
-                    "message": "OPENCODE_GO_API_KEY is not set. Get one at https://opencode.ai/go and add it to your .env file.",
-                    "session_id": session_uuid,
-                },
-            )
-
-        if _using_hf and not hf_configured():
-            user_msg.status = "failed"
-            db.add(user_msg)
-            await db.commit()
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error": "hf_not_configured",
-                    "message": "HF_API_KEY is not set. Get one at https://huggingface.co/settings/tokens and add it to your .env file.",
-                    "session_id": session_uuid,
-                },
-            )
+            return JSONResponse(status_code=503, content={
+                "error": "provider_not_configured",
+                "message": f"No API key found for provider of model '{chosen_model}'. Configure in Admin > Providers.",
+            })
 
         models: list[str] = []
         if not _using_gemini and not _using_deepseek and not _using_zen and not _using_hf and not _using_cloud:
@@ -915,20 +1010,8 @@ async def ask_document(
         embed_available = settings.embed_model in present
 
         allowed = set(settings.available_models or []) | present
-        # Cloud models are always allowed and virtually present when configured
-        if _using_gemini:
-            allowed.add(GEMINI_MODEL_ID)
-            present.add(GEMINI_MODEL_ID)
-        if _using_deepseek:
-            allowed.add(chosen_model)
-            present.add(chosen_model)
-        if _using_zen:
-            allowed.add(chosen_model)
-            present.add(chosen_model)
-        if _using_hf:
-            allowed.add(chosen_model)
-            present.add(chosen_model)
-        if _using_cloud:
+        # Cloud models are always allowed and virtually present
+        if is_cloud_provider:
             allowed.add(chosen_model)
             present.add(chosen_model)
 
@@ -1012,9 +1095,23 @@ async def ask_document(
         else:
             # Empty or already processed
             cross_refs_list = cross_refs
+        # Map citations to response format with all new fields
+        citation_objects = []
+        for c in rag.get("citations", []):
+            if isinstance(c, dict):
+                citation_objects.append(Citation(
+                    document_id=str(c.get("document_id")) if c.get("document_id") is not None else None,
+                    filename=c.get("filename"),
+                    chunk_index=c.get("chunk_index"),
+                    text=c.get("text"),
+                    snippet=c.get("text", ""),  # Backward compatibility
+                    full_text_available=c.get("full_text_available"),
+                    distance=c.get("distance"),
+                ))
+        
         return AskResponse(
             answer=rag.get("answer_text", ""),
-            citations=[Citation(**{**c, "document_id": str(c["document_id"])}) if isinstance(c, dict) and c.get("document_id") is not None else c for c in rag.get("citations", [])],
+            citations=citation_objects,
             cross_references=cross_refs_list,
             used_model=rag.get("used_model", ""),
             session_id=session_uuid,
@@ -1064,37 +1161,21 @@ async def ask_document_stream(
     if not doc:
         return JSONResponse(status_code=404, content={"error": "document_not_found"})
 
-    from app.services.gemini_service import GEMINI_MODEL_ID, is_configured as gemini_configured
-    from app.services.deepseek_service import DEEPSEEK_MODEL_ID, is_configured as deepseek_configured
-    from app.services.opencode_zen_service import is_configured as zen_configured
-    from app.services.huggingface_service import is_configured as hf_configured
-    from app.services.model_resolver_service import _get_provider_type
+    from app.services.model_resolver_service import _resolve_provider_type
 
     chosen_model = requested_model or (settings.default_model or settings.text_model).strip()
-    provider_type = _get_provider_type(chosen_model)
+    provider_type = await _resolve_provider_type(db, chosen_model)
     
-    # Use provider_type as the single source of truth
-    _using_gemini = provider_type == "gemini"
-    _using_deepseek = provider_type == "deepseek"
+    # Determine streaming support from provider metadata
+    from app.services.provider_gateway_service import provider_supports_streaming
+
     _using_zen = provider_type == "opencode"
-    _using_hf = provider_type == "huggingface"
-    _using_cloud = (chosen_model == "cloud")
-    is_cloud = _using_gemini or _using_deepseek or _using_zen or _using_hf or _using_cloud
+    streaming_supported = provider_supports_streaming(provider_type)
 
-    if not is_cloud:
-        return JSONResponse(status_code=400, content={"error": "streaming_only_for_cloud", "message": "Streaming is only supported for cloud models (Gemini, DeepSeek, Zen, HuggingFace). Use the non-streaming endpoint for local models."})
+    if not streaming_supported:
+        return JSONResponse(status_code=400, content={"error": "streaming_not_supported", "message": "The selected provider does not support streaming. Use the non-streaming endpoint or select a different model."})
 
-    if _using_gemini and not gemini_configured():
-        return JSONResponse(status_code=503, content={"error": "gemini_not_configured"})
-    if _using_deepseek and not deepseek_configured():
-        return JSONResponse(status_code=503, content={"error": "deepseek_not_configured"})
-    if _using_zen and not zen_configured():
-        return JSONResponse(status_code=503, content={"error": "zen_not_configured"})
-    if _using_hf and not hf_configured():
-        return JSONResponse(status_code=503, content={"error": "hf_not_configured"})
-    if _using_cloud:
-        # 'cloud' is an alias that uses the fallback chain — no mandatory API key needed
-        pass
+    # Configuration checks: warn but don't block — let the streamer handle routing
 
     # Create/reuse session
     s = None
@@ -1116,30 +1197,32 @@ async def ask_document_stream(
     sys_prompt = (settings.zetdc.system_prompt or "").strip() or None
     final_session_uuid = s.session_uuid
 
-    # Retrieve document chunks via RAG for context
+    # Retrieve document chunks via unified RAG service
+    # Uses get_rag_answer_scoped() — same code path as ask_global()
     rag_context = None
+    citations_list: list[dict] = []
     try:
-        from app.utils.ollama_client import ollama as rag_ollama
-        from app.utils.chroma_client import chroma
-        installed_models = await asyncio.wait_for(rag_ollama.list_models(), timeout=5.0)
-        embed_ok = settings.embed_model in (installed_models or [])
-        if embed_ok:
-            query_embedding = await rag_ollama.embed(settings.embed_model, question)
-            res = chroma.query(str(doc.project_id), query_embedding, top_k=6, where={"document_id": doc_int})
-            docs = (res.get("documents") or [[]])[0] if isinstance(res, dict) else []
-            metas = (res.get("metadatas") or [[]])[0] if isinstance(res, dict) else []
-            if docs:
-                context_parts = []
-                for i, txt in enumerate(docs or []):
-                    meta = metas[i] if i < len(metas) else {}
-                    fname = meta.get("filename", doc.filename or "Unknown")
-                    context_parts.append(f"Source: {fname}\nContent: {txt[:1500]}")
-                rag_context = "\n\n".join(context_parts)
-                print(f"\n=== RAG: Found {len(docs)} chunks for doc #{doc_int} ===", flush=True)
-            else:
-                print(f"\n=== RAG: No chunks found for doc #{doc_int} ===", flush=True)
+        from app.services.rag_service import get_rag_answer_scoped as rag_scoped
+
+        rag_result = await rag_scoped(
+            [int(doc.project_id)],
+            question,
+            db,
+            document_id=doc_int,
+            model_name=chosen_model,
+        )
+
+        citations_list = rag_result.get("citations", [])
+        rag_context = "\n\n".join(
+            f"Source: {c.get('filename', 'Unknown')}, Chunk {c.get('chunk_index', 0)}\nContent: {(c.get('text', '') or '')[:1500]}"
+            for c in citations_list
+        ) if citations_list else None
+
+        if citations_list:
+            doc_ids = list(dict.fromkeys([c.get("document_id") for c in citations_list if c.get("document_id")]))
+            print(f"\n=== RAG: Found {len(citations_list)} chunks for doc #{doc_int}, doc_ids={doc_ids} ===", flush=True)
         else:
-            print(f"\n=== RAG: Embed model '{settings.embed_model}' not installed ===", flush=True)
+            print(f"\n=== RAG: No chunks found for doc #{doc_int} ===", flush=True)
     except Exception as e:
         print(f"\n=== RAG: Error: {e} ===", flush=True)
 
@@ -1164,24 +1247,47 @@ async def ask_document_stream(
 
     async def event_gen():
         full_text = ""
+        reasoning_text = ""
         try:
             if rag_context:
                 doc_prompt = f"Answer the question using ONLY the provided context. Always cite sources.\n\nQuestion: {question}\n\nContext:\n{rag_context}"
+                logger.info(
+                    "[RAG_PROMPT] doc_stream — context=%d chars | total_prompt=%d chars | "
+                    "chunks=%d | citations=%d",
+                    len(rag_context), len(doc_prompt),
+                    len(citations_list), len(citations_list),
+                )
             else:
                 doc_title = doc.filename or doc.title or f"Document #{doc_int}"
                 doc_prompt = f"Answer the following question about the document titled '{doc_title}'. The document has been selected but its full content could not be retrieved. Provide your best answer based on the document title and any available context.\n\nQuestion: {question}"
+                logger.warning("[RAG_FALLBACK] reason=no_context_doc_stream | doc_id=%s | doc_title=%s", doc_int, doc_title)
             try:
                 async with asyncio.timeout(120.0):
-                    async for chunk in _stream_cloud_answer(doc_prompt, chosen_model, sys_prompt, _using_gemini, _using_deepseek, _using_zen, _using_hf, _using_cloud=_using_cloud):
-                        full_text += chunk
-                        data = json.dumps({"chunk": chunk, "model": chosen_model, "session_id": final_session_uuid})
+                    async for event in _stream_cloud_answer(doc_prompt, chosen_model, sys_prompt, _using_zen=_using_zen, db=db):
+                        event_type = event.get("type", "content") if isinstance(event, dict) else "content"
+                        event_content = event.get("content", "") if isinstance(event, dict) else event
+                        if event_type == "content":
+                            full_text += event_content
+                        elif event_type == "reasoning":
+                            reasoning_text += event_content
+                        data = json.dumps({
+                            "type": event_type,
+                            "content": event_content,
+                            "model": chosen_model,
+                            "session_id": final_session_uuid,
+                        })
                         yield f"data: {data}\n\n"
+                logger.info(
+                    "[RAG_RESPONSE] doc_stream_complete — answer_length=%d | reasoning_length=%d | "
+                    "citation_count=%d | model=%s",
+                    len(full_text), len(reasoning_text), len(citations_list), chosen_model,
+                )
             except asyncio.TimeoutError:
                 err = "The AI model did not respond within 2 minutes. Please try again."
-                yield f"data: {json.dumps({'error': err})}\n\n"
+                yield f"data: {json.dumps({'type': 'content', 'content': err, 'model': chosen_model, 'session_id': final_session_uuid})}\n\n"
                 full_text = f"Error: {err}"
         except Exception as exc:
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            yield f"data: {json.dumps({'type': 'content', 'content': str(exc), 'model': chosen_model, 'session_id': final_session_uuid})}\n\n"
             full_text = f"Error: {exc}"
 
         # Save assistant message after streaming completes
@@ -1190,13 +1296,18 @@ async def ask_document_stream(
                 session_id=s.id,
                 role="assistant",
                 content=full_text,
+                reasoning=reasoning_text or None,
                 status="done",
-                citations_json="[]",
+                citations_json=json.dumps(citations_list),
             )
             db.add(assistant)
             s.updated_at = datetime.datetime.now(datetime.timezone.utc)
             db.add(s)
             await db.commit()
+            logger.info(
+                "[REASONING] doc_stream_saved — assistant_msg reasoning=%d chars | citations=%d",
+                len(reasoning_text), len(citations_list),
+            )
         except Exception:
             pass
 

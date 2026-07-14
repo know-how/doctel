@@ -116,7 +116,12 @@ INSERT INTO task_types (code, name, description, display_order, is_active) VALUE
 ('vision', 'Vision', 'Image understanding and analysis', 6, TRUE),
 ('embedding', 'Embedding', 'Text embedding generation', 7, TRUE),
 ('rag', 'RAG', 'Retrieval-Augmented Generation', 8, TRUE),
-('code_generation', 'Code Generation', 'Generate and analyze code', 9, TRUE)
+('code_generation', 'Code Generation', 'Generate and analyze code', 9, TRUE),
+('reasoning', 'Reasoning', 'Advanced reasoning and problem-solving', 10, TRUE),
+('tools_functions', 'Tools/Functions', 'Function calling and tool use', 11, TRUE),
+('audio', 'Audio', 'Audio processing and transcription', 12, TRUE),
+('translation', 'Translation', 'Language translation', 13, TRUE),
+('ocr', 'OCR', 'Optical character recognition', 14, TRUE)
 ON DUPLICATE KEY UPDATE 
     name = VALUES(name),
     description = VALUES(description),

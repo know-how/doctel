@@ -121,7 +121,7 @@ export async function getModelRegistry(forceRefresh = false): Promise<ModelRegis
         name: "Ollama",
         vendor: "ollama",
         base_url: "http://localhost:11434",
-        api_key_env: "",
+        api_key_value: "",
         status: "active",
         description: "Local models",
         icon: "cpu",

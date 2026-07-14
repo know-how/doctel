@@ -70,17 +70,17 @@ class ModelAvailability:
     @property
     def is_visible(self) -> bool:
         """Whether the model should appear in selectors."""
-        return self.status in (ModelStatus.ACTIVE, ModelStatus.MAINTENANCE)
+        return self.status in (ModelStatus.ACTIVE, ModelStatus.INSTALLED, ModelStatus.AVAILABLE, ModelStatus.MAINTENANCE)
     
     @property
     def is_selectable(self) -> bool:
         """Whether the model can be selected/used."""
-        return self.status == ModelStatus.ACTIVE
+        return self.status in (ModelStatus.ACTIVE, ModelStatus.INSTALLED, ModelStatus.AVAILABLE)
     
     @property
     def is_available_for_routing(self) -> bool:
         """Whether the model can be used by Auto Routing."""
-        return self.status == ModelStatus.ACTIVE
+        return self.status in (ModelStatus.ACTIVE, ModelStatus.INSTALLED, ModelStatus.AVAILABLE)
     
     @property
     def is_disabled(self) -> bool:
@@ -136,13 +136,15 @@ async def get_available_models(
         List of ModelAvailability objects for models that should be visible
     """
     # Query for models that are NOT inactive or retired
-    visible_statuses = [ModelStatus.ACTIVE, ModelStatus.MAINTENANCE]
+    visible_statuses = [ModelStatus.ACTIVE, ModelStatus.INSTALLED, ModelStatus.AVAILABLE, ModelStatus.MAINTENANCE]
     if not include_maintenance:
-        visible_statuses = [ModelStatus.ACTIVE]
+        visible_statuses = [ModelStatus.ACTIVE, ModelStatus.INSTALLED, ModelStatus.AVAILABLE]
     
     query = select(AIModel).join(AIProvider).where(
         AIModel.state.in_(visible_statuses),
+        AIModel.visible_to_users == True,
         AIProvider.status == "active",
+        AIProvider.visible_to_users == True,
     )
     
     result = await db.execute(query)
@@ -283,7 +285,7 @@ async def is_model_selectable(
     """
     query = select(AIModel).join(AIProvider).where(
         AIModel.model_id == model_id,
-        AIModel.state == ModelStatus.ACTIVE,
+        AIModel.state.in_([ModelStatus.ACTIVE, ModelStatus.INSTALLED, ModelStatus.AVAILABLE]),
         AIProvider.status == "active",
     )
     

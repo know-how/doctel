@@ -22,6 +22,7 @@ interface Message {
   id: number | string
   role: "user" | "assistant" | "system"
   content: string
+  reasoning?: string
   uiStatus: "waiting" | "streaming" | "done" | "error"
   citations: Citation[]
   createdAt?: string
@@ -103,12 +104,13 @@ export const NewChatPage: React.FC = () => {
     loadPrompts()
   }, [model, modelCapabilities])
 
-  // On mount, ensure we have the best chat-optimized model
+  // On mount, apply Task Mapping for chat — wait until both loading is done
+  // AND taskDefaults are populated to prevent the "empty defaults" race.
   useEffect(() => {
-    if (!loadingModels && !model) {
+    if (!loadingModels && Object.keys(taskDefaults).length > 0) {
       setModelForTask("chat")
     }
-  }, [loadingModels, model, setModelForTask])
+  }, [loadingModels, taskDefaults])
 
   // When model changes and a session exists, persist to backend
   const handleModelChange = async (nextModel: string) => {
@@ -306,14 +308,17 @@ export const NewChatPage: React.FC = () => {
         localStorage.setItem("docintel_newchat_session", sid)
       }
 
-      const cloudModel = isCloudModel(model, modelDetails)
+      const cloudModel = isCloudModel(model, modelDetails, v2Providers)
 
+      // Always use streaming for any model found in the V2 provider catalog.
+      // Non-V2 (pure Ollama/local) models can use the non-streaming endpoint.
       if (cloudModel) {
         await chatGloballyStream(
           {
             question: q,
             session_id: sid,
             model: model || undefined,
+            scope: "all",
           },
           {
             onChunk: (chunk) => {
@@ -321,6 +326,15 @@ export const NewChatPage: React.FC = () => {
                 prev.map((m) =>
                   m.id === thinkingId
                     ? { ...m, content: (m.content || "") + chunk, uiStatus: "streaming" as const }
+                    : m,
+                ),
+              )
+            },
+            onReasoning: (reasoning) => {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === thinkingId
+                    ? { ...m, reasoning: (m.reasoning || "") + reasoning }
                     : m,
                 ),
               )
@@ -361,6 +375,7 @@ export const NewChatPage: React.FC = () => {
         id: m.id ?? generateId(),
         role: m.role ?? "assistant",
         content: m.content ?? "",
+        reasoning: m.reasoning ?? undefined,
         uiStatus: (m.status === "failed" || m.status === "error") ? "error" : "done",
         citations: m.citations ?? [],
         createdAt: m.created_at ?? "",
@@ -851,6 +866,42 @@ export const NewChatPage: React.FC = () => {
                               </span>
                             ))}
                           </div>
+                        )}
+
+                        {/* Reasoning / Thinking block */}
+                        {!isUser && msg.reasoning && (
+                          <details style={{
+                            marginTop: 12, paddingTop: 10,
+                            borderTop: `1px solid ${t.colors.border}`,
+                            fontSize: 12.5,
+                          }}>
+                            <summary style={{
+                              cursor: "pointer",
+                              color: t.colors.textMuted,
+                              fontWeight: 600,
+                              fontSize: 11,
+                              letterSpacing: "0.3px",
+                              textTransform: "uppercase" as const,
+                              userSelect: "none",
+                              outline: "none",
+                            }}>
+                              💭 Show reasoning
+                            </summary>
+                            <div style={{
+                              marginTop: 8,
+                              padding: "10px 14px",
+                              background: t.colors.surfaceActive,
+                              borderRadius: 8,
+                              color: t.colors.textSecondary,
+                              fontSize: 12.5,
+                              lineHeight: 1.65,
+                              fontStyle: "italic",
+                              whiteSpace: "pre-wrap",
+                              borderLeft: `3px solid ${t.colors.primary}40`,
+                            }}>
+                              {msg.reasoning}
+                            </div>
+                          </details>
                         )}
                       </div>
 

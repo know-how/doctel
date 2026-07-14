@@ -74,6 +74,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const [email, setEmail] = useState("")
   const [emailCode, setEmailCode] = useState("")
   const [emailSent, setEmailSent] = useState(false)
+  const [devCode, setDevCode] = useState<string | null>(null)
   const [loginMode, setLoginMode] = useState<"ec" | "email">("email")
   const [touched, setTouched] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -403,7 +404,10 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
               try {
                 setLoading(true)
                 if (!emailSent) {
-                  await requestEmailOtp({ email: email.trim() })
+                  const otpResp = await requestEmailOtp({ email: email.trim() })
+                  if ((otpResp as any).dev_code) {
+                    setDevCode((otpResp as any).dev_code)
+                  }
                   setEmailSent(true)
                 } else {
                   if (!emailCode.trim()) return
@@ -510,6 +514,16 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
                 </div>
                 {emailSent && (
                   <div>
+                    {devCode && (
+                      <div style={{ background: "rgba(91,136,255,0.15)", border: "1px solid rgba(91,136,255,0.4)", borderRadius: 12, padding: "12px 16px", marginBottom: 14, textAlign: "center" }}>
+                        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", marginBottom: 4, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                          🔑 Dev Mode — Verification Code
+                        </div>
+                        <div style={{ fontSize: 28, fontWeight: 700, color: "#5B88FF", letterSpacing: "0.2em", fontFamily: "monospace" }}>
+                          {devCode}
+                        </div>
+                      </div>
+                    )}
                     <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "rgba(255,255,255,0.5)", marginBottom: 8, letterSpacing: "0.05em", textTransform: "uppercase" }}>
                       Verification Code
                     </label>
@@ -538,7 +552,10 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
                       onClick={async () => {
                         try {
                           setLoading(true)
-                          await requestEmailOtp({ email: email.trim() })
+                          const otpResp = await requestEmailOtp({ email: email.trim() })
+                          if ((otpResp as any).dev_code) {
+                            setDevCode((otpResp as any).dev_code)
+                          }
                           setEmailCode("")
                         } catch (err: any) {
                           setAuthError(err.message ?? "Failed to resend")
@@ -735,7 +752,12 @@ export const App: React.FC = () => {
         const me = await getMe()
         setUserRole(me.role || "")
         setDisplayName(me.display_name || "")
-      } catch {}
+      } catch {
+        // Token invalid or backend unavailable — clear auth to show login page
+        clearAuthToken()
+        setHasToken(false)
+        setUserRole("")
+      }
     }
     loadMe()
   }, [hasToken, authEpoch])

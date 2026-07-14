@@ -124,10 +124,15 @@ class SummaryHistoryResponse(BaseModel):
 
 # Ask Response Models
 class Citation(BaseModel):
-    """Citation source for answer"""
+    """Citation source for answer with full chunk text"""
     document_id: str | None = None
-    snippet: str | None = None
+    filename: str | None = None
+    chunk_index: int | None = None
+    text: str | None = None  # Full chunk text excerpt
+    snippet: str | None = None  # Backward compatibility alias
     page: int | None = None
+    full_text_available: bool | None = None
+    distance: float | None = None  # Relevance score (lower is better)
 
 
 class CrossReference(BaseModel):
@@ -139,6 +144,7 @@ class CrossReference(BaseModel):
 class AskResponse(BaseModel):
     """Response from ask endpoints"""
     answer: str
+    reasoning: str | None = None
     citations: List[Citation] = Field(default_factory=list)
     cross_references: List[CrossReference] = Field(default_factory=list)
     used_model: str | None = None

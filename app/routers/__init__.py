@@ -38,6 +38,8 @@ def include_routers(app) -> None:
     from .system_diagnostics import router as system_diag_router
     from .config_lookup import router as config_lookup_router
     from .prompt_suggestions import router as prompt_suggestions_router
+    from .enterprise_admin import router as enterprise_admin_router
+    from .admin_embeddings import router as admin_embeddings_router
 
     app.include_router(health_router)
     app.include_router(auth_router)
@@ -63,6 +65,8 @@ def include_routers(app) -> None:
     app.include_router(system_diag_router)
     app.include_router(config_lookup_router)
     app.include_router(prompt_suggestions_router)
+    app.include_router(enterprise_admin_router)
+    app.include_router(admin_embeddings_router)
 
 
 __all__ = [

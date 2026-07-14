@@ -33,6 +33,13 @@ def _get_client() -> AsyncOpenAI:
 
 
 def _api_key() -> str:
+    from app.services.provider_credential_resolver import resolve_api_key
+    key = resolve_api_key(vendor="huggingface")
+    if key:
+        return key
+    key = resolve_api_key(vendor="hf")
+    if key:
+        return key
     return os.getenv("HF_API_KEY", "").strip()
 
 

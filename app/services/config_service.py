@@ -163,7 +163,6 @@ async def add_provider(
     name: str,
     vendor: str = "",
     base_url: str = "",
-    api_key_env: str = "",
     api_key_value: str = "",
     description: str = "",
     icon: str = "generic",
@@ -174,6 +173,7 @@ async def add_provider(
     messages_endpoint: str = "",
     embeddings_endpoint: str = "",
     health_endpoint: str = "",
+    visible_to_users: bool = True,
 ) -> AIProvider:
     """Create a new provider with flexible endpoint configuration."""
     exists = await get_provider_by_id(provider_id, db)
@@ -185,7 +185,6 @@ async def add_provider(
         name=name,
         vendor=vendor or name,
         base_url=base_url,
-        api_key_env=api_key_env,
         api_key_value=api_key_value,
         status="disconnected",
         is_connected=False,
@@ -198,6 +197,7 @@ async def add_provider(
         messages_endpoint=messages_endpoint,
         embeddings_endpoint=embeddings_endpoint,
         health_endpoint=health_endpoint,
+        visible_to_users=visible_to_users,
     )
     db.add(provider)
     await db.commit()
@@ -216,7 +216,7 @@ async def update_provider(
         return None
 
     safe_fields = {
-        "name", "vendor", "base_url", "api_key_env", "api_key_value",
+        "name", "vendor", "base_url", "api_key_value",
         "description", "icon", "sort_order", "status", "is_connected",
         "last_tested_at", "provider_type", "models_endpoint", "chat_endpoint",
         "messages_endpoint", "embeddings_endpoint", "health_endpoint",
@@ -361,6 +361,7 @@ async def update_model(
         "supports_classification", "supports_summary", "supports_extraction",
         "supports_audio", "supports_comparison",
         "allowed_roles", "department_restrictions", "for_tasks",
+        "visible_to_users",
     }
     for field, value in updates.items():
         if field in safe_fields:

@@ -109,6 +109,18 @@ async def api_models_available(db: AsyncSession = Depends(get_db)):
     # Get all models with visibility (ACTIVE and MAINTENANCE)
     db_models = await get_available_models(db, include_maintenance=True)
     
+    # DEBUG: Log model list construction
+    logger.info("[MODEL LIST DEBUG] === /api/models/installed START ===")
+    logger.info("[MODEL LIST DEBUG] v2_providers count: %d", len(v2_providers))
+    for p in v2_providers:
+        logger.info("[MODEL LIST DEBUG] Provider: id=%s, name=%s, provider_id=%s", 
+                   p.get('id'), p.get('name'), p.get('provider_id'))
+    logger.info("[MODEL LIST DEBUG] ollama_installed: %s", ollama_installed)
+    logger.info("[MODEL LIST DEBUG] db_models count: %d", len(db_models))
+    for m in db_models:
+        logger.info("[MODEL LIST DEBUG] DB Model: model_id=%s, provider_id=%s, status=%s", 
+                   m.model_id, m.provider_id, m.status)
+    
     # Build provider-grouped model structure
     # Only include models where status is ACTIVE or MAINTENANCE
     selectable_models = []  # ACTIVE only - can be selected/used
@@ -205,6 +217,15 @@ async def api_models_available(db: AsyncSession = Depends(get_db)):
     default_model = await app_cfg.get_setting(db, "models.default", None)
     if not default_model and selectable_model_ids:
         default_model = selectable_model_ids[0]
+    
+    # DEBUG: Log final response
+    logger.info("[MODEL LIST DEBUG] === /api/models/installed END ===")
+    logger.info("[MODEL LIST DEBUG] filtered_installed: %s", filtered_installed)
+    logger.info("[MODEL LIST DEBUG] filtered_available: %s", filtered_available)
+    logger.info("[MODEL LIST DEBUG] v2_providers count in response: %d", len(v2_providers))
+    for p in v2_providers:
+        logger.info("[MODEL LIST DEBUG] v2_provider in response: id=%s, name=%s", 
+                   p.get('id'), p.get('name'))
     
     return {
         "installed": filtered_installed,

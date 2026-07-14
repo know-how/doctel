@@ -44,7 +44,14 @@ export const AnalyzeClassificationPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [removedTags, setRemovedTags] = useState<Record<string, string[]>>({})
 
-  const { selectedModel, setSelectedModel, availableModels, v2Providers } = useModel()
+  const { selectedModel, setSelectedModel, availableModels, loading: loadingModels, setModelForTask, v2Providers, taskDefaults } = useModel()
+
+  // On mount, apply Task Mapping for classification — wait until taskDefaults are populated
+  useEffect(() => {
+    if (!loadingModels && Object.keys(taskDefaults).length > 0) {
+      setModelForTask("classification")
+    }
+  }, [loadingModels, taskDefaults])
 
   useEffect(() => {
     const styleId = "classify-anim"

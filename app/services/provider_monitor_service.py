@@ -41,13 +41,10 @@ async def check_provider_health(provider_id: str, provider_dict: dict) -> dict:
     models_endpoint = provider_dict.get("modelsEndpoint") or provider_dict.get("models_endpoint")
     chat_endpoint = provider_dict.get("chatEndpoint") or provider_dict.get("chat_endpoint")
     messages_endpoint = provider_dict.get("messagesEndpoint") or provider_dict.get("messages_endpoint")
-    api_key_env = provider_dict.get("api_key_env", "")
+    api_key_value = provider_dict.get("api_key_value", "")
     
-    # Get API key from environment if configured
-    api_key = None
-    if api_key_env:
-        import os
-        api_key = os.environ.get(api_key_env)
+    # Use API key from database
+    api_key = api_key_value or None
     
     try:
         result = await test_provider_connection(
@@ -90,7 +87,7 @@ async def run_health_checks():
                     "models_endpoint": prov.models_endpoint,
                     "chat_endpoint": prov.chat_endpoint,
                     "messages_endpoint": prov.messages_endpoint,
-                    "api_key_env": prov.api_key_env,
+                    "api_key_value": prov.api_key_value,
                 }
                 
                 # Perform health check

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react"
-import { getAvailableModels, getModelCapabilities, getModelLabels, v2SelectModelForTask } from "../api/client"
-import type { OllamaModelDetail, ModelsAvailableResponse, V2Provider } from "../types/api"
+import { getAvailableModels, getModelCapabilities, getModelLabels, v2SelectModelForTask, v2GetCatalog } from "../api/client"
+import type { OllamaModelDetail, ModelsAvailableResponse, V2Provider, V2CatalogResponse } from "../types/api"
 
 const MODEL_KEY = "docintel_selected_model"
 const BC_CHANNEL = "doctel-model-updates"
@@ -75,57 +75,113 @@ export function ModelProvider({ children }: { children: ReactNode }) {
       ])
       setRawRes(res)
 
-      // Build consolidated model list: installed + available + V2-provided models
+      // ── Provider source: prefer v2GetCatalog (same as Task Mapping) ──
+      let catalogProviders: V2Provider[] = []
+      let catalogTaskMapping: Record<string, any> = {}
+      let catalogAutoRouting = true
+
+      let catalog: V2CatalogResponse | null = null
+      try {
+        catalog = await v2GetCatalog()
+        catalogProviders = catalog.providers || []
+        catalogTaskMapping = catalog.taskMapping || {}
+        catalogAutoRouting = catalog.automaticRouting !== false
+      } catch {
+        // Fallback: use v2_providers from available endpoint (same get_all_providers backend)
+        catalogProviders = res.v2_providers || []
+        catalogAutoRouting = res.v2_auto_routing !== false
+        // Reconstruct flat task mapping from res.defaults
+        for (const [taskType, modelId] of Object.entries(res.defaults || {})) {
+          catalogTaskMapping[taskType] = { modelId }
+        }
+      }
+      
+      // Store providers from catalog, filtering by visible_to_users for user-facing contexts
+      // Admin pages use v2GetCatalog directly so they see all
+      const userVisibleProviders = catalogProviders
+        .filter((p: any) => p.visibleToUsers !== false)
+        .map((p: any) => ({
+          ...p,
+          models: (p.models || []).filter((m: any) => m.visibleToUsers !== false),
+        }))
+      setV2Providers(userVisibleProviders)
+      setV2AutoRouting(catalogAutoRouting)
+
+      // ── Build flat model list ──
       const all: string[] = [...new Set([...(res.installed || []), ...(res.available || [])])]
 
-      // Include V2-managed models that are selectable (active, installed, available)
-      // Also include MAINTENANCE models (visible but disabled for selection)
       let filteredModels = all
-      const v2provs = res.v2_providers || []
       const VISIBLE_STATES = ['active', 'installed', 'available', 'maintenance']
-      if (v2provs.length > 0) {
+      if (userVisibleProviders.length > 0) {
         const v2VisibleModels = new Set<string>()
-        for (const p of v2provs) {
+        for (const p of userVisibleProviders) {
           for (const m of p.models || []) {
-            // ACTIVE, INSTALLED, AVAILABLE, and MAINTENANCE models are visible
             if (VISIBLE_STATES.includes(m.state)) {
               v2VisibleModels.add(m.id)
             }
           }
         }
         filteredModels = all.filter((modelId) => {
-          // If not a V2-managed model, keep it (legacy behavior)
-          const isV2Managed = v2provs.some((p: any) => 
+          const isV2Managed = userVisibleProviders.some((p: any) => 
             (p.models || []).some((m: any) => m.id === modelId)
           )
           if (!isV2Managed) return true
-          // For V2-managed models, only keep if visible
           return v2VisibleModels.has(modelId)
         })
       }
-      setAvailableModels(filteredModels)
       setModelDetails(res.models || [])
       setOffline(Boolean(res.offline))
 
-      // Merge capabilities: registry first, then augment with model detail caps + V2 caps
-      const mergedCaps = { ...(capsRes.capabilities || {}) }
+      // ── Merge capabilities ──
+      const mergedCaps: Record<string, string[]> = { ...(capsRes.capabilities || {} as Record<string, string[]>) }
       for (const detail of (res.models || [])) {
         if (detail.capabilities && detail.capabilities.length > 0 && !mergedCaps[detail.name]) {
           mergedCaps[detail.name] = detail.capabilities
         }
       }
+      // Augment with provider-level capabilities from catalog
+      for (const p of catalogProviders) {
+        for (const m of p.models || []) {
+          if (m.capabilities && m.capabilities.length > 0 && !mergedCaps[m.id]) {
+            mergedCaps[m.id] = m.capabilities
+          }
+        }
+      }
       setModelCapabilities(mergedCaps)
       setModelLabels(labelsRes.labels || {})
 
-      // Store V2 data
-      const v2provsData = res.v2_providers || []
-      setV2Providers(v2provsData)
-      setV2AutoRouting(res.v2_auto_routing !== false)
-      setTaskDefaults(res.defaults || {})
+      // ── Task defaults: derive from catalog.taskMapping (same source as Task Mapping page) ──
+      // Use catalogProviders (pre-visibility-filtering) to build the lookup so
+      // Task Mapping model IDs are found regardless of visibility filtering order.
+      const v2ModelIdSet = new Set<string>()
+      for (const p of catalogProviders) {
+        for (const m of p.models || []) {
+          if (VISIBLE_STATES.includes(m.state)) {
+            v2ModelIdSet.add(m.id)
+          }
+        }
+      }
 
-      // Select default model from filtered list
-      const selected = recalcDefault(res, filteredModels)
-      if (selected) setSelectedModelState(selected)
+      const flatTaskDefaults: Record<string, string> = {}
+      for (const [taskType, mapping] of Object.entries(catalogTaskMapping)) {
+        const m = mapping as any
+        const mid = m.modelId || ""
+        if (mid && (filteredModels.includes(mid) || v2ModelIdSet.has(mid))) {
+          flatTaskDefaults[taskType] = mid
+          // Ensure the model is in filteredModels too (in case it was missed by the backend filter)
+          if (!filteredModels.includes(mid)) {
+            filteredModels.push(mid)
+          }
+        }
+      }
+      setAvailableModels(filteredModels)
+      setTaskDefaults(flatTaskDefaults)
+
+      // ── ModelContext does NOT auto-select a model ──
+      // Every page calls setModelForTask(taskType) on mount.
+      // That function uses taskDefaults + auto-routing + fallback.
+      // Auto-selecting here creates a race where the wrong model
+      // wins before taskDefaults finishes loading.
     } catch {
     } finally {
       setLoading(false)
@@ -160,19 +216,18 @@ export function ModelProvider({ children }: { children: ReactNode }) {
     try { localStorage.setItem(MODEL_KEY, model) } catch {}
   }, [])
 
-  // ── Set model for a specific task, using auto-routing if enabled ──────
+  // ── Set model for a specific task, using task mapping as primary source ──
+  // Priority: 1) Task Mapping  →  2) Auto-routing  →  3) System fallback
+  // Note: localStorage preference is intentionally NOT checked here.
+  // Task Mapping is the single source of truth for page defaults.
+  // Users can still manually change the model after page load.
   const setModelForTask = useCallback(async (taskType: string) => {
-    const stored = getStoredModel()
-    if (stored && availableModels.includes(stored)) {
-      setSelectedModelState(stored)
+    // 1) Task Mapping default (source of truth for page defaults)
+    if (taskDefaults[taskType] && availableModels.includes(taskDefaults[taskType])) {
+      setSelectedModelState(taskDefaults[taskType])
       return
     }
-    // Check task defaults from V2 mapping
-    if (rawRes?.defaults?.[taskType] && availableModels.includes(rawRes.defaults[taskType])) {
-      setSelectedModelState(rawRes.defaults[taskType])
-      return
-    }
-    // Try V2 auto-routing
+    // 2) Auto-routing
     if (v2AutoRouting) {
       try {
         const routeRes = await v2SelectModelForTask(taskType)
@@ -180,14 +235,13 @@ export function ModelProvider({ children }: { children: ReactNode }) {
           setSelectedModelState(routeRes.model.id)
           return
         }
-      } catch {
-        // fall through
-      }
+      } catch { /* fall through */ }
     }
-    // Fallback to chat default or first
-    const next = recalcDefault(rawRes || { installed: [] }, availableModels, taskType)
+    // 3) Chat default → default_model → first available
+    const syntheticRes: any = { ...rawRes, defaults: taskDefaults }
+    const next = recalcDefault(syntheticRes || { installed: [] }, availableModels, taskType)
     if (next) setSelectedModelState(next)
-  }, [availableModels, rawRes, v2AutoRouting, recalcDefault])
+  }, [availableModels, rawRes, v2AutoRouting, recalcDefault, taskDefaults])
 
   return (
     <ModelContext.Provider value={{

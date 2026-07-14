@@ -1,7 +1,7 @@
 from fastapi import Depends, HTTPException, status, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, DatabaseError
 from typing import Optional, List
 
 from app.db.database import get_db
@@ -16,46 +16,57 @@ async def get_current_user(
 ) -> User:
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
-        if token.startswith("local-"):
-            username = token.replace("local-", "", 1) or "admin"
-            result = await db.execute(select(User).where(User.username == username))
-            user = result.scalar_one_or_none()
-            if not user:
-                user = User(username=username, role="admin" if username == "admin" else "analyst", ec_number=username)
-                db.add(user)
-                await db.commit()
-            request.state.user_id = user.id
-            request.state.username = user.username
-            return user
-        else:
-            sess = auth_service.validate_token(token)
-            if not sess:
-                # Try loading from database (survives server restart)
-                sess = await auth_service._load_session_from_db(token)
-                if sess:
-                    # Cache in memory for subsequent requests
-                    auth_service._session_store[token] = sess
-            if not sess:
-                raise HTTPException(status_code=401, detail={"error": "token_expired"})
-            user_id = sess.get("user_id")
-            if not user_id:
-                raise HTTPException(status_code=401, detail={"error": "token_expired"})
-            result = await db.execute(select(User).where(User.id == int(user_id)))
-            user = result.scalar_one_or_none()
-            if not user:
-                raise HTTPException(status_code=401, detail={"error": "token_expired"})
-            request.state.user_id = user.id
-            request.state.username = user.username
-            return user
+        try:
+            if token.startswith("local-"):
+                username = token.replace("local-", "", 1) or "admin"
+                result = await db.execute(select(User).where(User.username == username))
+                user = result.scalar_one_or_none()
+                if not user:
+                    user = User(username=username, role="admin" if username == "admin" else "analyst", ec_number=username)
+                    db.add(user)
+                    await db.commit()
+                request.state.user_id = user.id
+                request.state.username = user.username
+                return user
+            else:
+                sess = auth_service.validate_token(token)
+                if not sess:
+                    # Try loading from database (survives server restart)
+                    sess = await auth_service._load_session_from_db(token)
+                    if sess:
+                        # Cache in memory for subsequent requests
+                        auth_service._session_store[token] = sess
+                if not sess:
+                    raise HTTPException(status_code=401, detail={"error": "token_expired"})
+                user_id = sess.get("user_id")
+                if not user_id:
+                    raise HTTPException(status_code=401, detail={"error": "token_expired"})
+                result = await db.execute(select(User).where(User.id == int(user_id)))
+                user = result.scalar_one_or_none()
+                if not user:
+                    raise HTTPException(status_code=401, detail={"error": "token_expired"})
+                request.state.user_id = user.id
+                request.state.username = user.username
+                return user
+        except HTTPException:
+            raise
+        except (DatabaseError, Exception) as exc:
+            # Database unavailable (e.g. dropped/recreated) — treat as expired session
+            raise HTTPException(status_code=401, detail={"error": "token_expired"})
 
     if x_user_id:
-        result = await db.execute(select(User).where(User.id == x_user_id))
-        user = result.scalar_one_or_none()
-        if not user:
+        try:
+            result = await db.execute(select(User).where(User.id == x_user_id))
+            user = result.scalar_one_or_none()
+            if not user:
+                raise HTTPException(status_code=401, detail={"error": "token_expired"})
+            request.state.user_id = user.id
+            request.state.username = user.username
+            return user
+        except HTTPException:
+            raise
+        except (DatabaseError, Exception) as exc:
             raise HTTPException(status_code=401, detail={"error": "token_expired"})
-        request.state.user_id = user.id
-        request.state.username = user.username
-        return user
 
     raise HTTPException(status_code=401, detail={"error": "token_expired"})
 

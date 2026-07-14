@@ -200,7 +200,7 @@ def _send_email_code(email: str, code: str) -> None:
         raise HTTPException(status_code=500, detail="Email sending error")
 
 
-def request_email_code(email: str) -> None:
+def request_email_code(email: str) -> str:
     normalized = _normalize_email(email)
     if not _is_valid_zetdc_email(normalized):
         raise HTTPException(status_code=400, detail="Invalid ZETDC email")
@@ -209,7 +209,17 @@ def request_email_code(email: str) -> None:
         "code": code,
         "expires_at": datetime.utcnow() + timedelta(minutes=10),
     }
+
+    # ── Print verification code prominently to console ──────────────────
+    print("\n" + "!" * 60)
+    print(f"  🔑 LOGIN VERIFICATION CODE for {normalized}")
+    print(f"  📋 Code: {code}")
+    print(f"  ⏰ Expires: {datetime.utcnow() + timedelta(minutes=10)}")
+    print("!" * 60 + "\n")
+
     _send_email_code(normalized, code)
+
+    return code
 
 
 def verify_email_code(email: str, code: str) -> str:

@@ -370,7 +370,6 @@ async def registry_add_provider(
         name=name,
         vendor=payload.get("vendor", ""),
         base_url=payload.get("base_url", ""),
-        api_key_env=payload.get("api_key_env", ""),
         models=payload.get("models"),
     )
     return {"provider": provider}
@@ -382,8 +381,8 @@ async def registry_update_provider(
     payload: dict = Body(...),
     user: User = Depends(require_role(["admin"])),
 ):
-    """Update a provider's metadata (name, vendor, base_url, api_key_env)."""
-    allowed_keys = {"name", "vendor", "base_url", "api_key_env"}
+    """Update a provider's metadata (name, vendor, base_url)."""
+    allowed_keys = {"name", "vendor", "base_url"}
     updates = {k: v for k, v in payload.items() if k in allowed_keys}
     result = update_provider(provider_id, updates)
     if result is None:

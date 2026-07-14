@@ -55,8 +55,10 @@ async def _run() -> None:
     """
     while True:
         doc_id = await _queue.get()
+        logger.info(f"[WORKER] Dequeued document_id={doc_id} for ingestion")
         try:
             if doc_id in _cancelled_doc_ids:
+                logger.info(f"[WORKER] Document {doc_id} was cancelled, skipping")
                 _cancelled_doc_ids.discard(doc_id)
                 continue
             async with _semaphore:
@@ -65,11 +67,13 @@ async def _run() -> None:
                         result = await db.execute(select(Document).where(Document.id == doc_id))
                         doc = result.scalar_one_or_none()
                         if not doc:
-                            logger.info("Ingest worker: document not found id=%s", doc_id)
+                            logger.warning(f"[WORKER] Document {doc_id} not found in database")
                             continue
+                        logger.info(f"[WORKER] Starting ingest_document for {doc_id} (filename={doc.filename})")
                         await ingest_document(doc_id, db)
-                    except Exception:
-                        logger.exception("Failed to ingest document id=%s", doc_id)
+                        logger.info(f"[WORKER] Completed ingest_document for {doc_id}")
+                    except Exception as e:
+                        logger.exception(f"[WORKER] Failed to ingest document {doc_id}: {e}")
                         # On failure, don't crash the worker; optionally requeue or persist.
         finally:
             try:

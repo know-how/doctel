@@ -14,6 +14,8 @@ import {
   v2GetAudit,
   v2TestConnection,
   v2FetchModels,
+  v2SetModelVisibility,
+  v2SetProviderVisibility,
 } from "../api/client"
 import { useTheme } from "../context/ThemeContext"
 import { useModel } from "../context/ModelContext"
@@ -227,6 +229,26 @@ export const AdminModelManagementPage: React.FC = () => {
     }
   }
 
+  const handleToggleModelVisibility = async (providerId: string, modelId: string, currentVisible: boolean | undefined) => {
+    try {
+      await v2SetModelVisibility(providerId, modelId, !currentVisible)
+      loadData()
+      broadcastModelChange()
+    } catch (e: any) {
+      setError(e.message)
+    }
+  }
+
+  const handleToggleProviderVisibility = async (providerId: string, currentVisible: boolean | undefined) => {
+    try {
+      await v2SetProviderVisibility(providerId, !currentVisible)
+      loadData()
+      broadcastModelChange()
+    } catch (e: any) {
+      setError(e.message)
+    }
+  }
+
   const handleSaveModelEdit = async () => {
     if (!editingModel) return
     try {
@@ -247,10 +269,7 @@ export const AdminModelManagementPage: React.FC = () => {
         await v2SetTaskMapping(taskType, providerId, modelId)
       }
       loadData()
-      // Refresh ModelContext so Chat page picks up new defaults immediately
-      if (taskType === "chat" && modelId) {
-        try { localStorage.setItem("docintel_selected_model", modelId) } catch {}
-      }
+      // Broadcast to all tabs so they reload catalog and reapply Task Mapping
       broadcastModelChange("routing-changed")
     } catch (e: any) {
       setError(e.message)
@@ -380,6 +399,22 @@ export const AdminModelManagementPage: React.FC = () => {
                       <span style={{ fontSize: 11, color: c.textSecondary }}>{provider.vendor}</span>
                     )}
                     <StateBadge state={provider.status || "unknown"} />
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleToggleProviderVisibility(provider.id, (provider as any).visibleToUsers); }}
+                      title={((provider as any).visibleToUsers !== false) ? "Visible to users — click to hide" : "Hidden from users — click to show"}
+                      style={{
+                        padding: "3px 10px",
+                        borderRadius: 6,
+                        border: `1px solid ${((provider as any).visibleToUsers !== false) ? "#22C55E60" : c.border}`,
+                        backgroundColor: ((provider as any).visibleToUsers !== false) ? "#22C55E18" : "transparent",
+                        color: ((provider as any).visibleToUsers !== false) ? "#22C55E" : c.textMuted,
+                        cursor: "pointer",
+                        fontSize: 10,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {((provider as any).visibleToUsers !== false) ? "👁 Users" : "🚫 Hidden"}
+                    </button>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 2 }}>
                     <span style={{ fontSize: 11, color: c.textSecondary }}>
@@ -566,25 +601,25 @@ export const AdminModelManagementPage: React.FC = () => {
 
                           {/* Actions */}
                           <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                            <select
-                              value={model.state}
-                              onChange={(e) => handleSetState(provider.id, model.id, e.target.value)}
+                            <button
+                              onClick={() => handleToggleModelVisibility(provider.id, model.id, (model as any).visibleToUsers)}
+                              title={((model as any).visibleToUsers !== false) ? "Hidden from users? Click to hide" : "Visible to users? Click to show"}
                               style={{
-                                padding: "3px 6px",
+                                padding: "3px 10px",
                                 borderRadius: 6,
-                                border: `1px solid ${c.border}`,
-                                backgroundColor: c.inputBg,
-                                color: c.text,
+                                border: `1px solid ${((model as any).visibleToUsers !== false) ? "#22C55E60" : c.border}`,
+                                backgroundColor: ((model as any).visibleToUsers !== false) ? "#22C55E18" : "transparent",
+                                color: ((model as any).visibleToUsers !== false) ? "#22C55E" : c.textMuted,
+                                cursor: "pointer",
                                 fontSize: 10,
                                 fontWeight: 600,
-                                cursor: "pointer",
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 4,
                               }}
                             >
-                              <option value="active">Active</option>
-                              <option value="inactive">Inactive</option>
-                              <option value="maintenance">Maintenance</option>
-                              <option value="retired">Retired</option>
-                            </select>
+                              {((model as any).visibleToUsers !== false) ? "👁" : "🚫"} Users
+                            </button>
                             <button
                               onClick={() => {
                                 setEditingModel({ providerId: provider.id, model })

@@ -48,6 +48,10 @@ import {
   V2TestConnectionResponse,
   V2FetchModelsRequest,
   V2FetchModelsResponse,
+  EmbeddingStatusResponse,
+  EmbeddingMismatchesResponse,
+  ReembedSingleResponse,
+  ReembedBulkResponse,
 } from "../types/api"
 
 function getApiBaseUrl(): string {
@@ -595,6 +599,7 @@ export async function chatWithDocument(
 
 export interface StreamCallbacks {
   onChunk: (chunk: string, model: string, sessionId: string) => void
+  onReasoning?: (reasoning: string, model: string, sessionId: string) => void
   onDone: (fullText: string, model: string, sessionId: string) => void
   onError: (error: string) => void
 }
@@ -643,10 +648,19 @@ async function consumeSSEStream(response: Response, callbacks: StreamCallbacks, 
             callbacks.onError(data.error)
             return
           }
-          if (data.chunk) {
+          model = data.model || model
+          sessionId = data.session_id || sessionId
+          // New format: {type, content, model, session_id}
+          if (data.type === "reasoning") {
+            if (callbacks.onReasoning) {
+              callbacks.onReasoning(data.content || "", model, sessionId)
+            }
+          } else if (data.type === "content") {
+            fullText += data.content || ""
+            callbacks.onChunk(data.content || "", model, sessionId)
+          } else if (data.chunk) {
+            // Legacy backward-compat format: {chunk, model, session_id}
             fullText += data.chunk
-            model = data.model || model
-            sessionId = data.session_id || sessionId
             callbacks.onChunk(data.chunk, model, sessionId)
           }
         } catch {
@@ -1449,7 +1463,20 @@ export async function v2GetProvider(providerId: string): Promise<V2ProviderRespo
 }
 
 export async function v2AddProvider(payload: {
-  name: string; vendor?: string; base_url?: string; api_key_env?: string; description?: string; icon?: string
+  name: string;
+  vendor?: string;
+  base_url?: string;
+  api_key_value?: string;
+  description?: string;
+  icon?: string;
+  provider_type?: string;
+  models_endpoint?: string;
+  chat_endpoint?: string;
+  messages_endpoint?: string;
+  embeddings_endpoint?: string;
+  health_endpoint?: string;
+  visible_to_users?: boolean;
+  sort_order?: number;
 }): Promise<V2ProviderResponse> {
   const res = await fetch(`${BASE_URL}/api/models/v2/providers`, {
     method: "POST",
@@ -1528,6 +1555,24 @@ export async function v2SetModelState(providerId: string, modelId: string, state
     body: JSON.stringify({ state }),
   })
   return handleResponse<V2ModelResponse>(res)
+}
+
+export async function v2SetModelVisibility(providerId: string, modelId: string, visible: boolean): Promise<V2ModelResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}/visibility`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify({ visible }),
+  })
+  return handleResponse<V2ModelResponse>(res)
+}
+
+export async function v2SetProviderVisibility(providerId: string, visible: boolean): Promise<V2ProviderResponse> {
+  const res = await fetch(`${BASE_URL}/api/models/v2/providers/${encodeURIComponent(providerId)}/visibility`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify({ visible }),
+  })
+  return handleResponse<V2ProviderResponse>(res)
 }
 
 export async function v2SetModelRoles(providerId: string, modelId: string, roles: string[]): Promise<V2ModelResponse> {
@@ -1726,5 +1771,47 @@ export async function togglePromptSuggestion(id: number): Promise<PromptSuggesti
     headers: buildAuthHeaders(),
   })
   return handleResponse<PromptSuggestion>(res)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Embedding Governance API
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function getEmbeddingStatus(): Promise<EmbeddingStatusResponse> {
+  const res = await fetch(`${BASE_URL}/api/admin/embeddings/status`, { headers: buildAuthHeaders() })
+  return handleResponse<EmbeddingStatusResponse>(res)
+}
+
+export async function getEmbeddingMismatches(projectId?: number): Promise<EmbeddingMismatchesResponse> {
+  const params = projectId ? `?project_id=${projectId}` : ""
+  const res = await fetch(`${BASE_URL}/api/admin/embeddings/mismatches${params}`, { headers: buildAuthHeaders() })
+  return handleResponse<EmbeddingMismatchesResponse>(res)
+}
+
+export async function reembedDocument(docId: number): Promise<ReembedSingleResponse> {
+  const res = await fetch(`${BASE_URL}/api/admin/embeddings/reembed/${docId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify({}),
+  })
+  return handleResponse<ReembedSingleResponse>(res)
+}
+
+export async function reembedMismatched(): Promise<ReembedBulkResponse> {
+  const res = await fetch(`${BASE_URL}/api/admin/embeddings/reembed-mismatched`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify({}),
+  })
+  return handleResponse<ReembedBulkResponse>(res)
+}
+
+export async function reembedAll(): Promise<ReembedBulkResponse> {
+  const res = await fetch(`${BASE_URL}/api/admin/embeddings/reembed-all`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+    body: JSON.stringify({}),
+  })
+  return handleResponse<ReembedBulkResponse>(res)
 }
 

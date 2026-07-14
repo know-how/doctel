@@ -3,6 +3,16 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
 
+# ── Embedding Governance Constants ──────────────────────────────────────────
+EMBEDDING_VERSION = "1"  # Bump when embedding model/provider changes require re-embedding
+
+# Document status values for embedding lifecycle
+DOC_STATUS_EMBEDDED = "embedded"       # Has current embeddings (new status for completed docs)
+DOC_STATUS_READY = "ready"             # Fully processed and ready (was "completed")
+DOC_STATUS_RE_EMBED_REQUIRED = "re_embed_required"  # Embedding model changed; needs re-embedding
+DOC_STATUS_EMBEDDING_IN_PROGRESS = "embedding_in_progress"  # Embedding currently running
+DOC_STATUS_EMBEDDING_FAILED = "embedding_failed"  # Last embedding attempt failed
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -93,6 +103,16 @@ class Document(Base):
     detected_type = Column(String(50), default="")
     updated_at = Column(Text, default="", server_default=func.now())
 
+    # ── Embedding Governance Fields ────────────────────────────────────────
+    embedding_provider = Column(String(128), nullable=True, default=None,
+                                comment="Provider used for last embedding (e.g. ollama)")
+    embedding_model = Column(String(255), nullable=True, default=None,
+                             comment="Model used for last embedding (e.g. nomic-embed-text)")
+    embedded_at = Column(DateTime(timezone=True), nullable=True, default=None,
+                         comment="Timestamp of last successful embedding")
+    embedding_version = Column(String(32), nullable=True, default=None,
+                                comment="Embedding version tag; bumped when model changes")
+
     project = relationship("Project", back_populates="documents")
     analysis = relationship("DocAnalysis", back_populates="document", uselist=False)
     prompts = relationship("SuggestedPrompt", back_populates="document")
@@ -140,6 +160,14 @@ class Embedding(Base):
     vector_ref = Column(String(255))  # Chroma ID
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    # ── Embedding Governance Fields ────────────────────────────────────────
+    model_name = Column(String(255), nullable=True, default=None,
+                        comment="Embedding model used (e.g. nomic-embed-text)")
+    provider = Column(String(128), nullable=True, default=None,
+                      comment="Provider used for embedding (e.g. ollama)")
+    dimensions = Column(Integer, nullable=True, default=None,
+                        comment="Vector dimension count")
+
 class Session(Base):
     __tablename__ = "sessions"
     id = Column(Integer, primary_key=True, index=True)
@@ -163,6 +191,7 @@ class Message(Base):
     session_id = Column(Integer, ForeignKey("sessions.id"))
     role = Column(String(50))  # user, assistant, system
     content = Column(Text)
+    reasoning = Column(Text, nullable=True)
     status = Column(String(50), default="done")  # pending, done, failed
     citations_json = Column(Text)  # JSON string
     created_at = Column(DateTime(timezone=True), server_default=func.now())

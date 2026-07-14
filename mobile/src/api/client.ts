@@ -998,7 +998,7 @@ export async function v2GetProvider(providerId: string): Promise<V2ProviderRespo
 }
 
 export async function v2AddProvider(payload: {
-  name: string; vendor?: string; base_url?: string; api_key_env?: string; description?: string; icon?: string
+  name: string; vendor?: string; base_url?: string; description?: string; icon?: string
 }): Promise<V2ProviderResponse> {
   const res = await fetch(`${BASE_URL}/api/models/v2/providers`, {
     method: "POST",

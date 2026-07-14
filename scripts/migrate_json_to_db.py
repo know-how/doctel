@@ -58,7 +58,6 @@ DDL_STATEMENTS = [
         name VARCHAR(255) NOT NULL,
         vendor VARCHAR(128) DEFAULT '',
         base_url VARCHAR(512) DEFAULT '',
-        api_key_env VARCHAR(128) DEFAULT '',
         api_key_value VARCHAR(1024) DEFAULT '',
         status VARCHAR(50) DEFAULT 'disconnected',
         is_connected TINYINT(1) DEFAULT 0,
@@ -434,15 +433,15 @@ class Migration:
             await db.execute(
                 sa_text(
                     """INSERT INTO ai_providers
-                       (provider_id, name, vendor, base_url, api_key_env, status,
+                       (provider_id, name, vendor, base_url, api_key_value, status,
                         is_connected, description, icon, sort_order)
-                       VALUES (:pid, :nm, :vd, :url, :akey, :st, :conn, :desc, :ico, :ord)"""
+                       VALUES (:pid, :nm, :vd, :url, :akv, :st, :conn, :desc, :ico, :ord)"""
                 ).bindparams(
                     pid=pid,
                     nm=prov.get("name", pid),
                     vd=prov.get("vendor", ""),
                     url=prov.get("base_url", ""),
-                    akey=prov.get("api_key_env", ""),
+                    akv=prov.get("api_key_value", ""),
                     st=status,
                     conn=is_connected,
                     desc=prov.get("description", ""),
@@ -542,24 +541,20 @@ class Migration:
                 self.counts["skipped_providers"] += 1
                 provider_pk = await self._provider_pk(db, pid)
             else:
-                api_key_env = ""
-                api_key = prov.get("apiKey", "")
-                # attempt to extract env var name from ${input:...} syntax
-                if api_key and api_key.startswith("${input:"):
-                    api_key_env = api_key.replace("${input:", "").rstrip("}")
+                api_key_value = prov.get("apiKey", "")
 
                 try:
                     await db.execute(
                         sa_text(
                             """INSERT INTO ai_providers
-                               (provider_id, name, vendor, base_url, api_key_env, status, is_connected)
-                               VALUES (:pid, :nm, :vd, :url, :akey, 'disconnected', 0)"""
+                               (provider_id, name, vendor, base_url, api_key_value, status, is_connected)
+                               VALUES (:pid, :nm, :vd, :url, :akv, 'disconnected', 0)"""
                         ).bindparams(
                             pid=pid,
                             nm=prov.get("name", pid),
                             vd=prov.get("vendor", ""),
                             url="",
-                            akey=api_key_env,
+                            akv=api_key_value,
                         )
                     )
                     provider_pk = await self._provider_pk(db, pid)

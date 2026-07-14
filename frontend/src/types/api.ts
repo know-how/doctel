@@ -73,7 +73,7 @@ export interface ChatRequest {
 
 export interface ChatAskOkResponse {
   answer: string
-  citations: { filename: string; chunk_index: number; text: string }[]
+  citations: { filename: string; chunk_index: number; text: string; full_text_available?: boolean; distance?: number }[]
   cross_references?: { filename: string; reason: string }[]
   used_model: string
   session_id: string
@@ -99,8 +99,9 @@ export interface ChatMessage {
   id: number
   role: "user" | "assistant" | "system"
   content: string
+  reasoning?: string
   status: "pending" | "done" | "failed"
-  citations: { filename: string; chunk_index: number; text: string }[]
+  citations: { filename: string; chunk_index: number; text: string; full_text_available?: boolean; distance?: number }[]
   created_at: string
 }
 
@@ -254,7 +255,6 @@ export interface RegistryProvider {
   name: string
   vendor?: string
   base_url?: string
-  api_key_env?: string
   models: RegistryModelEntry[]
 }
 
@@ -290,7 +290,6 @@ export interface AddRegistryProviderPayload {
   name: string
   vendor?: string
   base_url?: string
-  api_key_env?: string
   models?: Partial<RegistryModelEntry>[]
 }
 
@@ -298,7 +297,6 @@ export interface UpdateRegistryProviderPayload {
   name?: string
   vendor?: string
   base_url?: string
-  api_key_env?: string
 }
 
 export interface AddRegistryModelPayload {
@@ -332,6 +330,7 @@ export interface EmailOtpVerifyRequest {
 
 export interface EmailOtpRequestResponse {
   message: string
+  dev_code?: string
 }
 
 export interface SummaryHistoryEntry {
@@ -394,6 +393,8 @@ export interface V2ModelMetadata {
   // Status-driven availability (computed from state)
   isSelectable?: boolean  // true when state in ['active', 'installed', 'available']
   isVisible?: boolean     // true when state in ['active', 'installed', 'available', 'maintenance']
+  // Visibility control
+  visibleToUsers?: boolean  // admin toggle for user-facing visibility
 }
 
 export interface V2Provider {
@@ -401,7 +402,7 @@ export interface V2Provider {
   name: string
   vendor: string
   base_url: string
-  api_key_env: string
+  api_key_value: string
   status: string
   description: string
   icon: string
@@ -415,6 +416,8 @@ export interface V2Provider {
   messagesEndpoint?: string
   embeddingsEndpoint?: string
   healthEndpoint?: string
+  // Visibility control
+  visibleToUsers?: boolean  // admin toggle for user-facing visibility
 }
 
 export interface V2HealthSummary {
@@ -551,4 +554,55 @@ export interface V2FetchModelsResponse {
   removed?: number
   unchanged?: number
   preserved?: number
+}
+
+// ── Embedding Governance ──
+
+export interface EmbeddingStatusResponse {
+  total_documents: number
+  embedded: number
+  pending: number
+  version_mismatch: number
+  provider_model_mismatch: number
+  configured_provider: string | null
+  configured_model: string | null
+  embedding_version: string
+}
+
+export interface EmbeddingMismatchItem {
+  id: number
+  filename: string
+  project_id: number | null
+  current_provider: string | null
+  current_model: string | null
+  current_version: string | null
+  embedded_at: string | null
+  needs_reembed: boolean
+}
+
+export interface EmbeddingMismatchesResponse {
+  documents: EmbeddingMismatchItem[]
+  total: number
+  configured: {
+    provider: string
+    model: string
+    version: string
+  } | null
+}
+
+export interface ReembedSingleResponse {
+  success: boolean
+  doc_id?: number
+  chunks_reembedded?: number
+  provider?: string
+  model?: string
+  dimensions?: number
+  error?: string
+}
+
+export interface ReembedBulkResponse {
+  success: boolean
+  reembedded: number[]
+  errors: { doc_id: number; error: string }[]
+  total: number
 }

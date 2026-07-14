@@ -86,7 +86,14 @@ def _settings() -> "Settings":
 
 
 def _api_key() -> str:
-    """Get API key from env, then file settings (DB override supported via settings proxy)."""
+    """Get API key from DB providers table first, then env, then settings."""
+    from app.services.provider_credential_resolver import resolve_api_key
+    key = resolve_api_key(vendor="gemini")
+    if key:
+        return key
+    key = resolve_api_key(vendor="google")
+    if key:
+        return key
     val = os.getenv("GEMINI_API_KEY", "").strip()
     if val:
         return val

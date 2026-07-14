@@ -17,16 +17,19 @@ import { AnalyzeClassificationPage } from "../../pages/AnalyzeClassificationPage
 import { OutputsHistoryPage } from "../../pages/OutputsHistoryPage"
 import { OutputsExportsPage } from "../../pages/OutputsExportsPage"
 import { OutputsReportsPage } from "../../pages/OutputsReportsPage"
-import { AdminModelsPage } from "../../pages/AdminModelsPage"
 import { AdminModelManagementPage } from "../../pages/AdminModelManagementPage"
 import { AdminProvidersPage } from "../../pages/AdminProvidersPage"
-import { AdminAppConfigPage } from "../../pages/AdminAppConfigPage"
-import { AdminModelMarketplacePage } from "../../pages/AdminModelMarketplacePage"
-import { AdminPromptsPage } from "../../pages/AdminPromptsPage"
-import { AdminPromptSuggestionsPage } from "../../pages/AdminPromptSuggestionsPage"
-import { AdminContextTokensPage } from "../../pages/AdminContextTokensPage"
+import { AdminEmbeddingGovernancePage } from "../../pages/AdminEmbeddingGovernancePage"
 import { AdminIntegrationsPage } from "../../pages/AdminIntegrationsPage"
 import { SystemStatusPage } from "../../pages/SystemStatusPage"
+import { AdminAutoRoutingPage } from "../../pages/AdminAutoRoutingPage"
+import { AdminAuditPage } from "../../pages/AdminAuditPage"
+import { AdminStoragePage } from "../../pages/AdminStoragePage"
+import { AdminSecurityPage } from "../../pages/AdminSecurityPage"
+import { AdminRBACPage } from "../../pages/AdminRBACPage"
+import { AdminDepartmentsPage } from "../../pages/AdminDepartmentsPage"
+import { AdminDiagnosticsPage } from "../../pages/AdminDiagnosticsPage"
+import { AdminPromptManagementPage } from "../../pages/AdminPromptManagementPage"
 import { CollaborationTeamPage } from "../../pages/CollaborationTeamPage"
 import { CollaborationActivityPage } from "../../pages/CollaborationActivityPage"
 import { SharedDocumentsPage } from "../../pages/SharedDocumentsPage"
@@ -34,7 +37,6 @@ import { SettingsProfilePage } from "../../pages/SettingsProfilePage"
 import { SettingsSecurityPage } from "../../pages/SettingsSecurityPage"
 import { DocumentViewPage } from "../../pages/DocumentViewPage"
 import { MyWorkPage } from "../../pages/MyWorkPage"
-import { AdminSettingsPage } from "../../pages/AdminSettingsPage"
 import { TrainingRoomPage } from "../../pages/TrainingRoomPage"
 import { NewChatPage } from "../../pages/NewChatPage"
 
@@ -164,22 +166,32 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
         return <OutputsExportsPage />
       case "/outputs/reports":
         return <OutputsReportsPage />
-      case "/admin/app-config":
-        return <AdminAppConfigPage />
       case "/admin/models":
         return <AdminModelManagementPage />
       case "/admin/providers":
         return <AdminProvidersPage />
-      case "/admin/marketplace":
-        return <AdminModelMarketplacePage />
+      case "/admin/embeddings":
+        return <AdminEmbeddingGovernancePage />
       case "/admin/prompts":
-        return <AdminPromptsPage />
-      case "/admin/prompt-suggestions":
-        return <AdminPromptSuggestionsPage />
-      case "/admin/context":
-        return <AdminContextTokensPage />
+        return <AdminPromptManagementPage />
+      case "/admin/auto-routing":
+        return <AdminAutoRoutingPage />
+      case "/admin/system":
+        return <SystemStatusPage />
+      case "/admin/storage":
+        return <AdminStoragePage />
       case "/admin/integrations":
         return <AdminIntegrationsPage />
+      case "/admin/security":
+        return <AdminSecurityPage />
+      case "/admin/rbac":
+        return <AdminRBACPage />
+      case "/admin/departments":
+        return <AdminDepartmentsPage />
+      case "/admin/diagnostics":
+        return <AdminDiagnosticsPage />
+      case "/admin/audit":
+        return <AdminAuditPage />
       case "/team":
         return <CollaborationTeamPage />
       case "/shared":
@@ -200,13 +212,11 @@ export const AuthenticatedLayout: React.FC<AuthenticatedLayoutProps> = ({
         )
       case "/mywork":
         return <MyWorkPage onOpenDocument={handleOpenDocument} />
-      case "/admin/system":
-        return <SystemStatusPage />
-      case "/admin-settings":
-        return <AdminSettingsPage />
       case "/training":
         return <TrainingRoomPage />
       case "/chat":
+        return <NewChatPage />
+      case "/":
         return <NewChatPage />
       default:
         return <DocumentLibraryPage onOpenDocument={handleOpenDocument} />

@@ -237,8 +237,17 @@ async def email_request(payload: dict = Body(...)):
     email = (payload.get("email") or "").strip()
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
-    request_email_code(email)
-    return {"message": "Verification code sent"}
+    code = request_email_code(email)
+    from app.config import settings
+    resp = {"message": "Verification code sent"}
+    # In dev mode (email not configured), return the code so the frontend can display it
+    if (
+        not settings.email_sender_email
+        or not settings.email_sender_password
+        or not settings.email_sender_ews_url
+    ):
+        resp["dev_code"] = code
+    return resp
 
 
 @router.post("/auth/email/verify")

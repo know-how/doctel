@@ -39,6 +39,8 @@ from app.services.model_management_service import (
     remove_model_from_provider,
     # Activation
     set_model_state,
+    set_model_visibility,
+    set_provider_visibility,
     # RBAC
     set_model_allowed_roles,
     set_model_department_restrictions,
@@ -63,6 +65,7 @@ from app.services.model_management_service import (
     # Connection testing
     test_provider_connection,
     fetch_provider_models,
+    fetch_gemini_models,
     # Database-driven config (loaded dynamically)
     get_task_types,
     get_valid_roles,
@@ -101,6 +104,13 @@ async def v2_list_providers(
 ):
     """List all AI providers with their models and health."""
     providers = await get_all_providers(db)
+    # DEBUG: Log task mapping providers
+    logger.info("[TASK MAPPING DEBUG] === /api/models/v2/providers START ===")
+    logger.info("[TASK MAPPING DEBUG] providers count: %d", len(providers))
+    for p in providers:
+        logger.info("[TASK MAPPING DEBUG] Provider: id=%s, name=%s, provider_id=%s", 
+                   p.get('id'), p.get('name'), p.get('provider_id'))
+    logger.info("[TASK MAPPING DEBUG] === /api/models/v2/providers END ===")
     return {"providers": providers}
 
 
@@ -142,7 +152,7 @@ async def v2_add_provider(
         name=name,
         vendor=payload.get("vendor", ""),
         base_url=base_url,
-        api_key_env=payload.get("api_key_env", ""),
+        api_key_value=payload.get("api_key_value", ""),
         description=payload.get("description", ""),
         icon=payload.get("icon", "generic"),
         provider_type=payload.get("provider_type", "openai"),
@@ -151,6 +161,8 @@ async def v2_add_provider(
         messages_endpoint=payload.get("messages_endpoint", ""),
         embeddings_endpoint=payload.get("embeddings_endpoint", ""),
         health_endpoint=payload.get("health_endpoint", ""),
+        visible_to_users=payload.get("visible_to_users", True),
+        sort_order=payload.get("sort_order", 0),
     )
     return {"provider": provider}
 
@@ -164,9 +176,10 @@ async def v2_update_provider(
 ):
     """Update a provider's metadata including endpoint configuration."""
     allowed = {
-        "name", "vendor", "base_url", "api_key_env", "description", "icon", "status",
+        "name", "vendor", "base_url", "description", "icon", "status",
         "provider_type", "models_endpoint", "chat_endpoint", "messages_endpoint",
-        "embeddings_endpoint", "health_endpoint"
+        "embeddings_endpoint", "health_endpoint", "api_key_value",
+        "visible_to_users", "sort_order"
     }
     updates = {k: v for k, v in payload.items() if k in allowed}
     
@@ -332,6 +345,37 @@ async def v2_set_model_state(
     if not result:
         return JSONResponse(status_code=404, content={"error": "model_not_found"})
     return {"model": result}
+
+
+@router.post("/providers/{provider_id}/models/{model_id}/visibility")
+async def v2_set_model_visibility(
+    provider_id: str = FAPath(...),
+    model_id: str = FAPath(...),
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role(["admin"])),
+):
+    """Toggle model visibility to end users."""
+    visible = bool(payload.get("visible", True))
+    result = await set_model_visibility(db, provider_id, model_id, visible)
+    if not result:
+        return JSONResponse(status_code=404, content={"error": "model_not_found"})
+    return {"model": result}
+
+
+@router.post("/providers/{provider_id}/visibility")
+async def v2_set_provider_visibility(
+    provider_id: str = FAPath(...),
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role(["admin"])),
+):
+    """Toggle provider visibility to end users."""
+    visible = bool(payload.get("visible", True))
+    result = await set_provider_visibility(db, provider_id, visible)
+    if not result:
+        return JSONResponse(status_code=404, content={"error": "provider_not_found"})
+    return {"provider": result}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -641,9 +685,9 @@ async def v2_test_connection(
         models_endpoint = prov.get("modelsEndpoint") or models_endpoint
         chat_endpoint = prov.get("chatEndpoint") or chat_endpoint
         messages_endpoint = prov.get("messagesEndpoint") or messages_endpoint
-        env_var = prov.get("api_key_env", "")
-        if env_var:
-            api_key = os.environ.get(env_var) or api_key
+        db_key = prov.get("api_key_value", "")
+        if db_key:
+            api_key = db_key
 
     # Perform connection test
     result = await test_provider_connection(
@@ -716,24 +760,37 @@ async def v2_fetch_models(
     models_endpoint = body.get("modelsEndpoint") or None
 
     # Resolve from DB if providerId given
+    prov = None
     if provider_id and not base_url and not models_endpoint:
         prov = await get_provider(db, provider_id=provider_id)
         if not prov:
             raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
         base_url = prov.get("base_url", "")
         models_endpoint = prov.get("modelsEndpoint") or models_endpoint
-        env_var = prov.get("api_key_env", "")
-        if env_var:
-            api_key = os.environ.get(env_var) or api_key
+        db_key = prov.get("api_key_value", "")
+        if db_key:
+            api_key = db_key
 
-    # Perform fetch and sync
-    result = await fetch_provider_models(
-        base_url=base_url,
-        api_key=api_key,
-        db=db,
-        provider_id=provider_id,
-        models_endpoint=models_endpoint,
+    # ── Route Gemini providers to specialised fetcher ──
+    is_gemini = (
+        prov is not None
+        and (
+            (prov.get("provider_type") or "").lower() == "gemini"
+            or (prov.get("vendor") or "").lower() == "google"
+        )
     )
+
+    if is_gemini:
+        result = await fetch_gemini_models(provider=prov, db=db)
+    else:
+        # Perform fetch and sync via the generic provider fetcher
+        result = await fetch_provider_models(
+            base_url=base_url,
+            api_key=api_key,
+            db=db,
+            provider_id=provider_id,
+            models_endpoint=models_endpoint,
+        )
     
     # Update provider connection status based on fetch success
     if provider_id:

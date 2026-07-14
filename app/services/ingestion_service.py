@@ -63,6 +63,13 @@ from app.db.models import Document, DocAnalysis, SuggestedPrompt, Chunk, Embeddi
 from app.utils.ollama_client import ollama
 from app.services.model_router import select_text_model
 from app.utils.chroma_client import chroma
+from app.services.embedding_service import (
+    generate_embedding,
+    resolve_embedding_model,
+    store_embedding_records,
+)
+from app.db.models import EMBEDDING_VERSION
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -126,34 +133,53 @@ async def get_file_hash(file_path: str) -> str:
 async def extract_text(file_path: str, mime_type: str) -> str:
     text = ""
     file_ext = Path(file_path).suffix.lower()
+    logger.info(f"[EXTRACT] Starting text extraction for {file_path}")
+    logger.info(f"[EXTRACT] mime_type={mime_type}, file_ext={file_ext}")
     
     if file_ext == ".pdf":
         try:
             reader = PdfReader(file_path)
-            for page in reader.pages:
-                text += page.extract_text() or ""
+            page_count = len(reader.pages)
+            logger.info(f"[EXTRACT] PDF has {page_count} pages")
+            
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                text += page_text
+                if i < 3:  # Log first 3 pages for debugging
+                    logger.info(f"[EXTRACT] Page {i+1} extracted {len(page_text)} characters")
+            
+            extracted_len = len(text)
+            stripped_len = len(text.strip())
+            logger.info(f"[EXTRACT] PDF extraction complete: {extracted_len} raw chars, {stripped_len} stripped chars")
             
             # Fallback to OCR if text is poor/empty
-            if len(text.strip()) < 50 and _check_tesseract():
-                logger.info(f"PDF text extraction poor for {file_path}, falling back to OCR")
-                try:
-                    import pypdfium2 as pdfium
-                except Exception as e:
-                    raise RuntimeError("PDF OCR requires pypdfium2") from e
-                pdf = pdfium.PdfDocument(file_path)
-                ocr_parts: list[str] = []
-                for i in range(len(pdf)):
-                    page = pdf.get_page(i)
-                    pil_image = page.render(scale=2).to_pil()
+            if stripped_len < 50:
+                logger.warning(f"[EXTRACT] PDF text extraction poor ({stripped_len} chars), attempting OCR fallback")
+                if _check_tesseract():
+                    logger.info(f"[EXTRACT] OCR fallback enabled, processing PDF with pypdfium2")
                     try:
-                        ocr_parts.append(pytesseract.image_to_string(pil_image))
-                    except Exception:
-                        pass
-                    page.close()
-                pdf.close()
-                text = "\n".join(ocr_parts)
+                        import pypdfium2 as pdfium
+                    except Exception as e:
+                        raise RuntimeError("PDF OCR requires pypdfium2") from e
+                    pdf = pdfium.PdfDocument(file_path)
+                    ocr_parts: list[str] = []
+                    for i in range(len(pdf)):
+                        page = pdf.get_page(i)
+                        pil_image = page.render(scale=2).to_pil()
+                        try:
+                            ocr_text = pytesseract.image_to_string(pil_image)
+                            ocr_parts.append(ocr_text)
+                            logger.info(f"[EXTRACT] OCR page {i+1}: {len(ocr_text)} chars")
+                        except Exception as ocr_err:
+                            logger.warning(f"[EXTRACT] OCR failed for page {i+1}: {ocr_err}")
+                        page.close()
+                    pdf.close()
+                    text = "\n".join(ocr_parts)
+                    logger.info(f"[EXTRACT] OCR complete: {len(text)} chars total")
+                else:
+                    logger.error(f"[EXTRACT] OCR not available - tesseract not found in PATH")
         except Exception as e:
-            logger.error(f"Error extracting text from PDF {file_path}: {e}")
+            logger.error(f"[EXTRACT] Error extracting text from PDF {file_path}: {e}", exc_info=True)
             
     elif file_ext == ".docx":
         try:
@@ -400,12 +426,40 @@ async def ingest_document(doc_id: int, db: AsyncSession):
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if not doc:
+        logger.error(f"[INGEST] Document {doc_id} not found in database")
         return
+
+    # Log document metadata at start
+    import os
+    file_size = 0
+    try:
+        file_size = os.path.getsize(doc.path) if doc.path else 0
+    except Exception:
+        pass
+    
+    logger.info(f"[INGEST] {'='*60}")
+    logger.info(f"[INGEST] Starting ingestion for document_id={doc_id}")
+    logger.info(f"[INGEST] filename={doc.filename}")
+    logger.info(f"[INGEST] file_size={file_size} bytes")
+    logger.info(f"[INGEST] mime_type={doc.mime_type}")
+    logger.info(f"[INGEST] project_id={doc.project_id}")
+    logger.info(f"[INGEST] path={doc.path}")
 
     try:
         await _set_doc_state(db, doc, status="ingesting", step="extract", percent=0, message="Extracting text")
+        
+        # TEXT EXTRACTION
+        logger.info(f"[INGEST] Extracting text from {doc.path}")
         text = await extract_text(doc.path, doc.mime_type)
-        if not text or len(text.strip()) < 10:
+        extracted_length = len(text) if text else 0
+        stripped_length = len(text.strip()) if text else 0
+        
+        logger.info(f"[INGEST] Extracted {extracted_length} characters from document {doc_id}")
+        logger.info(f"[INGEST] After stripping whitespace: {stripped_length} characters")
+        
+        if not text or stripped_length < 10:
+            logger.error(f"[INGEST] Text extraction failed or produced insufficient text for document {doc_id}")
+            logger.error(f"[INGEST] Extracted text sample: {repr(text[:200] if text else '(empty)')}")
             await _set_doc_state(
                 db,
                 doc,
@@ -413,16 +467,24 @@ async def ingest_document(doc_id: int, db: AsyncSession):
                 step="extract",
                 percent=0,
                 message="No extractable text",
-                error_message="No text could be extracted from the document",
+                error_message=f"No text could be extracted from the document (extracted: {extracted_length} chars, usable: {stripped_length} chars)",
             )
             return
 
         await _set_doc_state(db, doc, status="ingesting", step="chunk", percent=20, message="Chunking text")
+        
+        # Log first 500 chars of extracted text for debugging
+        logger.info(f"[INGEST] Text sample for document {doc_id}: {repr(text[:500])}")
 
         # Initial chunking (e.g., ~1000 chars = ~250 tokens)
         init_chunk_size = settings.chunk_size
         init_overlap = settings.chunk_overlap
-        
+
+        # ── Resolve embedding model for governance tracking ────────────────
+        embedding_model_info = await resolve_embedding_model(db)
+        embed_provider = embedding_model_info["provider_name"] if embedding_model_info else ""
+        embed_model_id = embedding_model_info["model_id"] if embedding_model_info else ""
+
         async def run_embedding_pipeline(c_size: int, c_overlap: int) -> tuple[list[str], list[list[float]], list[str], list[dict]]:
             # Check for pre-chunked audio/video segments from extract_text()
             cached = _audio_chunks_cache.pop(doc.path, None)
@@ -431,12 +493,14 @@ async def ingest_document(doc_id: int, db: AsyncSession):
             if pre_chunked:
                 chunks = [c["text"] for c in pre_chunked]
                 chunks = [c.strip() for c in chunks if c.strip()]
+                logger.info(f"[INGEST] Using {len(chunks)} pre-chunked audio/video segments for document {doc_id}")
                 if not chunks:
                     raise ValueError("Audio chunks produced no text segments")
-                logger.info(f"Using {len(chunks)} pre-chunked audio/video segments for {doc.filename}")
             else:
+                logger.info(f"[INGEST] Chunking text with chunk_size={c_size}, overlap={c_overlap}")
                 chunks = chunk_text(text, c_size, c_overlap)
                 chunks = [c.strip() for c in (chunks or []) if isinstance(c, str) and c.strip()]
+                logger.info(f"[INGEST] Created {len(chunks)} chunks for document {doc_id}")
                 if not chunks:
                     raise ValueError("Chunking produced no chunks")
 
@@ -444,7 +508,7 @@ async def ingest_document(doc_id: int, db: AsyncSession):
             async def embed_one(i: int, chunk_text_content: str):
                 async with sem:
                     try:
-                        vec = await ollama.embed(settings.embed_model, chunk_text_content)
+                        vec = await generate_embedding(db, chunk_text_content, embed_model_id)
                         return i, vec
                     except Exception as e:
                         logger.error(f"Embedding failed at chunk {i}: {e}")
@@ -512,7 +576,25 @@ async def ingest_document(doc_id: int, db: AsyncSession):
             else:
                 raise embed_err
 
-        if not (len(ids) == len(embeddings) == len(documents) == len(metadatas)) or len(ids) == 0:
+        # CRITICAL: Fail ingestion if no chunks were produced
+        chunk_count = len(ids) if ids else 0
+        if chunk_count == 0:
+            logger.error(f"[INGEST] ✗ Document {doc_id} produced ZERO chunks. Ingestion FAILED.")
+            logger.error(f"[INGEST] Text length was {len(text)} chars, but chunking produced no valid chunks.")
+            await _set_doc_state(
+                db,
+                doc,
+                status="failed",
+                step="chunk",
+                percent=20,
+                message="Chunk generation failed",
+                error_message=f"Document produced no chunks. The document may be empty, corrupted, or contain no extractable text. Text extracted: {len(text)} characters.",
+            )
+            return
+        
+        logger.info(f"[INGEST] Document {doc_id} produced {chunk_count} chunks successfully")
+
+        if not (len(ids) == len(embeddings) == len(documents) == len(metadatas)):
             raise RuntimeError(
                 f"Vector upsert input mismatch: ids={len(ids)} docs={len(documents)} emb={len(embeddings)} meta={len(metadatas)}"
             )
@@ -528,35 +610,48 @@ async def ingest_document(doc_id: int, db: AsyncSession):
             if not (len(bid) == len(bdoc) == len(bemb) == len(bmeta)) or len(bid) == 0:
                 failures.append(f"batch_len_mismatch({start}-{end})")
                 continue
+            print(f"CHROMA_UPSERT: calling with {len(bid)} ids, {len(bdoc)} docs, {len(bemb)} emb, {len(bmeta)} meta for project_{doc.project_id}", flush=True)
             try:
                 chroma.upsert(str(doc.project_id), bid, bdoc, bemb, bmeta)
+                print(f"CHROMA_UPSERT: SUCCESS for project_{doc.project_id}", flush=True)
             except Exception as e:
+                print(f"CHROMA_UPSERT: FAILED with {e}", flush=True)
                 failures.append(str(e))
                 break
 
         if failures:
             raise RuntimeError("Embedding upsert failed: " + "; ".join(failures[:3]))
 
-        for i, chroma_id in enumerate(ids):
-            embedding = Embedding(vector_ref=chroma_id)
-            db.add(embedding)
-            await db.flush()
-            chunk_index = int(metadatas[i].get("chunk_index", i))
-            chunk = Chunk(
-                document_id=doc_id,
-                project_id=doc.project_id,
-                chunk_index=chunk_index,
-                text=documents[i],
-                citation_ref=f"Chunk {chunk_index}",
-                embedding_id=embedding.id,
-            )
-            db.add(chunk)
+        # ── CHROMA VERIFICATION: check count immediately after upsert ──────
+        try:
+            c_before = chroma.get_collection(str(doc.project_id)).count()
+            print(f"CHROMA_VERIFY: project_{doc.project_id} count={c_before}", flush=True)
+        except Exception as ce:
+            print(f"CHROMA_VERIFY: error getting count: {ce}", flush=True)
+
+        # ── Compute dimensions & store governance records ──────────────────
+        embed_dimensions = len(embeddings[0]) if embeddings else 0
+        logger.info(f"[INGEST] Storing {len(ids)} embedding records for document {doc_id}")
+        await store_embedding_records(
+            db, doc_id, doc.project_id, ids, documents, metadatas,
+            provider=embed_provider, model=embed_model_id, dimensions=embed_dimensions,
+        )
+        logger.info(f"[INGEST] Successfully stored embedding records for document {doc_id}")
+
+        # ── Update Document with embedding governance metadata ─────────────
+        doc.embedding_provider = embed_provider or None
+        doc.embedding_model = embed_model_id or None
+        doc.embedding_version = EMBEDDING_VERSION
+        doc.embedded_at = datetime.utcnow()
         await db.commit()
+        logger.info(f"[INGEST] Document {doc_id} embedding metadata updated: provider={embed_provider}, model={embed_model_id}")
 
         await _set_doc_state(db, doc, status="summarized", step="summarize", percent=80, message="Generating summaries")
         await analyze_document(text, doc_id, db)
 
         await _set_doc_state(db, doc, status="completed", step="done", percent=100, message="Completed")
+        logger.info(f"[INGEST] ✓ Document {doc_id} ingestion COMPLETED successfully")
+        logger.info(f"[INGEST] {'='*60}")
         # Auto-trigger transfer learning on local models
         _schedule_auto_training(db, doc)
     except Exception as e:

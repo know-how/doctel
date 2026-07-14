@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, AsyncGenerator
 
 from app.config import settings
+from app.services.provider_credential_resolver import resolve_api_key, resolve_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -145,19 +146,7 @@ def _get_httpx_client() -> httpx.AsyncClient:
 
 
 def _api_key() -> str:
-    # Check Pydantic Settings first (populated from .env)
-    key = settings.opencode_go_api_key.strip()
-    if key:
-        return key
-    key = settings.opencode_zen_api_key.strip()
-    if key:
-        return key
-    # Fallback to os.getenv for backward compatibility
-    key = os.getenv("OPENCODE_GO_API_KEY", "").strip()
-    if key:
-        return key
-    key = os.getenv("OPENCODE_ZEN_API_KEY", "").strip()
-    return key
+    return resolve_api_key(vendor="opencode")
 
 
 def _base_url() -> str:
@@ -168,7 +157,11 @@ def _base_url() -> str:
     zen_base = settings.opencode_zen_base_url.strip()
     if zen_base:
         return _normalize_base_url(zen_base)
-    # Fallback to os.getenv for backward compatibility
+    # Try DB
+    db_url = resolve_base_url(vendor="opencode")
+    if db_url:
+        return _normalize_base_url(db_url)
+    # Fallback to os.getenv
     go_base = os.getenv("OPENCODE_GO_BASE_URL", "").strip()
     if go_base:
         return _normalize_base_url(go_base)
@@ -230,6 +223,108 @@ def _resolve_model_id(model_id: str) -> str:
     return model_id
 
 
+# ── Robust response extraction helpers ──────────────────────────────────────
+
+
+def _robust_extract_content(data: dict) -> str:
+    """Extract content text from any chat/completions response format.
+    
+    Handles:
+    - Standard: choices[0].message.content (string)
+    - Array content: choices[0].message.content = [{"type":"text","text":"..."}]
+    - reasoning_content as content: only reasoning_content is present, no content
+    - Non-standard keys: output, text, response
+    - Fallback: iterate all dict keys for first string value
+    """
+    # Strategy 1: Standard choices path
+    if "choices" in data:
+        choices = data["choices"]
+        if choices and isinstance(choices, list) and len(choices) > 0:
+            msg = choices[0].get("message") or {}
+            content = msg.get("content")
+            if content is not None and isinstance(content, str):
+                return content.strip()
+            # Handle content as array of {type, text} objects (OpenAI structured format)
+            if content is not None and isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            parts.append(item.get("text", ""))
+                        elif item.get("text"):
+                            parts.append(item["text"])
+                joined = " ".join(parts)
+                if joined.strip():
+                    return joined.strip()
+            # Handle content being a number, bool, etc.
+            if content is not None and not isinstance(content, (list, dict)):
+                return str(content).strip()
+
+    # Strategy 2: Direct content key on response root
+    if "content" in data:
+        c = data["content"]
+        if isinstance(c, str):
+            return c.strip()
+        if isinstance(c, list):
+            parts = [item.get("text", "") for item in c if isinstance(item, dict)]
+            return " ".join(parts).strip()
+        if not isinstance(c, (list, dict)):
+            return str(c).strip()
+
+    # Strategy 3: reasoning_content as fallback content
+    if "choices" in data:
+        choices = data["choices"]
+        if choices and isinstance(choices, list) and len(choices) > 0:
+            msg = choices[0].get("message") or {}
+            rc = msg.get("reasoning_content")
+            if rc and isinstance(rc, str):
+                return rc.strip()
+
+    # Strategy 4: Non-standard response keys
+    for key in ("output", "text", "response", "result", "generated_text", "completion"):
+        if key in data:
+            val = data[key]
+            if isinstance(val, str):
+                return val.strip()
+            if isinstance(val, list):
+                parts = [item.get("text", "") for item in val if isinstance(item, dict)]
+                joined = " ".join(parts)
+                if joined.strip():
+                    return joined.strip()
+
+    # Strategy 5: Deep fallback — iterate all keys for first string value
+    for key, val in data.items():
+        if isinstance(val, str) and len(val) > 10:
+            return val.strip()
+        # Check nested message-like structures
+        if isinstance(val, dict):
+            for sub_key in ("content", "text", "output", "message", "response"):
+                if sub_key in val and isinstance(val[sub_key], str):
+                    return val[sub_key].strip()
+
+    return ""
+
+
+def _robust_extract_reasoning(data: dict) -> str:
+    """Extract reasoning/thinking content from any response format."""
+    if "choices" in data:
+        choices = data["choices"]
+        if choices and isinstance(choices, list) and len(choices) > 0:
+            msg = choices[0].get("message") or {}
+            for key in ("reasoning_content", "reasoning", "thinking", "thought"):
+                val = msg.get(key)
+                if val and isinstance(val, str):
+                    return val.strip()
+                if val and isinstance(val, list):
+                    parts = [item.get("text", "") for item in val if isinstance(item, dict)]
+                    return " ".join(parts).strip()
+    # Root-level reasoning keys
+    for key in ("reasoning_content", "reasoning", "thinking", "thought"):
+        if key in data and isinstance(data[key], str):
+            return data[key].strip()
+    return ""
+
+
 # ── Low-level HTTP helpers ────────────────────────────────────────────────
 
 
@@ -251,10 +346,12 @@ async def _chat_completion(
         "temperature": kwargs.get("temperature", 0.3),
         "max_tokens": kwargs.get("max_tokens", 2048),
     }
+    # Only add Authorization header if api_key is provided
     headers = {
-        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     resp = await client.post(url, json=body, headers=headers)
     if resp.status_code >= 400:
         detail = resp.text[:500]
@@ -268,8 +365,10 @@ async def _chat_completion_stream(
     model: str,
     messages: list,
     **kwargs,
-) -> AsyncGenerator[str, None]:
-    """Streaming POST to a chat/completions endpoint (SSE)."""
+) -> AsyncGenerator[dict, None]:
+    """Streaming POST to a chat/completions endpoint (SSE).
+    Yields dicts: {"type": "content", "content": str} or {"type": "reasoning", "content": str}.
+    """
     client = _get_httpx_client()
     body = {
         "model": model,
@@ -278,10 +377,12 @@ async def _chat_completion_stream(
         "max_tokens": kwargs.get("max_tokens", 2048),
         "stream": True,
     }
+    # Only add Authorization header if api_key is provided
     headers = {
-        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     try:
         async with asyncio.timeout(60.0):
             async with client.stream("POST", url, json=body, headers=headers) as resp:
@@ -303,8 +404,12 @@ async def _chat_completion_stream(
                     for c in choices:
                         delta = c.get("delta") or {}
                         text = delta.get("content") or ""
+                        reasoning = delta.get("reasoning_content") or ""
+                        # Yield reasoning FIRST so UI shows thinking before answer
+                        if reasoning:
+                            yield {"type": "reasoning", "content": reasoning}
                         if text:
-                            yield text
+                            yield {"type": "content", "content": text}
     except asyncio.TimeoutError:
         raise RuntimeError("OpenCode API streaming timed out after 60 seconds.")
 
@@ -337,28 +442,18 @@ async def generate(prompt: str, model: str = "deepseek-v4-flash-free", system: O
 
     try:
         data = await _chat_completion(url, api_key, resolved_model, messages)
-        print(f"=== OPCODE API RESPONSE ===", flush=True)
-        content = ""
-        if "choices" in data:
-            content = (data["choices"][0].get("message") or {}).get("content", "") or ""
-        elif "content" in data:
-            content = data["content"]
-        content = (content or "").strip()
+        print(f"=== OPCODE API RESPONSE (raw) ===\n{json.dumps(data, ensure_ascii=False, default=str)[:2000]}", flush=True)
+        content = _robust_extract_content(data)
 
         # Fallback: reasoning-only response → retry without system prompt
-        reasoning = ""
-        if data.get("choices"):
-            reasoning = getattr(data["choices"][0].get("message"), "reasoning_content", None) or ""
+        reasoning = _robust_extract_reasoning(data)
         if not content and reasoning:
             print(f"=== FALLBACK: reasoning-only, retrying without system prompt ===", flush=True)
             retry_messages = [{"role": "user", "content": prompt}]
             retry_data = await _chat_completion(url, api_key, resolved_model, retry_messages)
-            if "choices" in retry_data:
-                content = (retry_data["choices"][0].get("message") or {}).get("content", "") or ""
-            elif "content" in retry_data:
-                content = retry_data["content"]
-            content = (content or "").strip()
-        print(f"Status: OK, content: {content[:200]}, reasoning: {bool(reasoning)}", flush=True)
+            print(f"=== OPCODE API FALLBACK RESPONSE (raw) ===\n{json.dumps(retry_data, ensure_ascii=False, default=str)[:2000]}", flush=True)
+            content = _robust_extract_content(retry_data)
+        print(f"Status: OK, content: {content[:200] if content else '(empty)'}, reasoning: {bool(reasoning)}", flush=True)
         return content
     except RuntimeError:
         raise
@@ -372,13 +467,49 @@ async def generate(prompt: str, model: str = "deepseek-v4-flash-free", system: O
 # ── Generation (streaming) ──────────────────────────────────────────────────
 
 
-async def generate_stream(prompt: str, model: str = "deepseek-v4-flash-free", system: Optional[str] = None) -> AsyncGenerator[str, None]:
-    if not _api_key():
+async def generate_stream(prompt: str, model: str = "deepseek-v4-flash-free", system: Optional[str] = None) -> AsyncGenerator[dict, None]:
+    """Stream using the env-configured API key.
+    Yields dicts: {"type": "content", "content": str} or {"type": "reasoning", "content": str}.
+    """
+    key = _api_key()
+    url = _base_url()
+    async for chunk in _generate_stream_with_key(prompt, model, system, key, url):
+        yield chunk
+
+
+async def generate_stream_with_key(
+    prompt: str,
+    model: str = "deepseek-v4-flash-free",
+    system: Optional[str] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> AsyncGenerator[dict, None]:
+    """Stream using an externally-provided API key and base URL (from DB providers).
+    Yields dicts: {"type": "content", "content": str} or {"type": "reasoning", "content": str}.
+    """
+    key = api_key or _api_key()
+    url = base_url or _base_url()
+    async for chunk in _generate_stream_with_key(prompt, model, system, key, url):
+        yield chunk
+
+
+async def _generate_stream_with_key(
+    prompt: str,
+    model: str,
+    system: Optional[str],
+    api_key: str,
+    base_url: str,
+) -> AsyncGenerator[dict, None]:
+    if not api_key:
         raise RuntimeError("OpenCode API key is not configured.")
 
     resolved_model = _resolve_model_id(model)
-    url = _get_url_for_model(model)
-    api_key = _api_key()
+    # Build URL: use DB base_url if given, otherwise catalog lookup
+    if base_url:
+        b = base_url.strip().rstrip("/")
+        url = b if b.endswith("/chat/completions") else b + "/chat/completions"
+    else:
+        url = _get_url_for_model(model)
 
     messages: list = []
     if system:
@@ -394,18 +525,23 @@ async def generate_stream(prompt: str, model: str = "deepseek-v4-flash-free", sy
     try:
         content_yielded = False
         reasoning_text = ""
-        async for text in _chat_completion_stream(url, api_key, resolved_model, messages):
-            content_yielded = True
-            yield text
+        async for event in _chat_completion_stream(url, api_key, resolved_model, messages):
+            if event.get("type") == "content":
+                content_yielded = True
+            elif event.get("type") == "reasoning":
+                reasoning_text += event.get("content", "")
+            yield event
 
         # Fallback: reasoning-only → retry without system
         if not content_yielded and reasoning_text.strip():
             print(f"=== FALLBACK: reasoning-only, retrying without system prompt ===", flush=True)
             retry_messages = [{"role": "user", "content": prompt}]
-            async for text in _chat_completion_stream(url, api_key, resolved_model, retry_messages):
-                yield text
+            async for event in _chat_completion_stream(url, api_key, resolved_model, retry_messages):
+                if event.get("type") == "content":
+                    content_yielded = True
+                yield event
             if not content_yielded:
-                yield "I can see you're asking about this. Could you rephrase or be more specific?"
+                yield {"type": "content", "content": "I can see you're asking about this. Could you rephrase or be more specific?"}
 
     except RuntimeError:
         raise

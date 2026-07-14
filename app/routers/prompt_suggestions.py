@@ -23,28 +23,56 @@ router = APIRouter(prefix="/api/prompt-suggestions", tags=["prompt-suggestions"]
 
 @router.get("")
 async def list_prompt_suggestions(
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(100, ge=1, le=500, description="Max records to return"),
     category: Optional[str] = Query(None, description="Filter by category"),
-    enabled_only: bool = Query(True, description="Only return enabled suggestions"),
-    limit: int = Query(100, ge=1, le=500),
+    is_enabled: Optional[bool] = Query(None, description="Filter by enabled status (None = no filter)"),
+    search: Optional[str] = Query(None, description="Search in title and prompt_text"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role(["admin", "user"])),
 ):
-    """List prompt suggestions with optional filtering."""
+    """List prompt suggestions with optional filtering.
+
+    Supports pagination (skip/limit), category filtering, enabled-status filtering,
+    and full-text search across title and prompt_text.
+    """
+    # Base count query (for total)
+    count_query = select(func.count(PromptSuggestion.id))
+    
+    # Base data query
     query = select(PromptSuggestion)
     
-    if enabled_only:
-        query = query.where(PromptSuggestion.enabled == True)
+    # Apply filters
+    if is_enabled is not None:
+        query = query.where(PromptSuggestion.enabled == is_enabled)
+        count_query = count_query.where(PromptSuggestion.enabled == is_enabled)
     if category:
         query = query.where(PromptSuggestion.category == category)
+        count_query = count_query.where(PromptSuggestion.category == category)
+    if search:
+        search_filter = (
+            PromptSuggestion.title.ilike(f"%{search}%") |
+            PromptSuggestion.prompt_text.ilike(f"%{search}%")
+        )
+        query = query.where(search_filter)
+        count_query = count_query.where(search_filter)
     
-    query = query.order_by(PromptSuggestion.display_order, PromptSuggestion.id).limit(limit)
+    # Get total count
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+    
+    # Apply ordering, pagination
+    query = query.order_by(PromptSuggestion.display_order, PromptSuggestion.id)
+    query = query.offset(skip).limit(limit)
     
     result = await db.execute(query)
     suggestions = result.scalars().all()
     
     return {
-        "suggestions": [s.to_dict() for s in suggestions],
-        "count": len(suggestions),
+        "items": [s.to_dict() for s in suggestions],
+        "total": total,
+        "skip": skip,
+        "limit": limit,
     }
 
 
@@ -271,3 +299,31 @@ async def seed_default_prompt_suggestions(
     logger.info(f"Seeded {created_count} default prompt suggestions")
     
     return {"message": f"Created {created_count} default prompt suggestions", "count": created_count}
+
+
+@router.post("/{suggestion_id}/toggle")
+async def toggle_prompt_suggestion(
+    suggestion_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role(["admin"])),
+):
+    """Toggle the enabled status of a prompt suggestion (admin only)."""
+    result = await db.execute(
+        select(PromptSuggestion).where(PromptSuggestion.id == suggestion_id)
+    )
+    suggestion = result.scalar_one_or_none()
+    
+    if not suggestion:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Prompt suggestion not found"}
+        )
+    
+    suggestion.enabled = not suggestion.enabled
+    await db.commit()
+    await db.refresh(suggestion)
+    
+    status = "enabled" if suggestion.enabled else "disabled"
+    logger.info(f"Toggled prompt suggestion: {suggestion.title} (id={suggestion.id}) → {status}")
+    
+    return suggestion.to_dict()

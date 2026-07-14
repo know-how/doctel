@@ -35,8 +35,7 @@ CREATE TABLE ai_providers (
     name VARCHAR(255) NOT NULL,
     vendor VARCHAR(128) DEFAULT '',
     base_url VARCHAR(512) DEFAULT '',
-    api_key_env VARCHAR(128) DEFAULT '',
-    api_key_value VARCHAR(1024) DEFAULT '',
+    api_key_value VARCHAR(1024) DEFAULT '',  -- SOLE credential source (replaced api_key_env)
     status VARCHAR(50) DEFAULT 'disconnected',
     is_connected BOOLEAN DEFAULT FALSE,
     description TEXT DEFAULT '',

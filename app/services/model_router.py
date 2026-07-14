@@ -203,10 +203,7 @@ async def _query_registry_api(prompt: str) -> Optional[dict]:
         return None
 
     for provider in providers:
-        api_key_env = provider.get("api_key_env", "")
-        if not api_key_env:
-            continue
-        api_key = os.getenv(api_key_env, "").strip()
+        api_key = provider.get("api_key_value", "").strip()
         if not api_key:
             continue
         base_url = provider.get("base_url", "").strip()
@@ -306,6 +303,21 @@ async def select_model_with_fallback(
     answer = await _query_ollama(prompt, ollama_model)
     if answer and _is_confident(answer):
         return {"answer": answer, "tier": "ollama", "model": ollama_model, "confidence": 0.75}
+
+    # ── offline_only: skip all cloud tiers ───────────────────────────────────
+    if settings.offline_only:
+        logger.info("Decision Node: offline_only mode – skipping cloud tiers (2b–4)")
+        error_msg = (
+            "I was unable to find an answer using the local model."
+            if not answer
+            else answer
+        )
+        return {
+            "answer": error_msg,
+            "tier": "ollama" if answer else "failed",
+            "model": ollama_model if answer else "none",
+            "confidence": 0.75 if answer else 0.0,
+        }
 
     # ── Tier 2b: Gemini API ─────────────────────────────────────────────────
     from app.services.gemini_service import is_configured as gemini_configured, generate as gemini_generate

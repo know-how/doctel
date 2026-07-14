@@ -24,7 +24,8 @@ type Message = {
   id: string | number
   role: "user" | "assistant" | "system"
   content: string
-  citations: { filename: string; chunk_index: number; text: string }[]
+  reasoning?: string
+  citations: { filename: string; chunk_index: number; text: string; full_text_available?: boolean; distance?: number }[]
   status: "pending" | "done" | "failed"
   uiStatus?: "sending" | "waiting" | "streaming" | "error"
   retryText?: string
@@ -52,14 +53,14 @@ export const AnalyzeChatPage: React.FC = () => {
   const [docsError, setDocsError] = useState<string | null>(null)
 
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, modelDetails, loading: loadingModels, setModelForTask, v2Providers } = useModel()
+  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, modelDetails, loading: loadingModels, setModelForTask, v2Providers, taskDefaults } = useModel()
 
-  // On mount, ensure we have the best model for document analysis / RAG
+  // On mount, apply Task Mapping for RAG — wait until taskDefaults are populated
   useEffect(() => {
-    if (!loadingModels && !selectedModel) {
+    if (!loadingModels && Object.keys(taskDefaults).length > 0) {
       setModelForTask("rag")
     }
-  }, [loadingModels, selectedModel, setModelForTask])
+  }, [loadingModels, taskDefaults])
   const [messages, setMessages] = useState<Message[]>([])
   const [question, setQuestion] = useState("")
   const [loadingChat, setLoadingChat] = useState(false)
@@ -356,7 +357,7 @@ export const AnalyzeChatPage: React.FC = () => {
         scope: (selectedDocIds.length === 1 ? "project" : "all") as "project" | "all",
       }
 
-      const isCloudModelFlag = isCloudModel(selectedModel, modelDetails)
+      const isCloudModelFlag = isCloudModel(selectedModel, modelDetails, v2Providers)
 
       if (isCloudModelFlag) {
         const streamCallbacks = {
@@ -365,6 +366,15 @@ export const AnalyzeChatPage: React.FC = () => {
               prev.map((m) =>
                 m.id === thinkingId
                   ? { ...m, content: (m.content || "") + chunk, uiStatus: "streaming" as const }
+                  : m,
+              ),
+            )
+          },
+          onReasoning: (reasoning: string) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === thinkingId
+                  ? { ...m, reasoning: (m.reasoning || "") + reasoning }
                   : m,
               ),
             )
@@ -786,30 +796,113 @@ export const AnalyzeChatPage: React.FC = () => {
               {/* Citations */}
               {msg.citations && msg.citations.length > 0 && (
                 <div style={{
-                  marginTop: 6,
+                  marginTop: 12,
                   fontSize: 12,
                   color: colors.textSecondary,
                   display: "flex",
                   flexDirection: "column",
-                  gap: 4,
+                  gap: 8,
                   alignItems: align,
                 }}>
+                  <div style={{
+                    fontWeight: 600,
+                    fontSize: 11,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.5,
+                    color: colors.textMuted,
+                    marginBottom: 4,
+                  }}>
+                    📚 Sources ({msg.citations.length})
+                  </div>
                   {msg.citations.map((cit, i) => (
                     <div
                       key={i}
                       style={{
-                        padding: "4px 10px",
+                        padding: "12px 14px",
                         backgroundColor: colors.surface,
-                        borderRadius: 6,
+                        borderRadius: 8,
                         border: `1px solid ${colors.border}`,
-                        maxWidth: "85%",
+                        maxWidth: "90%",
+                        textAlign: "left",
                       }}
                     >
-                      <strong>{cit.filename}</strong> &mdash; {cit.text.slice(0, 200)}
-                      {cit.text.length > 200 ? "..." : ""}
+                      {/* Source Quote */}
+                      <div style={{
+                        fontStyle: "italic",
+                        color: colors.text,
+                        marginBottom: 8,
+                        lineHeight: 1.5,
+                        borderLeft: `3px solid ${colors.primary}`,
+                        paddingLeft: 10,
+                      }}>
+                        "{cit.text}"
+                      </div>
+                      
+                      {/* Source Metadata */}
+                      <div style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        flexWrap: "wrap",
+                        fontSize: 11,
+                      }}>
+                        <span style={{ 
+                          display: "flex", 
+                          alignItems: "center", 
+                          gap: 4,
+                          color: colors.textSecondary,
+                        }}>
+                          📄 <strong>{cit.filename}</strong>
+                        </span>
+                        <span style={{ color: colors.border }}>|</span>
+                        <span style={{ color: colors.textMuted }}>
+                          Chunk {cit.chunk_index}
+                        </span>
+                        {cit.distance !== undefined && (
+                          <>
+                            <span style={{ color: colors.border }}>|</span>
+                            <span style={{ 
+                              color: cit.distance < 0.3 ? "#22C55E" : cit.distance < 0.6 ? "#EAB308" : "#EF4444",
+                              fontSize: 10,
+                            }}>
+                              Relevance: {((1 - cit.distance) * 100).toFixed(0)}%
+                            </span>
+                          </>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
+              )}
+
+              {/* Reasoning */}
+              {msg.role === "assistant" && msg.reasoning && (
+                <details style={{ marginTop: 6, maxWidth: "85%" }}>
+                  <summary style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: colors.textSecondary,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.5,
+                    cursor: "pointer",
+                    userSelect: "none",
+                  }}>
+                    💭 Show reasoning
+                  </summary>
+                  <div style={{
+                    marginTop: 4,
+                    padding: "6px 10px",
+                    backgroundColor: colors.surface,
+                    borderRadius: 6,
+                    borderLeft: `3px solid ${colors.primary}`,
+                    fontSize: 12,
+                    fontStyle: "italic",
+                    color: colors.textSecondary,
+                    whiteSpace: "pre-wrap",
+                  }}>
+                    {msg.reasoning}
+                  </div>
+                </details>
               )}
 
               {/* Retry button for errors */}

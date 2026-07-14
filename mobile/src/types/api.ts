@@ -247,7 +247,7 @@ export interface V2Provider {
   name: string
   vendor: string
   base_url: string
-  api_key_env: string
+  api_key_value: string
   status: string
   description: string
   icon: string

@@ -60,6 +60,25 @@ from app.db.models import (
     Message as DbMessage,
 )
 from app.db.models import Document as DbDocument
+from app.db.enterprise_models import (
+    DocAnalysisVersion,
+    QuotationSpan,
+    KnowledgeNode,
+    KnowledgeEdge,
+    DocumentVersion,
+    Agent,
+    AgentExecution,
+    HumanReview,
+    PromptTemplate,
+    PromptTemplateVersion,
+    BenchmarkRun,
+    BenchmarkResult,
+    CostRecord,
+    BudgetAlert,
+    ConfidenceScore,
+    DepartmentRestriction,
+    InteractionAudit,
+)
 
 # ---------------------------------------------------------------------------
 # Security / RBAC

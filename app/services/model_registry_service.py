@@ -13,7 +13,7 @@ JSON structure:
       "name": "OpenCodeGO",
       "vendor": "customendpoint",
       "base_url": "https://api.example.com/v1",
-      "api_key_env": "MY_API_KEY",          # env var name, never the key itself
+      "api_key_value": "",                  # stored key (encrypted at rest in future)
       "models": [{
         "id": "deepseek-v4-pro",
         "name": "DeepSeek V4 Pro",
@@ -107,7 +107,6 @@ def _seed_from_providers_json() -> List[Dict[str, Any]]:
             "name": name,
             "vendor": ep.get("vendor", ""),
             "base_url": "",
-            "api_key_env": "",
             "models": models,
         })
 
@@ -148,7 +147,6 @@ def add_provider(
     name: str,
     vendor: str = "",
     base_url: str = "",
-    api_key_env: str = "",
     models: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Append a new provider and return it with a generated id."""
@@ -158,7 +156,6 @@ def add_provider(
         "name": name,
         "vendor": vendor or "",
         "base_url": base_url or "",
-        "api_key_env": api_key_env or "",
         "models": models or [],
     }
     providers.append(provider)
@@ -176,7 +173,7 @@ def update_provider(
     for idx, p in enumerate(providers):
         if p.get("id") == provider_id:
             # Merge top-level fields (except id and models which have their own endpoint)
-            allowed = {"name", "vendor", "base_url", "api_key_env"}
+            allowed = {"name", "vendor", "base_url"}
             for key, value in updates.items():
                 if key in allowed:
                     providers[idx][key] = value
