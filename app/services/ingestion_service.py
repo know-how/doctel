@@ -61,7 +61,7 @@ def _schedule_auto_training(db, doc):
     asyncio.ensure_future(_do_train())
 from app.db.models import Document, DocAnalysis, SuggestedPrompt, Chunk, Embedding
 from app.utils.ollama_client import ollama
-from app.services.model_router import select_text_model
+from app.services.model_resolver_service import resolve_model
 from app.utils.chroma_client import chroma
 from app.services.embedding_service import (
     generate_embedding,
@@ -266,7 +266,10 @@ async def analyze_document(text: str, doc_id: int, db: AsyncSession):
     # Cap context so even small models don't OOM. 6 000 chars ≈ 1 500 tokens.
     analysis_text = text[:6000].strip()
 
-    model_name = select_text_model("summary_long")
+    # ── Resolve model via centralized model resolver ──────────────────────
+    # This consults UI-configured task mappings as the single source of truth.
+    resolved = await resolve_model(db, requested_model=None, task_type="summary")
+    model_name = resolved["model_id"]
 
     # ── Single combined prompt ──────────────────────────────────────────────
     # One round-trip to Ollama or Gemini produces everything we need.

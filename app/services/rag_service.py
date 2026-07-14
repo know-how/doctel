@@ -8,7 +8,7 @@ from app.config import settings
 from app.db.models import Message, Session, Chunk, Document
 from app.utils.ollama_client import ollama
 from app.utils.chroma_client import chroma
-from app.services.model_router import select_text_model
+
 from app.services.embedding_service import (
     generate_embedding,
     resolve_embedding_model,
@@ -252,7 +252,21 @@ async def get_rag_answer_scoped(
         )
 
     user_prompt = f"Question: {user_query}\n\nContext:\n{context}"
-    chosen = model_name or select_text_model("rag")
+    # ── Resolve model via centralized model resolver ──────────────────────
+    # This consults UI-configured task mappings as the single source of truth.
+    from app.services.model_resolver_service import resolve_model
+    resolved = await resolve_model(
+        db,
+        requested_model=model_name,
+        task_type="rag"
+    )
+    chosen = resolved["model_id"]
+    provider_type = resolved.get("provider_type", "ollama")
+    provider_id = resolved.get("provider_id", "unknown")
+    logger.info(
+        "[RAG_MODEL] requested_model=%s | resolved_model=%s | provider_type=%s | provider_id=%s | source=%s",
+        model_name, chosen, provider_type, provider_id, resolved.get("source", "?"),
+    )
 
     logger.info(
         "[RAG_CONTEXT] built — chunk_count=%d | citation_count=%d | context_len=%d | "
@@ -266,21 +280,6 @@ async def get_rag_answer_scoped(
     logger.info("[RAG_PROMPT] system_prompt=%d chars | user_prompt_first_300=%r",
                 len(system_prompt), user_prompt[:300])
 
-    # ── Resolve the actual provider for this model from the database ──────
-    provider_type = "ollama"
-    provider_id = "unknown"
-    try:
-        from app.services.model_resolver_service import resolve_model
-        resolved = await resolve_model(db, requested_model=chosen, task_type="rag")
-        provider_type = resolved.get("provider_type", "ollama")
-        provider_id = resolved.get("provider_id", "unknown")
-        logger.info(
-            "[RAG_MODEL] model=%s | provider_type=%s | provider_id=%s | source=%s",
-            chosen, provider_type, provider_id, resolved.get("source", "?"),
-        )
-    except Exception as resolve_err:
-        logger.warning("[RAG_MODEL] resolve_model failed for %s: %s", chosen, resolve_err)
-
     # ── Route generation: ALWAYS try the provider gateway first ──────────
     # The gateway does a DB lookup: model → ai_models → provider_id → ai_providers.
     # If the model is NOT in the DB (e.g., a new Ollama model), the gateway
@@ -291,19 +290,31 @@ async def get_rag_answer_scoped(
     from app.services.provider_gateway_service import generate as gateway_generate
     from app.services.provider_gateway_service import ProviderNotFoundError, ProviderNotConfiguredError
     logger.info(
-        "[RAG_GENERATE] attempting gateway for model=%s | resolved_type=%s | prompt_len=%d",
-        chosen, provider_type, len(user_prompt),
+        "[RAG_GATEWAY] Sending to gateway — model=%s | provider_type=%s | provider_id=%s | prompt_len=%d",
+        chosen, provider_type, provider_id, len(user_prompt),
     )
     try:
         answer_text = await gateway_generate(db, user_prompt, model_id=chosen, system=system_prompt)
     except (ProviderNotFoundError, ProviderNotConfiguredError):
         # Model not in DB or provider not configured — use Ollama
+        if chosen.startswith("kimi"):
+            logger.warning(
+                "[RAG_GATEWAY] Model '%s' is a configured cloud model but ProviderNotFound/NotConfigured — "
+                "falling back to Ollama. Check that the provider for this model is correctly configured in Admin > Providers.",
+                chosen,
+            )
         logger.info(
             "[RAG_GENERATE] model=%s not in DB — falling back to Ollama (localhost:11434)",
             chosen,
         )
         answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
     except Exception as gateway_err:
+        if chosen.startswith("kimi"):
+            logger.warning(
+                "[RAG_GATEWAY] Model '%s' is a configured cloud model but gateway raised %s — "
+                "falling back to Ollama. This overrides the UI-configured task mapping.",
+                chosen, gateway_err,
+            )
         logger.error(
             "[RAG_GENERATE] Gateway error for %s (%s) — falling back to Ollama",
             chosen, gateway_err,

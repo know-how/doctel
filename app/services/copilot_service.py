@@ -19,8 +19,8 @@ from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.model_router import select_text_model
 from app.services.rag_service import get_rag_answer_scoped
+from app.services.model_resolver_service import resolve_model
 from app.services.gemini_service import GEMINI_MODEL_ID, generate as gemini_generate
 from app.services.deepseek_service import DEEPSEEK_MODEL_ID, generate as deepseek_generate
 from app.services.opencode_zen_service import generate as zen_generate
@@ -276,8 +276,10 @@ async def copilot_answer(
     # Build context from RAG result
     context_str = rag_context if rag_context else f"Question: {user_query}"
 
-    # Generate final response via selected model
-    chosen = model_name or select_text_model("rag")
+    # Generate final response via centralized model resolver
+    # Consults UI-configured task mappings as single source of truth.
+    resolved = await resolve_model(db, requested_model=model_name, task_type="rag")
+    chosen = resolved["model_id"]
     user_prompt = f"Mode: {mode.value}\n\nRequest: {user_query}\n\nContext:\n{context_str}"
 
     if chosen == DEEPSEEK_MODEL_ID:
