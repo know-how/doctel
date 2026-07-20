@@ -2,9 +2,8 @@
 database.py — DocTel Database Layer
 
 Provides:
-- MySQL connection pooling (5-50 connections, 300s idle timeout)
+- PostgreSQL connection pooling via asyncpg
 - Health verification at startup
-- Migration checks
 - Transaction-safe operations
 """
 
@@ -22,29 +21,20 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── Detect database type ────────────────────────────────────────────────────
-_is_mysql = settings.db_url.startswith("mysql")
-
-
 # ── Connection Pool Configuration ──────────────────────────────────────────
 
 def _build_engine() -> AsyncEngine:
-    """Create the async engine with appropriate connection pooling."""
+    """Create the async engine with PostgreSQL connection pooling."""
     driver = settings.db_url.split("://")[0] if "://" in settings.db_url else settings.db_url
-
-    # MySQL async connection pooling (AsyncAdaptedQueuePool is automatic)
-    pre_ping_enabled = False
     engine_kwargs = {
         "echo": False,
-        "pool_size": 50,              # max persistent connections
-        "max_overflow": 10,           # extra connections beyond pool_size
-        "pool_recycle": 300,          # recycle after 300s idle
-        "pool_timeout": 30,           # wait max 30s for a connection
+        "pool_size": 20,
+        "max_overflow": 10,
+        "pool_recycle": 3600,
+        "pool_timeout": 30,
     }
 
-    logger.info("Driver: %s", driver)
-    logger.info("PrePing: %s", "Enabled" if pre_ping_enabled else "Disabled")
-
+    logger.info("Driver: %s pool_size=%s max_overflow=%s", driver, engine_kwargs["pool_size"], engine_kwargs["max_overflow"])
     return create_async_engine(settings.db_url, **engine_kwargs)
 
 
@@ -56,13 +46,12 @@ Base = declarative_base()
 from app.db import config_models  # noqa: F401
 # Import enterprise models for Vision 2.0 schema expansion
 from app.db import enterprise_models  # noqa: F401
+# Import persistent job processing model
+from app.db import job_models  # noqa: F401
 
 AsyncSessionLocal = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )
-
-
-# Encryption-at-rest is not supported with MySQL
 
 
 # ── Health Verification ─────────────────────────────────────────────────────
@@ -125,11 +114,11 @@ async def verify_database_health() -> DatabaseHealth:
     try:
         async with engine.connect() as conn:
             result = await conn.execute(text(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()"
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'"
             ))
             row = result.fetchone()
             table_count = row[0] if row else 0
-        db_health.tables_exist = table_count >= 21  # We expect ~21+ tables (16 app + 5 config)
+        db_health.tables_exist = table_count >= 21
         if not db_health.tables_exist:
             db_health.error = f"Only {table_count} tables found (expected >= 21)"
     except Exception as e:
@@ -159,7 +148,7 @@ async def verify_database_health() -> DatabaseHealth:
     print(f"  Pool size:      {db_health.pool_size}")
     print(f"  Active conns:   {db_health.active_connections}")
     print(f"  Error:          {db_health.error or 'None'}")
-    print(f"  Overall health: {'✅ HEALTHY' if db_health.healthy else '❌ UNHEALTHY'}")
+    print(f"  Overall health: {'[OK] HEALTHY' if db_health.healthy else '[FAIL] UNHEALTHY'}")
     print("=" * 60)
 
     logger.info(
@@ -170,47 +159,15 @@ async def verify_database_health() -> DatabaseHealth:
         logger.info("Database Connected Successfully")
     return db_health
 
-async def ensure_database() -> bool:
-    """Create the target MySQL database if it does not exist.
-
-    Uses a temporary engine connected to the MySQL system database so that
-    ``CREATE DATABASE IF NOT EXISTS`` can run independently of the main engine.
-    Returns True if the database exists (or was created) afterwards.
-    """
-    if not _is_mysql:
-        return True  # no-op for non-MySQL backends
-    try:
-        # Derive a URL that connects to the MySQL server without a specific database.
-        # Strip the database name from the path component of the URL.
-        db_url = settings.db_url
-        # e.g. mysql+aiomysql://root:@localhost:3306/doctel
-        import re
-        no_db_url = re.sub(r"/[^/]+$", "/mysql", db_url)
-        tmp_engine = create_async_engine(no_db_url, pool_size=1, max_overflow=0)
-        async with tmp_engine.begin() as conn:
-            await conn.execute(text("CREATE DATABASE IF NOT EXISTS doctel"))
-        await tmp_engine.dispose()
-        logger.info("Database 'doctel' ensured (created if missing).")
-        return True
-    except Exception as e:
-        logger.warning("Could not auto-create database 'doctel': %s", e)
-        return False
-
-
 async def init_db() -> DatabaseHealth:
-    """Initialize database: create tables, run migrations, seed admin, verify health."""
-    # First ensure the database itself exists
-    await ensure_database()
-
+    """Initialize database: apply schema, seed admin, verify health."""
     from .models import User
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await _migrate_mysql(conn)
-        # Seed lookup tables (task_types, roles, departments, model_statuses)
+        await _auto_migrate_columns(conn)
         await _seed_lookup_tables(conn)
 
     async with AsyncSessionLocal() as session:
-        # Check if admin exists
         from sqlalchemy import select
         result = await session.execute(select(User).where(User.username == "admin"))
         admin = result.scalar_one_or_none()
@@ -219,106 +176,110 @@ async def init_db() -> DatabaseHealth:
             session.add(admin)
             await session.commit()
 
-    # Verify health after initialization
+    # Repair PostgreSQL sequences that may drift after data migration
+    await _repair_sequences()
     await verify_database_health()
     return db_health
 
 
-async def _migrate_mysql(conn):
-    """MySQL‑specific schema migrations (column additions, etc.)."""
-    def _col_exists(cols, name: str) -> bool:
-        return any(c.get("Field") == name for c in cols)
+async def _repair_sequences():
+    """Repair known PostgreSQL sequences that may drift from MAX(id).
 
-    # ── Migrate projects ───────────────────────────────────────────────
-    res = await conn.execute(text("SHOW COLUMNS FROM projects"))
-    cols = [dict(r) for r in res.mappings().all()]
-    statements = []
-    if not _col_exists(cols, "archived_at"):
-        statements.append("ALTER TABLE projects ADD COLUMN archived_at DATETIME NULL")
-    for stmt in statements:
+    During MySQL -> PostgreSQL migration, sequences start at 1 while tables
+    already contain rows with IDs >= 1.  This function resets each known
+    auto-increment sequence to MAX(id)+1 so INSERTs don't hit PK conflicts.
+
+    Safe to call on every restart — ALTER SEQUENCE is idempotent.
+    """
+    tables_seq = {
+        "ai_models": "ai_models_id_seq",
+        "system_config": "system_config_id_seq",
+        "task_mappings": "task_mappings_id_seq",
+        "health_records": "health_records_id_seq",
+        "sync_logs": "sync_logs_id_seq",
+        "audit_logs": "audit_logs_id_seq",
+    }
+    try:
+        async with engine.connect() as conn:
+            for table, seq in tables_seq.items():
+                try:
+                    result = await conn.execute(
+                        text(f"SELECT MAX(id) FROM {table}")
+                    )
+                    row = result.fetchone()
+                    max_id = row[0] if row and row[0] is not None else 0
+                    next_val = max_id + 1
+                    await conn.execute(
+                        text(f"ALTER SEQUENCE {seq} RESTART WITH {next_val}")
+                    )
+                    logger.debug("Sequence %s reset to %d (MAX=%s)", seq, next_val, max_id)
+                except Exception as e:
+                    logger.warning("Could not repair sequence %s: %s", seq, e)
+            await conn.commit()
+        logger.info("PostgreSQL sequences repaired")
+    except Exception as e:
+        logger.warning("Could not repair sequences: %s", e)
+
+
+async def _auto_migrate_columns(conn):
+    """Add columns that may be missing because create_all does not ALTER existing tables.
+
+    Each statement uses IF NOT EXISTS / IF NOT NULL so it is safe to re-run.
+    """
+    stmts = [
+        # Processing control v1 (added to Document model after table creation)
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_state VARCHAR(20) DEFAULT 'UPLOADED'",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_step VARCHAR(50) DEFAULT ''",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS pause_requested BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS checkpoint TEXT DEFAULT NULL",
+        # Embedding governance v1 (added to Document model after table creation)
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_provider VARCHAR(128) DEFAULT NULL",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(255) DEFAULT NULL",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedded_at TIMESTAMPTZ DEFAULT NULL",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_version VARCHAR(32) DEFAULT NULL",
+        # Embedding governance v1 (added to Embedding model after table creation)
+        "ALTER TABLE embeddings ADD COLUMN IF NOT EXISTS model_name VARCHAR(255) DEFAULT NULL",
+        "ALTER TABLE embeddings ADD COLUMN IF NOT EXISTS provider VARCHAR(128) DEFAULT NULL",
+        "ALTER TABLE embeddings ADD COLUMN IF NOT EXISTS dimensions INTEGER DEFAULT NULL",
+        # Processing control indexes
+        "CREATE INDEX IF NOT EXISTS idx_documents_processing_state ON documents(processing_state)",
+        "CREATE INDEX IF NOT EXISTS idx_documents_pause_requested ON documents(pause_requested) WHERE pause_requested = TRUE",
+        "CREATE INDEX IF NOT EXISTS idx_documents_cancel_requested ON documents(cancel_requested) WHERE cancel_requested = TRUE",
+    ]
+    for stmt in stmts:
         try:
             await conn.execute(text(stmt))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Auto-migration: %s — %s", stmt[:80], e)
 
-    # ── Migrate messages ───────────────────────────────────────────────
-    # reasoning column — added after initial table creation
-    res = await conn.execute(text("SHOW COLUMNS FROM messages"))
-    cols = [dict(r) for r in res.mappings().all()]
-    msg_statements = []
-    if not _col_exists(cols, "reasoning"):
-        msg_statements.append(
-            "ALTER TABLE messages ADD COLUMN reasoning TEXT NULL "
-            "COMMENT 'Model chain-of-thought reasoning output' "
-            "AFTER content"
-        )
-    for stmt in msg_statements:
-        try:
-            await conn.execute(text(stmt))
-        except Exception:
-            pass
-
-    # ── Migrate documents — embedding governance columns ────────────────
-    res = await conn.execute(text("SHOW COLUMNS FROM documents"))
-    cols = [dict(r) for r in res.mappings().all()]
-    doc_statements = []
-    if not _col_exists(cols, "embedding_provider"):
-        doc_statements.append(
-            "ALTER TABLE documents ADD COLUMN embedding_provider VARCHAR(128) NULL "
-            "COMMENT 'Provider used for last embedding'"
-        )
-    if not _col_exists(cols, "embedding_model"):
-        doc_statements.append(
-            "ALTER TABLE documents ADD COLUMN embedding_model VARCHAR(255) NULL "
-            "COMMENT 'Model used for last embedding'"
-        )
-    if not _col_exists(cols, "embedded_at"):
-        doc_statements.append(
-            "ALTER TABLE documents ADD COLUMN embedded_at DATETIME NULL "
-            "COMMENT 'Timestamp of last successful embedding'"
-        )
-    if not _col_exists(cols, "embedding_version"):
-        doc_statements.append(
-            "ALTER TABLE documents ADD COLUMN embedding_version VARCHAR(32) NULL "
-            "COMMENT 'Embedding version tag'"
-        )
-    for stmt in doc_statements:
-        try:
-            await conn.execute(text(stmt))
-        except Exception:
-            pass
-
-    # ── Migrate embeddings — embedding governance columns ───────────────
-    res = await conn.execute(text("SHOW COLUMNS FROM embeddings"))
-    cols = [dict(r) for r in res.mappings().all()]
-    emb_statements = []
-    if not _col_exists(cols, "model_name"):
-        emb_statements.append(
-            "ALTER TABLE embeddings ADD COLUMN model_name VARCHAR(255) NULL "
-            "COMMENT 'Embedding model used'"
-        )
-    if not _col_exists(cols, "provider"):
-        emb_statements.append(
-            "ALTER TABLE embeddings ADD COLUMN provider VARCHAR(128) NULL "
-            "COMMENT 'Provider used for embedding'"
-        )
-    if not _col_exists(cols, "dimensions"):
-        emb_statements.append(
-            "ALTER TABLE embeddings ADD COLUMN dimensions INT NULL "
-            "COMMENT 'Vector dimension count'"
-        )
-    for stmt in emb_statements:
-        try:
-            await conn.execute(text(stmt))
-        except Exception:
-            pass
+    # Migrate existing status values to processing_state for rows that still have NULL
+    try:
+        await conn.execute(text("""
+            UPDATE documents
+            SET processing_state = CASE status
+                WHEN 'uploaded'   THEN 'UPLOADED'
+                WHEN 'ingesting'  THEN 'PROCESSING'
+                WHEN 'embedded'   THEN 'PROCESSING'
+                WHEN 'summarized' THEN 'PROCESSING'
+                WHEN 'completed'  THEN 'COMPLETED'
+                WHEN 'failed'     THEN 'FAILED'
+                ELSE 'UPLOADED'
+            END
+            WHERE processing_state IS NULL
+        """))
+        await conn.execute(text("""
+            UPDATE documents
+            SET processing_step = ingest_step
+            WHERE processing_step IS NULL OR processing_step = ''
+        """))
+    except Exception as e:
+        logger.warning("Auto-migration: data backfill — %s", e)
 
 
 async def _seed_lookup_tables(conn):
-    """Seed lookup tables (task_types, roles, departments, model_statuses) if empty.
-
-    Uses INSERT IGNORE so repeated startups are idempotent.
-    """
+    """Seed lookup tables (task_types, roles, departments, model_statuses) if empty."""
     # ── Seed task_types ──────────────────────────────────────────────────
     result = await conn.execute(text("SELECT COUNT(*) as cnt FROM task_types"))
     row = result.one_or_none()

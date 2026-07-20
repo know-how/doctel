@@ -103,7 +103,7 @@ async def auth_logout_with_broadcast(
 
     # Cancel any queued ingestion jobs that belong to this user
     try:
-        from app.services.ingest_worker import cancel_document_ids
+        from app.services.job_poller import cancel_job
         from sqlalchemy import select as _select
         from app.db.models import Document as _Document
         pending_result = await db.execute(
@@ -113,8 +113,8 @@ async def auth_logout_with_broadcast(
             )
         )
         pending_ids = [row[0] for row in pending_result.all()]
-        if pending_ids:
-            cancel_document_ids(pending_ids)
+        for pid in pending_ids:
+            await cancel_job(document_id=pid, owner_id=user.id)
     except Exception:
         pass
 

@@ -2,7 +2,7 @@
 config_models.py — DocTel Unified Configuration Database Models
 
 Replaces the three-way config split (config.yaml, model_management.json, .env)
-with a single MySQL-backed configuration store.
+with a single PostgreSQL-backed configuration store.
 
 Tables:
   - SystemConfig        Flat key/value config (replaces config.yaml + .env keys)
@@ -21,7 +21,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean, DateTime,
-    ForeignKey, JSON, UniqueConstraint, Index,
+    ForeignKey, JSON, UniqueConstraint, Index, UUID,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -167,6 +167,7 @@ class AIModel(Base):
     supports_extraction = Column(Boolean, default=False)
     supports_audio = Column(Boolean, default=False)
     supports_comparison = Column(Boolean, default=False)
+    supports_image_generation = Column(Boolean, default=False)
 
     # Activation & state
     state = Column(String(50), default="available")  # available | installed | active | retired | ...
@@ -210,6 +211,7 @@ class AIModel(Base):
             "supportsExtraction": self.supports_extraction,
             "supportsAudio": self.supports_audio,
             "supportsComparison": self.supports_comparison,
+            "supportsImageGeneration": self.supports_image_generation,
             "state": self.state,
             "visibleToUsers": self.visible_to_users,
             "isDefault": self.is_default,
@@ -254,10 +256,26 @@ class TaskMapping(Base):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class HealthRecord(Base):
-    """Records a single health check ping for a provider/model."""
+    """Records a single health check ping for a provider/model.
+
+    The database table was created by the M10 migration with:
+      provider_id_ref VARCHAR(128) NOT NULL  (maps to provider.provider_id)
+      status VARCHAR(50) DEFAULT 'unknown'
+
+    The ORM model also includes the original ORM-native columns
+    (provider_id, success, tokens_used) that were created by
+    Base.metadata.create_all() on the old MySQL schema.
+    Both sets coexist until a cleanup migration is written.
+    """
     __tablename__ = "health_records"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # ── M10 migration columns ────────────────────────────────────────────
+    provider_id_ref = Column(String(128), nullable=False, index=True)
+    status = Column(String(50), default="unknown")
+
+    # ── ORM-native columns (legacy) ──────────────────────────────────────
     provider_id = Column(String(128), nullable=False, index=True)
     model_id = Column(String(255), nullable=True)
     latency_ms = Column(Float, nullable=True)
@@ -288,10 +306,25 @@ class HealthRecord(Base):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SyncLog(Base):
-    """Records model catalog synchronization events."""
+    """Records model catalog synchronization events.
+
+    The database table was created by the M10 migration with:
+      provider_id_ref VARCHAR(128) NOT NULL  (maps to provider.provider_id)
+      action VARCHAR(64) DEFAULT ''
+
+    The ORM model also includes the original ORM-native columns
+    (provider_id, sync_type, models_retrieved, etc.) that were
+    created by Base.metadata.create_all() on the old MySQL schema.
+    Both sets coexist until a cleanup migration is written.
+    """
     __tablename__ = "sync_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # ── M10 migration columns ────────────────────────────────────────────
+    provider_id_ref = Column(String(128), nullable=False, index=True)
+
+    # ── ORM-native columns (legacy) ──────────────────────────────────────
     provider_id = Column(String(128), nullable=False, index=True)
     sync_type = Column(String(32), default="fetch")  # fetch | import | manual
     models_retrieved = Column(Integer, default=0)
@@ -367,10 +400,13 @@ class AuditLog(Base):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Role(Base):
-    """User roles lookup table (replaces VALID_ROLES hardcoded array)."""
+    """User roles lookup table (replaces VALID_ROLES hardcoded array).
+
+    NOTE: id uses UUID to match the industrial schema `roles` table.
+    """
     __tablename__ = "roles"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
     code = Column(String(64), unique=True, nullable=False, index=True)
     name = Column(String(128), nullable=False)
     description = Column(Text, default="")
@@ -381,7 +417,7 @@ class Role(Base):
 
     def to_dict(self) -> dict:
         return {
-            "id": self.id,
+            "id": str(self.id),
             "code": self.code,
             "name": self.name,
             "description": self.description,
@@ -397,10 +433,13 @@ class Role(Base):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Department(Base):
-    """Organization departments lookup table (replaces ZETDC_DEPARTMENTS hardcoded array)."""
+    """Organization departments lookup table (replaces ZETDC_DEPARTMENTS hardcoded array).
+
+    NOTE: id uses UUID to match the industrial schema `departments` table.
+    """
     __tablename__ = "departments"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
     code = Column(String(64), unique=True, nullable=False, index=True)
     name = Column(String(128), nullable=False)
     description = Column(Text, default="")
@@ -410,7 +449,7 @@ class Department(Base):
 
     def to_dict(self) -> dict:
         return {
-            "id": self.id,
+            "id": str(self.id),
             "code": self.code,
             "name": self.name,
             "description": self.description,

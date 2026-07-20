@@ -40,6 +40,9 @@ def include_routers(app) -> None:
     from .prompt_suggestions import router as prompt_suggestions_router
     from .enterprise_admin import router as enterprise_admin_router
     from .admin_embeddings import router as admin_embeddings_router
+    from .agent_gateway import router as agent_gateway_router
+    from .processing_control import router as processing_control_router
+    from .admin_jobs import router as admin_jobs_router
 
     app.include_router(health_router)
     app.include_router(auth_router)
@@ -67,11 +70,16 @@ def include_routers(app) -> None:
     app.include_router(prompt_suggestions_router)
     app.include_router(enterprise_admin_router)
     app.include_router(admin_embeddings_router)
+    app.include_router(agent_gateway_router)
+    app.include_router(processing_control_router)
+    app.include_router(admin_jobs_router)
 
 
 __all__ = [
     "include_routers",
     "ingest_router",
+    "processing_control_router",
+    "admin_jobs_router",
     "chat_router",
     "ask_router",
     "vision_router",

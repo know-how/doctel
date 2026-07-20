@@ -2,7 +2,7 @@
 model_management.py — DocTel Enterprise Model Management API (DB-Backed)
 
 GitHub Copilot-style model management routes covering all 14 layers.
-All data is now stored in MySQL via async SQLAlchemy sessions.
+All data is stored in PostgreSQL via async SQLAlchemy sessions.
 """
 
 import logging

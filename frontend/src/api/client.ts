@@ -961,6 +961,40 @@ export async function retryIngest(documentId: string): Promise<{ ok: boolean }> 
   return handleResponse<{ ok: boolean }>(res)
 }
 
+// ── Processing Control API v1 ────────────────────────────────────────────
+
+export async function pauseIngestion(documentId: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE_URL}/documents/${encodeURIComponent(documentId)}/pause`, {
+    method: "POST",
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<{ status: string }>(res)
+}
+
+export async function resumeIngestion(documentId: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE_URL}/documents/${encodeURIComponent(documentId)}/resume`, {
+    method: "POST",
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<{ status: string }>(res)
+}
+
+export async function restartIngestion(documentId: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE_URL}/documents/${encodeURIComponent(documentId)}/restart`, {
+    method: "POST",
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<{ status: string }>(res)
+}
+
+export async function cancelIngestion(documentId: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE_URL}/documents/${encodeURIComponent(documentId)}/cancel`, {
+    method: "POST",
+    headers: buildAuthHeaders(),
+  })
+  return handleResponse<{ status: string }>(res)
+}
+
 export async function createProject(
   payload: ProjectCreateRequest,
 ): Promise<ProjectResponse> {

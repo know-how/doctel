@@ -180,7 +180,7 @@ async def invalidate_settings_cache() -> None:
 async def save_settings_with_verification(
     db: AsyncSession,
     patch_flat: dict,
-    user_id: int,
+    user_id,
 ) -> Tuple[bool, Optional[str], dict]:
     """
     Save settings with full DB transaction verification.

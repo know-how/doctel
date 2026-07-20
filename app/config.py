@@ -122,6 +122,13 @@ class DiagnosticsSettings(BaseModel):
     log_level: str = "INFO"
     show_health: bool = True
 
+class JobPollerSettings(BaseModel):
+    max_workers: int = 3
+    poll_interval_seconds: float = 1.0
+    heartbeat_interval_seconds: float = 15.0
+    reclaim_interval_seconds: float = 60.0
+    shutdown_wait_seconds: float = 30.0
+
 class Settings(BaseModel):
     # Core
     base_dir: str = os.getenv("DOCINTEL_BASE_DIR", "C:\\LocalAI")
@@ -169,6 +176,7 @@ class Settings(BaseModel):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     zetdc: ZetdcSettings = Field(default_factory=ZetdcSettings)
     diagnostics: DiagnosticsSettings = Field(default_factory=DiagnosticsSettings)
+    job_poller: JobPollerSettings = Field(default_factory=JobPollerSettings)
 
     # Auth / AD (EC number + password)
     ad_url: str = os.getenv("DOCINTEL_AD_URL", "")
@@ -189,6 +197,12 @@ class Settings(BaseModel):
     smtp_user: str = os.getenv("DOCINTEL_SMTP_USER", "")
     smtp_pass: str = os.getenv("DOCINTEL_SMTP_PASS", "")
     smtp_use_tls: bool = os.getenv("DOCINTEL_SMTP_USE_TLS", "true").lower() == "true"
+
+    # Vector store selection
+    use_pgvector: bool = os.getenv("DOCINTEL_USE_PGVECTOR", "false").lower() == "true"
+    """When True, use pgvector as the primary vector store and ChromaDB as fallback.
+    In dual-write mode, new embeddings are written to both stores but reads use pgvector.
+    """
 
     # RAG parameters
     max_context_tokens: int = int(os.getenv("DOCINTEL_MAX_CONTEXT_TOKENS", "3000"))
@@ -212,16 +226,9 @@ class Settings(BaseModel):
     
     @property
     def db_url(self) -> str:
-        # Use environment variable override if provided
         if self.database_url:
             return self.database_url
-        # Default to MySQL connection
-        mysql_user = os.getenv("DOCINTEL_MYSQL_USER", "root")
-        mysql_pass = os.getenv("DOCINTEL_MYSQL_PASSWORD", "")
-        mysql_host = os.getenv("DOCINTEL_MYSQL_HOST", "127.0.0.1")
-        mysql_port = os.getenv("DOCINTEL_MYSQL_PORT", "3306")
-        mysql_db = os.getenv("DOCINTEL_MYSQL_DATABASE", "doctel")
-        return f"mysql+aiomysql://{mysql_user}:{mysql_pass}@{mysql_host}:{mysql_port}/{mysql_db}"
+        return "postgresql+asyncpg://doctel_app:DocTelTest2026@localhost:5432/doctel"
 
     @property
     def chroma_path(self) -> str:

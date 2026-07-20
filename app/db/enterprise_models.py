@@ -13,8 +13,11 @@ Adds database tables for all 20 pillars that were missing or incomplete:
   Pillar 13 — BenchmarkRun, BenchmarkResult (model evaluation)
   Pillar 14 — CostRecord, BudgetAlert (cost governance)
   Pillar 15 — ConfidenceScore (trust & confidence scoring)
+  Pillar 16 — ToolRegistry (agent tool registry)
   Pillar 17 — DepartmentRestriction, ProviderRestriction (security & governance)
-  Pillar 20 — InteractionAudit (full auditability)
+  Pillar 18 — AgentMemory (agent persistent memory with pgvector)
+  Pillar 19 — KnowledgeAsset, KnowledgeAssetTag, KnowledgeAssetLineage (knowledge asset registry)
+  Pillar 20 — InteractionAudit (full auditability, wired to AgentExecution)
 
 Every table references existing app.db.models or app.db.config_models FKs.
 """
@@ -26,7 +29,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean, DateTime,
-    ForeignKey, JSON, UniqueConstraint, Index,
+    ForeignKey, JSON, UniqueConstraint, Index, UUID, text,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -47,7 +50,7 @@ class DocAnalysisVersion(Base):
     __tablename__ = "doc_analysis_versions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"),
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"),
                          nullable=False, index=True)
     version = Column(Integer, nullable=False, default=1)
     analysis_type = Column(String(32), nullable=False)  # summary | extraction | classification
@@ -79,7 +82,7 @@ class DocAnalysisVersion(Base):
     status = Column(String(32), default="completed")  # pending | running | completed | failed
     error_message = Column(Text, default="")
 
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -131,7 +134,7 @@ class QuotationSpan(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"),
                         nullable=False, index=True)
-    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"),
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
                          nullable=True)
     chunk_id = Column(Integer, ForeignKey("chunks.id", ondelete="SET NULL"),
                       nullable=True)
@@ -184,7 +187,7 @@ class KnowledgeNode(Base):
     label = Column(String(255), nullable=False)
     description = Column(Text, default="")
     metadata_json = Column(Text, default="{}")
-    source_document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"),
+    source_document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
                                 nullable=True)
     source_project_id = Column(Integer, ForeignKey("projects.id", ondelete="SET NULL"),
                                nullable=True)
@@ -230,34 +233,20 @@ class KnowledgeEdge(Base):
     relation = Column(String(128), nullable=False)
     # appears_in | references | linked_to | responsible_for | part_of | impacts
     weight = Column(Float, default=1.0)
-    source_document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"),
+    source_document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"),
                                 nullable=True)
     metadata_json = Column(Text, default="{}")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (
-        Index("idx_edge_source", "source_node_id", "relation"),
-        Index("idx_edge_target", "target_node_id", "relation"),
-        UniqueConstraint("source_node_id", "target_node_id", "relation",
-                         name="uq_knowledge_edge"),
-    )
-
-    source_node = relationship("KnowledgeNode", foreign_keys=[source_node_id],
-                               back_populates="edges_from", lazy="selectin")
-    target_node = relationship("KnowledgeNode", foreign_keys=[target_node_id],
-                               back_populates="edges_to", lazy="selectin")
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "sourceNodeId": self.source_node_id,
-            "targetNodeId": self.target_node_id,
-            "relation": self.relation,
-            "weight": self.weight,
-            "sourceDocumentId": self.source_document_id,
-            "metadata": json.loads(self.metadata_json) if self.metadata_json else {},
-            "createdAt": self.created_at.isoformat() if self.created_at else None,
-        }
+    # Relationships back to KnowledgeNode (complementing KnowledgeNode's edges_from/edges_to)
+    source_node = relationship("KnowledgeNode",
+                               foreign_keys=[source_node_id],
+                               back_populates="edges_from",
+                               lazy="selectin")
+    target_node = relationship("KnowledgeNode",
+                               foreign_keys=[target_node_id],
+                               back_populates="edges_to",
+                               lazy="selectin")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -268,8 +257,8 @@ class DocumentVersion(Base):
     """Track document revisions, amendments, and superseded versions."""
     __tablename__ = "document_versions"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"),
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"),
                          nullable=False, index=True)
     version_number = Column(String(32), nullable=False)  # "1.0", "2.0", "2.1"
     version_label = Column(String(255), default="")       # "Original", "Amendment 3"
@@ -279,7 +268,7 @@ class DocumentVersion(Base):
     change_summary = Column(Text, default="")
     is_superseded = Column(Boolean, default=False)
     superseded_by_version = Column(String(32), nullable=True)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -328,7 +317,7 @@ class Agent(Base):
     config_json = Column(Text, default="{}")
     is_active = Column(Boolean, default=True)
     owner_role = Column(String(64), default="admin")
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -366,7 +355,7 @@ class AgentExecution(Base):
                       nullable=False, index=True)
     session_id = Column(Integer, ForeignKey("sessions.id", ondelete="SET NULL"),
                         nullable=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     input_text = Column(Text, default="")
     output_text = Column(Text, default="")
     reasoning_text = Column(Text, default="")
@@ -385,6 +374,10 @@ class AgentExecution(Base):
     )
 
     agent = relationship("Agent", back_populates="executions")
+    audit_entries = relationship("InteractionAudit", back_populates="agent_execution",
+                                  lazy="selectin")
+    memories = relationship("AgentMemory", back_populates="agent_execution",
+                            lazy="selectin", cascade="all, delete-orphan")
 
     def to_dict(self) -> dict:
         return {
@@ -422,7 +415,7 @@ class HumanReview(Base):
     content_before = Column(Text, default="")
     content_after = Column(Text, default="")
     status = Column(String(32), default="pending")  # pending | approved | rejected | changes_requested
-    reviewer_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewer_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     review_comment = Column(Text, default="")
     approved_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -461,7 +454,7 @@ class PromptTemplate(Base):
     """
     __tablename__ = "prompt_templates"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
     template_id = Column(String(128), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text, default="")
@@ -474,7 +467,7 @@ class PromptTemplate(Base):
     # draft | pending_approval | approved | rejected | deprecated
     effective_date = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -510,14 +503,14 @@ class PromptTemplateVersion(Base):
     __tablename__ = "prompt_template_versions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    template_id = Column(Integer, ForeignKey("prompt_templates.id", ondelete="CASCADE"),
+    template_id = Column(UUID(as_uuid=True), ForeignKey("prompt_templates.id", ondelete="CASCADE"),
                          nullable=False, index=True)
     version = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
     change_notes = Column(Text, default="")
-    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     template = relationship("PromptTemplate", back_populates="versions")
@@ -559,7 +552,7 @@ class BenchmarkRun(Base):
     status = Column(String(32), default="pending")  # pending | running | completed | failed
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     results = relationship("BenchmarkResult", back_populates="run", lazy="selectin",
@@ -641,7 +634,7 @@ class CostRecord(Base):
     source_id = Column(Integer, nullable=True)
     provider_id = Column(String(128), nullable=False, index=True)
     model_id = Column(String(255), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
     department = Column(String(64), default="")
     tokens_input = Column(Integer, default=0)
@@ -696,7 +689,7 @@ class BudgetAlert(Base):
     alert_threshold_pct = Column(Float, default=80.0)  # Alert at 80% of budget
     is_active = Column(Boolean, default=True)
     last_alert_sent_at = Column(DateTime(timezone=True), nullable=True)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -797,7 +790,7 @@ class DepartmentRestriction(Base):
     restriction_type = Column(String(32), nullable=False)  # provider | model | task
     restriction_id = Column(String(128), nullable=False)   # provider_id | model_id | task_type
     is_allowed = Column(Boolean, default=True)
-    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -818,6 +811,217 @@ class DepartmentRestriction(Base):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PILLAR 16 — TOOL REGISTRY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ToolRegistry(Base):
+    """Registry of tools available to AI agents.
+
+    Each tool defines its name, version, expected parameters (JSON schema),
+    required permissions, and which agent types are allowed to invoke it.
+
+    Tools are stored in the database — never in code — so governance teams
+    can add, remove, or restrict tools without deployment cycles.
+    """
+    __tablename__ = "tool_registry"
+
+    tool_id = Column(String(128), primary_key=True)
+    """Human-readable tool identifier (e.g. `search_documents`, `analyze_text`)."""
+
+    name = Column(String(255), nullable=False)
+    """Display name for the tool (e.g. "Search Documents", "Analyze Text")."""
+
+    version = Column(String(32), nullable=False, default="1.0.0")
+    """Semantic version of the tool definition."""
+
+    description = Column(Text, default="")
+    """Human-readable description of what the tool does."""
+
+    schema_json = Column(Text, nullable=False, default="{}")
+    """JSON Schema describing the tool's expected parameters.
+
+    Example:
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "top_k": {"type": "integer", "default": 5}
+            },
+            "required": ["query"]
+        }
+    """
+
+    permission_required = Column(String(128), nullable=True, default=None)
+    """Permission required to use this tool (e.g. ``documents.read``).
+
+    If ``None``, any agent may use the tool (subject to agent-type restrictions).
+    """
+
+    allowed_agent_types = Column(Text, nullable=False, default="[]")
+    """JSON array of agent type codes that may invoke this tool.
+
+    Example:
+        ["document_analyst", "knowledge_retrieval", "search_agent"]
+
+    Use ``["*"]`` to allow all agent types.
+    """
+
+    is_active = Column(Boolean, default=True)
+    """Soft-enable/disable the tool without deleting the record."""
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "toolId": self.tool_id,
+            "name": self.name,
+            "version": self.version,
+            "description": self.description,
+            "schema": json.loads(self.schema_json) if self.schema_json else {},
+            "permissionRequired": self.permission_required,
+            "allowedAgentTypes": json.loads(self.allowed_agent_types) if self.allowed_agent_types else [],
+            "isActive": self.is_active,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PILLAR 18 — AGENT MEMORY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class AgentMemory(Base):
+    """Persistent memory for AI agents across execution boundaries.
+
+    Supports three memory tiers:
+      - **working** — per-session context that expires when the session ends
+      - **episodic** — per-execution learnings that persist after the agent finishes
+      - **semantic** — long-term knowledge extracted from agent interactions
+
+    The ``embedding`` column uses pgvector (vector(768)) to enable semantic
+    memory recall — agents can search past memories by similarity.
+
+    Memory decay is managed via:
+      - ``ttl_seconds`` — time-to-live for working memory entries
+      - ``expires_at`` — computed expiry timestamp
+      - ``access_count`` / ``last_accessed_at`` — LRU eviction candidates
+    """
+    __tablename__ = "agent_memory"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # NOTE: index=True is intentionally omitted on agent_execution_id, session_id,
+    # and memory_type because the composite indexes in __table_args__ already
+    # cover those columns. Adding index=True would create redundant indexes,
+    # and since this table is managed by migration (not create_all), those
+    # auto-generated indexes would never materialize in the database anyway.
+
+    agent_execution_id = Column(
+        Integer,
+        ForeignKey("agent_executions.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="The agent execution that produced this memory entry",
+    )
+
+    session_id = Column(
+        Integer,
+        ForeignKey("sessions.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="Session this memory belongs to (NULL for long-term memories)",
+    )
+
+    memory_type = Column(
+        String(32),
+        nullable=False,
+        default="working",
+        comment="working | episodic | semantic",
+    )
+
+    key = Column(
+        String(255),
+        nullable=False,
+        default="",
+        comment="Semantic key for memory lookup (e.g. 'user_intent', 'retrieved_facts')",
+    )
+
+    value_json = Column(
+        Text,
+        nullable=False,
+        default="null",
+        comment="Memory payload as JSON (flexible schema per memory type)",
+    )
+
+    # The embedding column is stored as Text in the ORM but is created as
+    # vector(768) in PostgreSQL via the Alembic migration (raw SQL).
+    # This ensures pgvector operators (<=>, <->, <#>) work at the database
+    # level while keeping the ORM dependency-free from the pgvector package.
+    embedding = Column(
+        Text,
+        nullable=True,
+        default=None,
+        comment="pgvector embedding (vector(768)) — stored as Text in ORM, vector in DB",
+    )
+
+    ttl_seconds = Column(
+        Integer,
+        nullable=True,
+        default=None,
+        comment="Time-to-live for this memory entry (NULL = permanent)",
+    )
+
+    expires_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+        comment="Computed expiry timestamp (created_at + ttl_seconds)",
+    )
+
+    access_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="Number of times this memory has been accessed (for LRU eviction)",
+    )
+
+    last_accessed_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+        comment="Timestamp of last access (for LRU eviction)",
+    )
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_agent_memory_lookup", "agent_execution_id", "memory_type", "key"),
+        Index("idx_agent_memory_expiry", "expires_at"),
+        Index("idx_agent_memory_session", "session_id", "memory_type"),
+        Index("idx_agent_memory_access", "access_count", "last_accessed_at"),
+    )
+
+    # Relationships
+    agent_execution = relationship("AgentExecution", back_populates="memories")
+
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "agentExecutionId": self.agent_execution_id,
+            "sessionId": self.session_id,
+            "memoryType": self.memory_type,
+            "key": self.key,
+            "value": json.loads(self.value_json) if self.value_json else None,
+            "embedding": self.embedding,  # string representation; clients parse as needed
+            "ttlSeconds": self.ttl_seconds,
+            "expiresAt": self.expires_at.isoformat() if self.expires_at else None,
+            "accessCount": self.access_count,
+            "lastAccessedAt": self.last_accessed_at.isoformat() if self.last_accessed_at else None,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PILLAR 20 — FULL AUDITABILITY (Interaction Audit Trail)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -826,15 +1030,28 @@ class InteractionAudit(Base):
 
     Captures: Model, Provider, Prompt, Retrieved Chunks, Reasoning,
     Citations, Quotations, Response, Duration, Token Usage, Cost, User, Department.
+
+    Linked to ``AgentExecution`` via ``agent_execution_id`` for full
+    agent-run auditability.
     """
     __tablename__ = "interaction_audits"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # ── Agent execution link (new) ────────────────────────────────────────
+    agent_execution_id = Column(
+        Integer,
+        ForeignKey("agent_executions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="Links this audit record to the originating agent execution",
+    )
+
     session_id = Column(Integer, ForeignKey("sessions.id", ondelete="SET NULL"),
                         nullable=True, index=True)
     message_id = Column(Integer, ForeignKey("messages.id", ondelete="SET NULL"),
                         nullable=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     department = Column(String(64), default="")
 
     # Request details
@@ -872,6 +1089,9 @@ class InteractionAudit(Base):
 
     # Immutable timestamp
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    agent_execution = relationship("AgentExecution", back_populates="audit_entries")
 
     __table_args__ = (
         Index("idx_audit_user_time", "user_id", "created_at"),
@@ -911,3 +1131,84 @@ class InteractionAudit(Base):
             "errorMessage": self.error_message,
             "createdAt": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PILLAR 21 — AGENT ORCHESTRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class AgentExecutionPlan(Base):
+    """Multi-agent execution plan step.
+
+    Each row represents one step in a workflow execution plan.
+    Steps are ordered and form a tree via parent_execution_id.
+
+    Example — Document Review Workflow:
+        Step 1: knowledge_retrieval (parent_execution_id = NULL)
+        Step 2: document_analyst (parent_execution_id = Step 1's execution_id)
+        Step 3: summarization (parent_execution_id = Step 2's execution_id)
+    """
+    __tablename__ = "agent_execution_plans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    workflow_id = Column(
+        String(128), nullable=False, index=True,
+        comment="Workflow type identifier (e.g. 'document_review', 'compliance_review')",
+    )
+    name = Column(
+        String(255), nullable=False,
+        comment="Human-readable workflow name (e.g. 'Document Review Workflow')",
+    )
+    description = Column(Text, default="")
+
+    execution_id = Column(
+        Integer, ForeignKey("agent_executions.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+        comment="The agent execution record for this step",
+    )
+    parent_execution_id = Column(
+        Integer, ForeignKey("agent_executions.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="Parent execution that triggered this step (NULL for root)",
+    )
+
+    step_order = Column(Integer, nullable=False, default=1)
+    agent_type = Column(String(64), nullable=False, comment="Agent type for this step")
+    agent_id = Column(Integer, ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
+    input_text = Column(Text, default="")
+    tool_calls_json = Column(Text, default="[]")
+    status = Column(
+        String(32), nullable=False, default="pending",
+        comment="pending | running | completed | failed | skipped",
+    )
+    result_json = Column(Text, default="{}")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_plan_workflow", "workflow_id", "step_order"),
+        Index("idx_plan_parent", "parent_execution_id"),
+        Index("idx_plan_status", "status", "workflow_id"),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "workflowId": self.workflow_id,
+            "name": self.name,
+            "description": self.description,
+            "executionId": self.execution_id,
+            "parentExecutionId": self.parent_execution_id,
+            "stepOrder": self.step_order,
+            "agentType": self.agent_type,
+            "agentId": self.agent_id,
+            "inputText": self.input_text,
+            "toolCalls": json.loads(self.tool_calls_json) if self.tool_calls_json else [],
+            "status": self.status,
+            "result": json.loads(self.result_json) if self.result_json else {},
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+        }
+

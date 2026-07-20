@@ -59,6 +59,13 @@ from app.routers.deps import (
 )
 
 from app.services.document_permission_service import enrich_citations
+from app.services.copilot_service import detect_intent, CopilotMode, _MODE_SYSTEM_PROMPTS as _cs_prompts
+
+# Shared IMAGE_GENERATION system prompt — imported from copilot_service to avoid duplication
+_IMAGE_GENERATION_SYSTEM_PROMPT = _cs_prompts.get(
+    CopilotMode.IMAGE_GENERATION,
+    "You are DocTel Visual Designer, a specialized AI for creating visual content.",
+)
 
 router = APIRouter(tags=["ask"])
 
@@ -263,16 +270,24 @@ async def ask_global(
         db.add(s)
         await db.commit()
 
+    # Detect intent for image/diagram generation routing
+    intent_info = detect_intent(question)
+    is_image_intent = intent_info["primary_intent"] in ("image", "diagram")
+    logger.info("[ASK] Intent detected: primary=%s, matched=%s", intent_info["primary_intent"], intent_info["matched_patterns"])
+
     from app.utils.ollama_client import ollama
     from app.services.model_resolver_service import resolve_model, resolve_provider_credentials
     from app.services.provider_gateway_service import generate as gateway_generate, generate_stream as gateway_generate_stream
 
     # Use centralized model resolver instead of direct settings access
-    logger.info("[ASK] Resolving model for requested_model=%s", requested_model)
+    # For image/diagram requests, use image_generation task type so the resolver
+    # checks the IMAGE_GENERATION task mapping and prefers image-capable models.
+    resolver_task_type = "image_generation" if is_image_intent else "chat"
+    logger.info("[ASK] Resolving model for requested_model=%s, task_type=%s", requested_model, resolver_task_type)
     resolved = await resolve_model(
         db,
         requested_model=requested_model,
-        task_type="chat",
+        task_type=resolver_task_type,
         session_model=(s.model_name or "").strip() or None,
     )
     chosen_model = resolved["model_id"]
@@ -382,29 +397,118 @@ async def ask_global(
     # the RAG call and let get_rag_answer_scoped() handle failures gracefully.
     # If ChromaDB is empty or the embedding model is unavailable, it returns
     # citations=[] which triggers the fallback below.
-    rag_collections_exist = False
-    try:
-        from app.utils.chroma_client import chroma as _gate_chroma
-        _gate_cols = _gate_chroma.list_collections()
-        rag_collections_exist = any(c.count() > 0 for c in (_gate_cols or []))
-    except Exception:
-        rag_collections_exist = True  # assume yes if we can't check
-    logger.info("[RAG] Gate check: embed_available=%s, projects=%s, chroma_collections_exist=%s",
-                embed_available, bool(project_ids), rag_collections_exist)
-    if embed_available and project_ids and rag_collections_exist:
-        try:
-            rag = await get_rag_answer_scoped(
-                project_ids,
-                question,
-                db,
-                document_id=None,
-                model_name=chosen_model,
-                force_policy=force_policy,
-                force_diagram=force_diagram,
-            )
-        except Exception as rag_exc:
-            logger.warning("[RAG] get_rag_answer_scoped threw exception: %s", rag_exc, exc_info=True)
+    # ── VECTOR STORE ROUTING ──────────────────────────────────────────────
+    # When USE_PGVECTOR is enabled, use pgvector (with RBAC pre-filtering)
+    # instead of ChromaDB.  Supports dual-write: new documents are written
+    # to both stores, but reads use pgvector when the flag is on.
+    #
+    # Metrics are logged on every retrieval so we can compare latency and
+    # result quality during the migration period.
+
+    if settings.use_pgvector:
+        # ── pgvector path (with RBAC pre-filtering) ───────────────────────
+        _pg_start = asyncio.get_event_loop().time()
+        if embed_available and project_ids:
+            try:
+                from app.services.rag_service_pgvector import get_rag_answer_scoped_pgvector
+
+                rag = await get_rag_answer_scoped_pgvector(
+                    project_ids=[str(pid) for pid in project_ids],
+                    user_query=question,
+                    db=db,
+                    user_id=user.id,
+                    document_id=None,
+                    model_name=chosen_model,
+                    force_policy=force_policy,
+                    force_diagram=force_diagram,
+                )
+
+                _pg_elapsed = (asyncio.get_event_loop().time() - _pg_start) * 1000
+                pg_citation_count = len(rag.get("citations", []))
+
+                # ── Parity validation: compare with ChromaDB ──────────────
+                _parity_start = asyncio.get_event_loop().time()
+                try:
+                    chroma_rag = await get_rag_answer_scoped(
+                        project_ids,
+                        question,
+                        db,
+                        document_id=None,
+                        model_name=chosen_model,
+                        force_policy=force_policy,
+                        force_diagram=force_diagram,
+                    )
+                    _chroma_elapsed = (asyncio.get_event_loop().time() - _parity_start) * 1000
+                    chroma_citation_count = len(chroma_rag.get("citations", []))
+
+                    # Compare chunk overlap
+                    pg_chunk_keys = set(
+                        (c.get("document_id"), c.get("chunk_index"))
+                        for c in rag.get("citations", [])
+                    )
+                    chroma_chunk_keys = set(
+                        (c.get("document_id"), c.get("chunk_index"))
+                        for c in chroma_rag.get("citations", [])
+                    )
+                    overlap = len(pg_chunk_keys & chroma_chunk_keys)
+
+                    logger.info(
+                        "[PGVECTOR_PARITY] pgvector: %d chunks in %.1fms | "
+                        "chroma: %d chunks in %.1fms | overlap=%d | "
+                        "project_ids=%s",
+                        pg_citation_count, _pg_elapsed,
+                        chroma_citation_count, _chroma_elapsed,
+                        overlap, project_ids,
+                    )
+                except Exception as parity_exc:
+                    logger.warning(
+                        "[PGVECTOR_PARITY] ChromaDB comparison failed: %s",
+                        parity_exc, exc_info=True,
+                    )
+
+                # ── Log pgvector-specific metrics ─────────────────────────
+                logger.info(
+                    "[PGVECTOR_ROUTE] Retrieved %d chunks in %.1fms "
+                    "(project_ids=%s, user=%s, embed_available=%s)",
+                    pg_citation_count, _pg_elapsed,
+                    project_ids, user.id, embed_available,
+                )
+
+            except Exception as pg_exc:
+                _pg_elapsed = (asyncio.get_event_loop().time() - _pg_start) * 1000
+                logger.warning(
+                    "[PGVECTOR_ROUTE] pgvector query FAILED after %.1fms, "
+                    "falling back to ChromaDB: %s",
+                    _pg_elapsed, pg_exc, exc_info=True,
+                )
+                rag = None
+        else:
             rag = None
+    else:
+        # ── Legacy ChromaDB path ──────────────────────────────────────────
+        rag_collections_exist = False
+        try:
+            from app.utils.chroma_client import chroma as _gate_chroma
+            _gate_cols = _gate_chroma.list_collections()
+            rag_collections_exist = any(c.count() > 0 for c in (_gate_cols or []))
+        except Exception:
+            rag_collections_exist = True  # assume yes if we can't check
+        logger.info("[RAG] Gate check: embed_available=%s, projects=%s, chroma_collections_exist=%s",
+                    embed_available, bool(project_ids), rag_collections_exist)
+        if embed_available and project_ids and rag_collections_exist:
+            try:
+                rag = await get_rag_answer_scoped(
+                    project_ids,
+                    question,
+                    db,
+                    document_id=None,
+                    model_name=chosen_model,
+                    force_policy=force_policy,
+                    force_diagram=force_diagram,
+                )
+            except Exception as rag_exc:
+                logger.warning("[RAG] get_rag_answer_scoped threw exception: %s", rag_exc, exc_info=True)
+                rag = None
     if not rag or not rag.get("citations"):
         # ── Cross-project fallback ──────────────────────────────────────────
         # When scope="project" and the current project has no indexed chunks,
@@ -604,13 +708,22 @@ async def ask_global_stream(
         print(f"requested_model: {requested_model}", flush=True)
         print(f"session_uuid: {session_uuid}", flush=True)
 
+        # Detect intent for image/diagram generation routing
+        intent_info = detect_intent(question)
+        is_image_intent = intent_info["primary_intent"] in ("image", "diagram")
+        print(f"[INTENT] primary={intent_info['primary_intent']}, is_image={is_image_intent}", flush=True)
+
         from app.services.model_resolver_service import resolve_model
+
+        # For image/diagram requests, use image_generation task type
+        resolver_task_type = "image_generation" if is_image_intent else "chat"
+        print(f"[INTENT] Using task_type={resolver_task_type}", flush=True)
 
         # Use centralized model resolver
         resolved = await resolve_model(
             db,
             requested_model=requested_model,
-            task_type="chat",
+            task_type=resolver_task_type,
         )
         chosen_model = resolved["model_id"]
         provider_type = resolved.get("provider_type", "ollama")
@@ -646,7 +759,12 @@ async def ask_global_stream(
         await db.commit()
         print("User message saved", flush=True)
 
-        sys_prompt = (settings.zetdc.system_prompt or "").strip() or None
+        # Use IMAGE_GENERATION system prompt when user wants image/diagram creation
+        if is_image_intent:
+            sys_prompt = _IMAGE_GENERATION_SYSTEM_PROMPT
+            print(f"[INTENT] Using IMAGE_GENERATION system prompt", flush=True)
+        else:
+            sys_prompt = (settings.zetdc.system_prompt or "").strip() or None
         final_session_uuid = s.session_uuid
 
         # ── RAG retrieval for global context ────────────────────────────────
@@ -753,7 +871,7 @@ async def ask_global_stream(
                     if provider and provider.api_key_value:
                         zen_api_key = provider.api_key_value.strip()
                         zen_base_url = (provider.base_url or "").strip() or None
-                        print(f"[ZEN DB] ✅ KEY via model→provider: {provider.name}, len={len(zen_api_key)}", flush=True)
+                        print(f"[ZEN DB] [KEY] via model->provider: {provider.name}, len={len(zen_api_key)}", flush=True)
 
                 # Step 3: Fallback — any provider with a non-empty api_key_value
                 if not zen_api_key:
@@ -943,7 +1061,9 @@ async def ask_document(
                 doc.ingestion_started = True
                 db.add(doc)
                 await db.commit()
-                await enqueue_ingest(int(doc.id))
+                job_id = await enqueue_ingest("document_ingest", document_id=doc.id, owner_id=doc.owner_id)
+                if job_id is None:
+                    logger.warning("[ASK] Failed to enqueue ingest job for doc %s (owner=%s)", doc.id, doc.owner_id)
 
         allow_while = bool(getattr(settings, "ui", None) and getattr(settings.ui, "allow_chat_while_ingesting", True))
 
@@ -971,10 +1091,15 @@ async def ask_document(
                 },
             )
 
+        # Detect intent for image/diagram generation routing
+        _intent_info_local = detect_intent(question)
+        _is_image_intent_local = _intent_info_local["primary_intent"] in ("image", "diagram")
+
         # Pre-compute chosen model
         from app.services.model_resolver_service import resolve_model, resolve_provider_credentials
         _session_model_pre = (s.model_name or "").strip() or None
-        resolved = await resolve_model(db, requested_model=requested_model or _session_model_pre, task_type="chat", session_model=_session_model_pre)
+        _resolver_task_type = "image_generation" if _is_image_intent_local else "chat"
+        resolved = await resolve_model(db, requested_model=requested_model or _session_model_pre, task_type=_resolver_task_type, session_model=_session_model_pre)
         chosen_model = resolved["model_id"]
         provider_type = resolved.get("provider_type", "ollama")
         provider_id = resolved.get("provider_id", "unknown")

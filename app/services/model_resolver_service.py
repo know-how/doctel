@@ -525,6 +525,8 @@ async def _get_capabilities(db: AsyncSession, model_id: str) -> List[str]:
             caps = ["chat", "text"]
             if model.supports_vision:
                 caps.append("vision")
+            if model.supports_image_generation:
+                caps.append("image_generation")
             if model.supports_code:
                 caps.append("code")
             if model.supports_embedding:
@@ -543,11 +545,15 @@ async def _get_capabilities(db: AsyncSession, model_id: str) -> List[str]:
     
     # 2) Fallback to name patterns
     caps = ["chat", "text"]
-    if "vision" in model_id.lower() or "llava" in model_id.lower():
+    mid_lower = model_id.lower()
+    if "vision" in mid_lower or "llava" in mid_lower or "gemini" in mid_lower or "multimodal" in mid_lower:
         caps.append("vision")
-    if "code" in model_id.lower() or "coder" in model_id.lower():
+        caps.append("image_generation")
+    if "code" in mid_lower or "coder" in mid_lower:
         caps.append("code")
-    if "embed" in model_id.lower():
+    if "embed" in mid_lower:
         caps.append("embedding")
+    if "reason" in mid_lower or "deepseek-r1" in mid_lower or "deepseek-reasoner" in mid_lower:
+        caps.append("reasoning")
     
     return caps

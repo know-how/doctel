@@ -43,7 +43,7 @@ ACTION_TYPES = {
 
 async def log_interaction(
     db: AsyncSession,
-    user_id: int | None,
+    user_id,
     action_type: str,
     resource_type: str = "document",
     resource_id: str | None = None,

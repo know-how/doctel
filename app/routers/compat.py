@@ -111,9 +111,9 @@ async def login(
     if user.email:
         eres = await db.execute(select(UserIdentityProvider).where(UserIdentityProvider.provider == "email_otp", UserIdentityProvider.identity == user.email))
         eprov = eres.scalar_one_or_none()
-        if eprov and eprov.user_id and int(eprov.user_id) != int(user.id):
-            primary_id = int(eprov.user_id)
-            secondary_id = int(user.id)
+        if eprov and eprov.user_id and str(eprov.user_id) != str(user.id):
+            primary_id = eprov.user_id
+            secondary_id = user.id
             await db.execute(update(Project).where(Project.owner_user_id == secondary_id).values(owner_user_id=primary_id))
             await db.execute(update(ProjectMember).where(ProjectMember.user_id == secondary_id).values(user_id=primary_id))
             await db.execute(update(Document).where(Document.uploaded_by_user_id == secondary_id).values(uploaded_by_user_id=primary_id))

@@ -286,7 +286,9 @@ async def override_document_project(
     doc.ingest_message = "Project updated; queued for re-ingestion"
     db.add(doc)
     await db.commit()
-    await enqueue_ingest(doc.id)
+    job_id = await enqueue_ingest("document_ingest", document_id=doc.id, owner_id=doc.owner_id)
+    if job_id is None:
+        logger.warning("[DOCUMENTS] Failed to enqueue ingest job for doc %s (owner=%s)", doc.id, doc.owner_id)
     return {"ok": True, "id": f"doc_{doc.id}", "project_id": str(pid_int)}
 
 

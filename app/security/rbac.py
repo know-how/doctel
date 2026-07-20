@@ -1,6 +1,6 @@
 from fastapi import Depends, HTTPException, status, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, DatabaseError
 from typing import Optional, List
 
@@ -27,6 +27,7 @@ async def get_current_user(
                     await db.commit()
                 request.state.user_id = user.id
                 request.state.username = user.username
+                await db.execute(text("SELECT set_config('app.current_user_id', :val, true)"), {"val": str(user.id)})
                 return user
             else:
                 sess = auth_service.validate_token(token)
@@ -41,12 +42,13 @@ async def get_current_user(
                 user_id = sess.get("user_id")
                 if not user_id:
                     raise HTTPException(status_code=401, detail={"error": "token_expired"})
-                result = await db.execute(select(User).where(User.id == int(user_id)))
+                result = await db.execute(select(User).where(User.id == user_id))
                 user = result.scalar_one_or_none()
                 if not user:
                     raise HTTPException(status_code=401, detail={"error": "token_expired"})
                 request.state.user_id = user.id
                 request.state.username = user.username
+                await db.execute(text("SELECT set_config('app.current_user_id', :val, true)"), {"val": str(user.id)})
                 return user
         except HTTPException:
             raise
@@ -62,6 +64,7 @@ async def get_current_user(
                 raise HTTPException(status_code=401, detail={"error": "token_expired"})
             request.state.user_id = user.id
             request.state.username = user.username
+            await db.execute(text("SELECT set_config('app.current_user_id', :val, true)"), {"val": str(user.id)})
             return user
         except HTTPException:
             raise
@@ -102,7 +105,7 @@ async def check_project_access(project_id: int, user: User, db: AsyncSession):
     raise HTTPException(status_code=403, detail="Access to project denied")
 
 
-async def assert_project_access(user_id: int, project_id: int, db: AsyncSession) -> None:
+async def assert_project_access(user_id, project_id: int, db: AsyncSession) -> None:
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:

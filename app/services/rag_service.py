@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import List, Optional
+from typing import List, Optional, Union
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -14,7 +14,6 @@ from app.services.embedding_service import (
     generate_embedding,
     resolve_embedding_model,
 )
-from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +39,10 @@ def _dedupe_keep_order(items: list[dict]) -> list[dict]:
     return out
 
 async def get_rag_answer_scoped(
-    project_ids: List[int],
+    project_ids: List[Union[int, str]],
     user_query: str,
     db: AsyncSession,
-    document_id: Optional[int] = None,
+    document_id: Optional[Union[int, str]] = None,
     model_name: Optional[str] = None,
     force_policy: bool = False,
     force_diagram: bool = False,
@@ -89,7 +88,9 @@ async def get_rag_answer_scoped(
     logger.info("[RAG] Current embedding model — provider=%s, model=%s", current_provider, current_model)
 
     results_rows: list[dict] = []
-    for pid in [int(p) for p in project_ids if p is not None]:
+    for pid in project_ids:
+        if pid is None:
+            continue
         try:
             where: dict = {}
             if document_id is not None:
@@ -192,28 +193,39 @@ async def get_rag_answer_scoped(
     # Compare each document's stored embedding model/provider against the
     # currently resolved TaskMapping.  A mismatch means the document was
     # embedded with a different model and may need re-embedding.
+    # NOTE: This is a diagnostic feature — failures are caught and logged
+    #       but never allowed to crash the main retrieval pipeline.
+    import uuid
     mismatch_docs: list[dict] = []
     if current_provider and current_model:
-        seen_doc_ids: set[int] = set()
-        for r in results_rows:
-            did = r.get("document_id")
-            if did is not None:
-                seen_doc_ids.add(int(did))
-        for did in seen_doc_ids:
-            result = await db.execute(select(Document).where(Document.id == did))
-            doc = result.scalar_one_or_none()
-            if doc and (
-                doc.embedding_provider != current_provider
-                or doc.embedding_model != current_model
-            ):
-                mismatch_docs.append({
-                    "document_id": did,
-                    "filename": doc.filename,
-                    "stored_provider": doc.embedding_provider,
-                    "stored_model": doc.embedding_model,
-                    "current_provider": current_provider,
-                    "current_model": current_model,
-                })
+        try:
+            seen_doc_ids: set = set()
+            for r in results_rows:
+                did = r.get("document_id")
+                if did is not None:
+                    seen_doc_ids.add(str(did))
+            for did_str in seen_doc_ids:
+                try:
+                    uid = uuid.UUID(did_str) if isinstance(did_str, str) else did_str
+                except (ValueError, TypeError):
+                    logger.warning("[RAG_MISMATCH] Skipping invalid document_id=%r", did_str)
+                    continue
+                result = await db.execute(select(Document).where(Document.id == uid))
+                doc = result.scalar_one_or_none()
+                if doc and (
+                    doc.embedding_provider != current_provider
+                    or doc.embedding_model != current_model
+                ):
+                    mismatch_docs.append({
+                        "document_id": did_str,
+                        "filename": doc.filename,
+                        "stored_provider": doc.embedding_provider,
+                        "stored_model": doc.embedding_model,
+                        "current_provider": current_provider,
+                        "current_model": current_model,
+                    })
+        except Exception as exc:
+            logger.warning("[RAG_MISMATCH] Mismatch detection failed (non-critical): %s", exc, exc_info=True)
 
     citations: list[dict] = []
     context_chunks: list[str] = []
@@ -225,8 +237,8 @@ async def get_rag_answer_scoped(
             "chunk_index": int(r["chunk_index"] or 0),
             "text": full_text[:1000] + ("..." if len(full_text) > 1000 else ""),
             "full_text_available": len(full_text) <= 1000,
-            "project_id": int(r["project_id"]),
-            "document_id": int(r["document_id"]) if r.get("document_id") is not None else None,
+            "project_id": str(r["project_id"]) if not isinstance(r["project_id"], int) else r["project_id"],
+            "document_id": str(r["document_id"]) if r.get("document_id") is not None else None,
             "source_type": r.get("source_type", "document"),
             "distance": r.get("distance", 1.0),
         }
@@ -243,10 +255,33 @@ async def get_rag_answer_scoped(
     context = "\n\n".join(context_chunks)
     logger.info("[RAG] Context built — citations count=%d, context length=%d chars, used_files=%s",
                 len(citations), len(context), [c.get("filename") for c in citations if c.get("filename")])
+    # ── GUARDRAIL: No context → return NO_KNOWLEDGE_FOUND ──────────────
+    # Prevent LLM hallucination by refusing to call the model when no
+    # retrieval context is available.
     if not context or len(context.strip()) == 0:
-        logger.warning("[RAG] No retrieval results found — context is EMPTY after building from %d results_rows", len(results_rows))
-    else:
-        logger.info("[RAG] Context preview (first 300 chars): %s", context[:300])
+        logger.warning(
+            "[RAG] No retrieval results — NO_KNOWLEDGE_FOUND guardrail triggered (no LLM call to prevent hallucination)"
+        )
+        logger.info(
+            "[RAG_GUARD] guardrail=no_context | question=%r | project_ids=%s | document_id=%s | results_rows=%d",
+            user_query[:120] if user_query else "",
+            project_ids,
+            document_id,
+            len(results_rows),
+        )
+        return {
+            "answer_text": "I could not find any relevant information in the knowledge base to answer your question. Please try rephrasing or providing more specific details.",
+            "reasoning_text": "",
+            "mermaid_code": "",
+            "drawing_prompt": "",
+            "citations": [],
+            "cross_references": [],
+            "used_model": "no-knowledge-found",
+            "embedding_mismatch": False,
+            "embedding_mismatch_docs": [],
+        }
+
+    logger.info("[RAG] Context preview (first 300 chars): %s", context[:300])
     used_files = list(dict.fromkeys([c.get("filename") for c in citations if c.get("filename")]))
     cross_refs = [{"filename": f, "reason": "Used as retrieval context"} for f in used_files[1:]]
 
@@ -399,7 +434,7 @@ async def get_rag_answer(
     user_query: str,
     db: AsyncSession,
     session_id: Optional[int] = None,
-    document_id: Optional[int] = None,
+    document_id: Optional[Union[int, str]] = None,
     model_name: Optional[str] = None,
 ):
     out = await get_rag_answer_scoped(

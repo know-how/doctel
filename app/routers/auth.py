@@ -109,9 +109,9 @@ async def login(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
             )
         )
         eprov = eres.scalar_one_or_none()
-        if eprov and eprov.user_id and int(eprov.user_id) != int(user.id):
-            primary_id = int(eprov.user_id)
-            secondary_id = int(user.id)
+        if eprov and eprov.user_id and str(eprov.user_id) != str(user.id):
+            primary_id = eprov.user_id
+            secondary_id = user.id
             await db.execute(
                 update(Project)
                 .where(Project.owner_user_id == secondary_id)
@@ -361,7 +361,7 @@ async def auth_logout_with_broadcast(
     except Exception:
         pass
     try:
-        from app.services.ingest_worker import cancel_document_ids
+        from app.services.job_poller import cancel_job
         from sqlalchemy import select as _select
         from app.db.models import Document as _Document
 
@@ -372,8 +372,8 @@ async def auth_logout_with_broadcast(
             )
         )
         pending_ids = [row[0] for row in pending_result.all()]
-        if pending_ids:
-            cancel_document_ids(pending_ids)
+        for pid in pending_ids:
+            await cancel_job(document_id=pid, owner_id=user.id)
     except Exception:
         pass
     try:

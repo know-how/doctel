@@ -6,8 +6,10 @@ ingestions, and streaming ingestion progress via SSE.
 """
 
 import json
-
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from app.routers.deps import (
     APIRouter,
@@ -20,6 +22,7 @@ from app.routers.deps import (
     StreamingResponse,
     select,
     delete,
+    text,
     get_file_hash,
     enqueue_ingest,
     Document,
@@ -96,7 +99,18 @@ async def upload_documents(
 
         sha256 = await get_file_hash(str(file_path))
 
+        # Re-set RLS context; intermediate commits in ensure_project_membership
+        # may have cleared the SET LOCAL app.current_user_id setting.
+        await db.execute(
+            text("SELECT set_config('app.current_user_id', :val, true)"),
+            {"val": str(user.id)}
+        )
+
+        doc_title = title or Path(file_item.filename).stem
         doc = Document(
+            owner_id=user.id,
+            created_by=user.id,
+            title=doc_title,
             project_id=project_id,
             uploaded_by_user_id=user.id,
             filename=file_item.filename,
@@ -116,11 +130,10 @@ async def upload_documents(
         doc.doc_date = date
         db.add(doc)
         await db.commit()
-        await enqueue_ingest(doc.id)
+        job_id = await enqueue_ingest("document_ingest", document_id=doc.id, owner_id=user.id)
+        if job_id is None:
+            logger.error("[INGEST] Failed to enqueue ingest job for document %s (owner=%s)", doc.id, user.id)
 
-        # Start background ingestion
-        # asyncio.create_task(ingest_document(doc.id, db))
-        # Note: In a real app, we'd use a background task with a fresh DB session
         uploaded_docs.append(UploadedDocument(
             id=f"doc_{doc.id}",
             filename=doc.filename,
@@ -157,6 +170,14 @@ async def upload_document_single(
 
     await check_project_access(pid, user, db)
     await ensure_project_membership(pid, user, db, role_in_project="admin" if user.role == "admin" else "analyst")
+
+    # Re-set RLS context; intermediate commits in project creation or
+    # ensure_project_membership may have cleared the SET LOCAL setting.
+    await db.execute(
+        text("SELECT set_config('app.current_user_id', :val, true)"),
+        {"val": str(user.id)}
+    )
+
     dest = settings.uploads_dir / f"{pid}_{file.filename}"
     total = 0
     with open(dest, "wb") as f:
@@ -174,7 +195,11 @@ async def upload_document_single(
                 raise HTTPException(status_code=413, detail="File too large (max 64MB)")
             f.write(chunk)
     sha256 = await get_file_hash(str(dest))
+    doc_title = Path(file.filename).stem
     doc = Document(
+        owner_id=user.id,
+        created_by=user.id,
+        title=doc_title,
         project_id=pid,
         uploaded_by_user_id=user.id,
         filename=file.filename,
@@ -195,7 +220,9 @@ async def upload_document_single(
     db.add(doc)
     await db.commit()
     _metrics["uploads_total"] += 1
-    await enqueue_ingest(doc.id)
+    job_id = await enqueue_ingest("document_ingest", document_id=doc.id, owner_id=user.id)
+    if job_id is None:
+        logger.error("[INGEST] Failed to enqueue ingest job for document %s (owner=%s)", doc.id, user.id)
     return {"id": f"doc_{doc.id}", "filename": doc.filename, "status": "uploaded", "is_public": is_public, "detected_type": doc.detected_type, "metadata": {
         "project_id": str(pid), "document_type": document_type, "document_date": document_date
     }}
@@ -237,7 +264,9 @@ async def ingest_retry(payload: dict = Body(...), user: User = Depends(require_r
     doc.analysis_ready = False
     db.add(doc)
     await db.commit()
-    await enqueue_ingest(doc.id)
+    job_id = await enqueue_ingest("document_ingest", document_id=doc.id, owner_id=doc.owner_id)
+    if job_id is None:
+        logger.error("[INGEST] Failed to enqueue retry job for document %s (owner=%s)", doc.id, doc.owner_id)
     return {"ok": True}
 
 
@@ -246,7 +275,7 @@ async def ingest_retry(payload: dict = Body(...), user: User = Depends(require_r
 # ---------------------------------------------------------------------------
 @router.post("/api/ingest/{doc_id}")
 async def trigger_ingestion(
-    doc_id: int,
+    doc_id: uuid.UUID,
     user: User = Depends(require_role(["admin", "analyst"])),
     db: AsyncSession = Depends(get_db)
 ):
@@ -255,7 +284,9 @@ async def trigger_ingestion(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     await _assert_document_workspace_access(doc, user, db)
-    await enqueue_ingest(doc_id)
+    job_id = await enqueue_ingest("document_ingest", document_id=doc_id, owner_id=doc.owner_id)
+    if job_id is None:
+        logger.error("[INGEST] Failed to trigger ingestion for document %s (owner=%s)", doc_id, doc.owner_id)
     return {"status": "queued"}
 
 
@@ -270,10 +301,11 @@ async def ingest_status(document_id: str, user: User = Depends(get_current_user)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     await _assert_document_workspace_access(doc, user, db)
-    if doc.status == "ingesting" and (doc.updated_at or "").strip():
+    if doc.status == "ingesting" and doc.updated_at is not None:
         try:
-            ts = doc.updated_at.replace("Z", "+00:00")
-            dt = datetime.datetime.fromisoformat(ts)
+            dt = doc.updated_at
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
             if (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() > 15 * 60:
                 doc.status = "failed"
                 doc.ingest_step = "failed"

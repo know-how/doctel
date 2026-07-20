@@ -81,7 +81,7 @@ class MultiModelTrainer:
             result = await self._train_single_model(model, batch_path, on_progress)
             self.results[model] = result
             
-            status = "✅ OK" if result.get("ok") else "❌ FAILED"
+            status = "[OK]" if result.get("ok") else "[FAILED]"
             logger.info(f"[{model_idx}/{len(self.base_models)}] {model}: {status}")
             
             if not result.get("ok"):

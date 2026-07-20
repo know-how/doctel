@@ -179,7 +179,7 @@ async def system_status():
 
     # System info
     status["system"] = {
-        "database": "mysql",
+                "database": "postgresql",
         "python_version": __import__("sys").version.split()[0],
         "platform": __import__("sys").platform,
         "base_dir": str(getattr(settings, "base_dir", "")),
@@ -230,6 +230,23 @@ async def system_health_ping():
     }
 
 
+# ── Debug / Diagnostic Endpoints ────────────────────────────────────────────
+
+
+@router.get("/api/debug/worker-status")
+async def debug_worker_status():
+    """Live worker status — bypasses cached startup_manager summary."""
+    from app.services.job_poller import poller_running, active_job_count, current_worker_id
+
+    running = poller_running()
+    info = {
+        "running": running,
+        "active_jobs": active_job_count(),
+        "worker_id": current_worker_id(),
+    }
+    return info
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -240,7 +257,7 @@ async def _check_database() -> dict:
         if health.healthy:
             return {
                 "status": "healthy",
-                "message": f"Connected ({'MySQL' if _is_mysql else 'SQLite'})",
+                    "message": "Connected (PostgreSQL)",
                 "latency_ms": health.latency_ms,
                 "tables_exist": health.tables_exist,
             }

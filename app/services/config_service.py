@@ -1,7 +1,7 @@
 """
 config_service.py — Unified DB-Backed Configuration Service
 
-Provides CRUD operations for all configuration entities now stored in MySQL:
+Provides CRUD operations for all configuration entities stored in PostgreSQL:
   - SystemConfig  (key/value app settings — replaces config.yaml + .env)
   - AIProvider    (provider registrations)
   - AIModel       (model catalogues)
@@ -554,6 +554,7 @@ async def add_health_record(
 ) -> HealthRecord:
     """Record a health check result."""
     record = HealthRecord(
+        provider_id_ref=provider_id,
         provider_id=provider_id,
         model_id=model_id,
         latency_ms=latency_ms,
@@ -621,6 +622,7 @@ async def add_sync_log(
 ) -> SyncLog:
     """Record a model synchronization event."""
     log = SyncLog(
+        provider_id_ref=provider_id,
         provider_id=provider_id,
         sync_type=sync_type,
         models_retrieved=models_retrieved,

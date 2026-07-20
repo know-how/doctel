@@ -141,6 +141,85 @@ export async function checkBackendConnection(
   }
 }
 
+/**
+ * Detailed health check that diagnoses specific service issues.
+ * Mirrors the frontend's checkDetailedHealth for mobile use.
+ */
+export async function checkDetailedHealth(
+  timeoutMs = 8_000,
+): Promise<{
+  ok: boolean
+  error?: string
+  backendRunning: boolean
+  ollamaRunning: boolean
+  ollamaError?: string
+  hasExternalServices: boolean
+}> {
+  // Step 1: Check if backend is running
+  let backendRunning = false
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const res = await fetch(`${BASE_URL}/healthz`, { method: "GET", signal: controller.signal })
+    clearTimeout(timer)
+    backendRunning = res.ok
+  } catch {
+    backendRunning = false
+  }
+
+  if (!backendRunning) {
+    return {
+      ok: false,
+      error: "Backend server is not running.",
+      backendRunning: false,
+      ollamaRunning: false,
+      hasExternalServices: false,
+    }
+  }
+
+  // Step 2: Check Ollama status
+  let ollamaRunning = false
+  let ollamaError: string | undefined
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5_000)
+    const res = await fetch(`${BASE_URL}/api/health/ollama`, { method: "GET", signal: controller.signal })
+    clearTimeout(timer)
+    if (res.ok) {
+      const data = await res.json()
+      ollamaRunning = data?.ok ?? false
+      if (!ollamaRunning && data?.hint) {
+        ollamaError = data.hint
+      }
+    }
+  } catch {
+    ollamaRunning = false
+  }
+
+  // Step 3: Check if external services are configured
+  let hasExternalServices = false
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5_000)
+    const res = await fetch(`${BASE_URL}/api/models/available`, { method: "GET", signal: controller.signal })
+    clearTimeout(timer)
+    if (res.ok) {
+      const data = await res.json()
+      hasExternalServices = Array.isArray(data) && data.length > 0
+    }
+  } catch {
+    hasExternalServices = false
+  }
+
+  return {
+    ok: backendRunning,
+    backendRunning,
+    ollamaRunning,
+    ollamaError,
+    hasExternalServices,
+  }
+}
+
 export async function login(payload: LoginRequest): Promise<LoginResponse> {
   try {
     console.log("Attempting login at:", `${BASE_URL}/auth/login`)

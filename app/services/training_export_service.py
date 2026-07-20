@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.db.models import Document, Chunk, DocAnalysis
 from app.config import settings
+from app.services.knowledge_asset_service import KnowledgeAssetRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -125,12 +126,29 @@ async def export_documents_for_training(
         for item in training_data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     
+    # ── Knowledge Asset Registry: Register the training batch ──────────
+    try:
+        registry = KnowledgeAssetRegistry(db)
+        batch_meta = {
+            "project_ids": project_ids,
+            "documents_exported": len(training_data),
+            "file_path": str(batch_path),
+        }
+        await registry.register_training_batch(
+            batch_id=batch_filename.replace(".jsonl", ""),
+            title=f"Training batch {timestamp}",
+            metadata=batch_meta,
+        )
+        logger.info("[ASSET] Registered training batch %s", batch_filename)
+    except Exception as e:
+        logger.warning("[ASSET] Failed to register training batch: %s", e)
+
     logger.info(f"Training batch exported to: {batch_path}")
     return str(batch_path)
 
 
 async def export_document_chunks(
-    document_id: int,
+    document_id,
     output_dir: Optional[str] = None,
     db: Optional[AsyncSession] = None,
 ) -> str:

@@ -188,6 +188,7 @@ TASK_TYPES = {
     "rag": "RAG (Retrieval Augmented Generation)",
     "code_generation": "Code generation",
     "flowchart": "Flowchart/diagram generation",
+    "image_generation": "Image/logo/diagram generation from text descriptions",
     "analysis": "Document analysis",
     "transcription": "Audio transcription",
 }

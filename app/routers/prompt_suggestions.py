@@ -101,7 +101,7 @@ async def get_random_prompt_suggestions(
         query = query.where(capability_filter)
     
     # Random ordering
-    query = query.order_by(func.rand()).limit(count)
+    query = query.order_by(func.random()).limit(count)
     
     result = await db.execute(query)
     suggestions = result.scalars().all()

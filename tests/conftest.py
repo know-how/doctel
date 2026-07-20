@@ -1,2 +1,5 @@
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
+import pytest
+  
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"

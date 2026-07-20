@@ -32,8 +32,7 @@ def _get_sync_engine():
     if _sync_engine is None:
         from sqlalchemy import create_engine
         from app.config import settings
-        # Swap the async driver for the sync pymysql driver
-        sync_url = settings.db_url.replace("mysql+aiomysql://", "mysql+pymysql://")
+        sync_url = settings.db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
         _sync_engine = create_engine(sync_url, pool_size=2, max_overflow=2)
     return _sync_engine
 

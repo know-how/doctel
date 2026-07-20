@@ -6,14 +6,18 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.config import settings
 from app.db.database import AsyncSessionLocal
 from app.db.models import Document, Project, User, Chunk, DocAnalysis, SuggestedPrompt
+from app.db.job_models import ProcessingJob
 from app.services.ingestion_service import get_file_hash
-from app.services.ingest_worker import enqueue
+from app.services.job_poller import create_job
+from app.config import settings as app_settings
 from app.utils.chroma_client import chroma
+from app.utils.pgvector_client import delete_document as pgvector_delete_document  # noqa: F401 — used in _reset_document_artifacts
+from app.services.knowledge_asset_service import KnowledgeAssetRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +125,16 @@ async def _reset_document_artifacts(db, doc: Document) -> None:
         chroma.delete_where(str(doc.project_id), {"document_id": doc.id})
     except Exception:
         pass
+    # pgvector cleanup (when feature-flagged or always — idempotent)
+    if app_settings.use_pgvector:
+        try:
+            await db.execute(
+                text("UPDATE document_chunks SET deleted_at = NOW() WHERE document_id = :doc_id AND deleted_at IS NULL"),
+                {"doc_id": str(doc.id)},
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
 
 async def run_bootstrap_scan() -> None:
@@ -160,6 +174,8 @@ async def run_bootstrap_scan() -> None:
 
                     if not doc:
                         doc = Document(
+                            owner_id=admin.id,
+                            created_by=admin.id,
                             project_id=project.id,
                             uploaded_by_user_id=admin.id,
                             filename=fp.name,
@@ -182,7 +198,9 @@ async def run_bootstrap_scan() -> None:
                         await db.commit()
                         async with _lock:
                             _status.new += 1
-                        await enqueue(int(doc.id))
+                        job_id = await create_job("document_ingest", document_id=doc.id, owner_id=admin.id)
+                        if job_id is None:
+                            logger.error("[BOOTSTRAP] Failed to enqueue ingest job for new doc %s (owner=%s)", doc.id, admin.id)
                         continue
 
                     ares = await db.execute(select(DocAnalysis.id).where(DocAnalysis.document_id == doc.id))
@@ -222,6 +240,29 @@ async def run_bootstrap_scan() -> None:
                             doc.ingestion_failed = False
                             db.add(doc)
                             await db.commit()
+                            # Register in knowledge asset registry
+                            try:
+                                registry = KnowledgeAssetRegistry(db)
+                                await registry.register_document(doc)
+                            except Exception:
+                                pass
+                        async with _lock:
+                            _status.skipped += 1
+                        continue
+
+                    # ── Prevent duplicate job creation ─────────────────────────
+                    # If there is already a QUEUED, CLAIMED, or PROCESSING job for
+                    # this document, do NOT create another one.  This stops the
+                    # bootstrap from piling up infinite duplicates while analysis is
+                    # still running (or stuck).
+                    pending = await db.execute(
+                        select(ProcessingJob.id).where(
+                            ProcessingJob.document_id == doc.id,
+                            ProcessingJob.job_type == "document_ingest",
+                            ProcessingJob.job_state.in_(["QUEUED", "CLAIMED", "PROCESSING"]),
+                        )
+                    )
+                    if pending.first():
                         async with _lock:
                             _status.skipped += 1
                         continue
@@ -239,7 +280,9 @@ async def run_bootstrap_scan() -> None:
                     await _reset_document_artifacts(db, doc)
                     async with _lock:
                         _status.updated += 1
-                    await enqueue(int(doc.id))
+                    job_id = await create_job("document_ingest", document_id=doc.id, owner_id=doc.owner_id or admin.id)
+                    if job_id is None:
+                        logger.error("[BOOTSTRAP] Failed to enqueue ingest job for existing doc %s (owner=%s)", doc.id, doc.owner_id or admin.id)
                 except Exception as e:
                     async with _lock:
                         _status.last_error = str(e)

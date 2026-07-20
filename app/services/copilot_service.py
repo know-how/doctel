@@ -33,6 +33,7 @@ class CopilotMode(str, Enum):
     RESEARCH = "research"
     ANALYZE = "analyze"
     DRAFT = "draft"
+    IMAGE_GENERATION = "image_generation"
 
 
 MODE_DESCRIPTIONS = {
@@ -40,6 +41,7 @@ MODE_DESCRIPTIONS = {
     CopilotMode.RESEARCH: "Deep multi-pass analysis with expanded retrieval",
     CopilotMode.ANALYZE: "Structured document analysis with formal reporting",
     CopilotMode.DRAFT: "Template-based document and policy generation",
+    CopilotMode.IMAGE_GENERATION: "Image/diagram generation from text descriptions",
 }
 
 # ── Intent detection patterns ────────────────────────────────────────────────
@@ -64,6 +66,12 @@ _INTENT_PATTERNS: dict[str, list[str]] = {
     "diagram": [
         r"diagram", r"flowchart", r"mermaid", r"process.?flow",
         r"architecture", r"schema", r"visualize",
+    ],
+    "image": [
+        r"image", r"picture", r"photo", r"drawing", r"sketch",
+        r"logo", r"infographic", r"poster", r"banner", r"icon",
+        r"illustration", r"graphic", r"artwork", r"render",
+        r"visual", r"figure",
     ],
     "compare": [
         r"compare", r"contrast", r"difference", r"vs\.?", r"versus",
@@ -97,7 +105,8 @@ def detect_intent(user_query: str) -> dict[str, Any]:
         "research": CopilotMode.RESEARCH,
         "analyze": CopilotMode.ANALYZE,
         "draft": CopilotMode.DRAFT,
-        "diagram": CopilotMode.CHAT,
+        "diagram": CopilotMode.IMAGE_GENERATION,
+        "image": CopilotMode.IMAGE_GENERATION,
         "compare": CopilotMode.RESEARCH,
     }
     suggested = mode_map.get(primary, CopilotMode.CHAT)
@@ -143,6 +152,23 @@ _MODE_SYSTEM_PROMPTS = {
         "If drafting a policy, include: Purpose, Scope, Definitions, Responsibilities, Procedures, "
         "Exceptions, Version Control, References sections. "
         "Write in flowing narrative paragraphs. NEVER use asterisks, bullet lists, or numbered lists."
+    ),
+    CopilotMode.IMAGE_GENERATION: (
+        "You are DocTel Visual Designer, a specialized AI for creating visual content. "
+        "When a user asks you to create an image, logo, diagram, or any visual content: "
+        "1. If they ask for a technical diagram (flowchart, architecture, process), generate "
+        "   a Mermaid.js code block starting with ```mermaid and ending with ```. "
+        "2. If they ask for a logo, icon, banner, or graphic design, describe the design "
+        "   in detail and provide an SVG code block inside ```svg ... ``` tags. "
+        "3. If they ask for an infographic or poster, describe the layout and key elements "
+        "   in a structured format using SVG code. "
+        "4. Always preface SVG diagrams with 'Drawing Prompt:' on its own line followed "
+        "   by the SVG code. "
+        "5. Always preface Mermaid diagrams with '```mermaid' on its own line. "
+        "Be creative and detailed. Use ZETDC branding (blue/gold color scheme, "
+        "power/utility motifs) when relevant to ZETDC context. "
+        "The code blocks are the primary output — for any surrounding narrative text, "
+        "write in plain natural prose without asterisks or markdown formatting."
     ),
 }
 
@@ -260,6 +286,10 @@ async def copilot_answer(
         rag_context, citations = await _research_retrieval(
             project_ids, user_query, db, document_id=document_id,
         )
+    elif mode == CopilotMode.IMAGE_GENERATION:
+        # Image generation: no RAG retrieval needed, use model's creativity
+        rag_context = user_query
+        citations = []
     else:
         # Single-pass RAG retrieval for chat/analyze/draft
         rag_result = await get_rag_answer_scoped(
@@ -278,7 +308,10 @@ async def copilot_answer(
 
     # Generate final response via centralized model resolver
     # Consults UI-configured task mappings as single source of truth.
-    resolved = await resolve_model(db, requested_model=model_name, task_type="rag")
+    # Use mode-appropriate task type so image generation requests get correctly routed
+    # to an image-capable model (maps to IMAGE_GENERATION task mapping in DB).
+    resolver_task_type = "image_generation" if mode == CopilotMode.IMAGE_GENERATION else "rag"
+    resolved = await resolve_model(db, requested_model=model_name, task_type=resolver_task_type)
     chosen = resolved["model_id"]
     user_prompt = f"Mode: {mode.value}\n\nRequest: {user_query}\n\nContext:\n{context_str}"
 

@@ -6,14 +6,15 @@ so the frontend can display capability badges and the router can make
 intelligent modality-based selections.
 
 Capability flags:
-  text      — General text generation / chat
-  vision    — Image understanding (multimodal)
-  audio     — Audio transcription / understanding
-  code      — Code generation & analysis
-  reasoning — Chain-of-thought / deep reasoning
-  embedding — Text embedding generation (non-generation models)
-  fast      — Low-latency response (good for interactive chat)
-  large     — Large context window (>= 32K tokens)
+  text              — General text generation / chat
+  vision            — Image understanding (multimodal)
+  image_generation  — Image / diagram / logo generation
+  audio             — Audio transcription / understanding
+  code              — Code generation & analysis
+  reasoning         — Chain-of-thought / deep reasoning
+  embedding         — Text embedding generation (non-generation models)
+  fast              — Low-latency response (good for interactive chat)
+  large             — Large context window (>= 32K tokens)
 """
 
 from __future__ import annotations
@@ -83,19 +84,19 @@ _MODEL_CAPABILITIES: Dict[str, dict] = {
     },
     # ── Cloud / API models ────────────────────────────────────────────────
     "gemini-2.5-flash": {
-        "capabilities": ["text", "vision", "audio", "code", "reasoning", "fast", "large"],
+        "capabilities": ["text", "vision", "image_generation", "audio", "code", "reasoning", "fast", "large"],
         "display_category": "Google Gemini",
     },
     "gemini-2.0-flash": {
-        "capabilities": ["text", "vision", "audio", "code", "fast", "large"],
+        "capabilities": ["text", "vision", "image_generation", "audio", "code", "fast", "large"],
         "display_category": "Google Gemini",
     },
     "gemini-1.5-flash": {
-        "capabilities": ["text", "vision", "audio", "code", "fast", "large"],
+        "capabilities": ["text", "vision", "image_generation", "audio", "code", "fast", "large"],
         "display_category": "Google Gemini",
     },
     "gemini-1.5-pro": {
-        "capabilities": ["text", "vision", "audio", "code", "reasoning", "large"],
+        "capabilities": ["text", "vision", "image_generation", "audio", "code", "reasoning", "large"],
         "display_category": "Google Gemini",
     },
     "deepseek-chat": {
@@ -189,6 +190,7 @@ def _infer_capabilities(model_id: str) -> List[str]:
     caps = ["text"]
     if any(v in mid for v in ("vision", "llava", "gemini", "multimodal")):
         caps.append("vision")
+        caps.append("image_generation")
     if any(a in mid for a in ("audio", "whisper", "gemini")):
         caps.append("audio")
     if any(c in mid for c in ("code", "coder", "deepseek", "qwen")):

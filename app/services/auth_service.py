@@ -20,7 +20,7 @@ async def _save_session_to_db(token: str, session_data: Dict[str, Any]) -> bool:
         async with AsyncSessionLocal() as session:
             auth_session = AuthSession(
                 token=token,
-                user_id=int(session_data["user_id"]),
+                user_id=str(session_data["user_id"]),
                 provider=session_data.get("provider", ""),
                 identity=session_data.get("identity", ""),
                 display_name=session_data.get("display_name", ""),
@@ -44,7 +44,7 @@ async def _load_session_from_db(token: str) -> Dict[str, Any] | None:
             auth_session = result.scalar_one_or_none()
             if auth_session:
                 return {
-                    "user_id": int(auth_session.user_id),
+                    "user_id": str(auth_session.user_id),
                     "provider": auth_session.provider,
                     "identity": auth_session.identity,
                     "display_name": auth_session.display_name,
@@ -210,11 +210,13 @@ def request_email_code(email: str) -> str:
         "expires_at": datetime.utcnow() + timedelta(minutes=10),
     }
 
-    # ── Print verification code prominently to console ──────────────────
+    # Print verification code prominently to console
+    # NOTE: ASCII-safe labels are used (not emoji) to avoid
+    # UnicodeEncodeError on Windows cp1252/charmap consoles
     print("\n" + "!" * 60)
-    print(f"  🔑 LOGIN VERIFICATION CODE for {normalized}")
-    print(f"  📋 Code: {code}")
-    print(f"  ⏰ Expires: {datetime.utcnow() + timedelta(minutes=10)}")
+    print(f"  [KEY] LOGIN VERIFICATION CODE for {normalized}")
+    print(f"  [CODE] Code: {code}")
+    print(f"  [EXPIRES] Expires: {datetime.utcnow() + timedelta(minutes=10)}")
     print("!" * 60 + "\n")
 
     _send_email_code(normalized, code)
@@ -236,10 +238,10 @@ def verify_email_code(email: str, code: str) -> str:
     return normalized
 
 
-async def create_session(user_id: int, display_name: str | None, provider: str, identity: str) -> str:
+async def create_session(user_id, display_name: str | None, provider: str, identity: str) -> str:
     token = secrets.token_urlsafe(32)
     session_data = {
-        "user_id": int(user_id),
+        "user_id": str(user_id),
         "provider": provider,
         "identity": identity,
         "display_name": display_name or "",

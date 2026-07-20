@@ -6,13 +6,15 @@ import logging
 import asyncio
 import time
 import shutil
+import uuid
+from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
 from PIL import Image
 import pytesseract
 from PyPDF2 import PdfReader
 import docx
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _tesseract_checked = False
@@ -35,25 +37,40 @@ import asyncio
 _last_auto_train = 0
 AUTO_TRAIN_COOLDOWN_SEC = 300
 
-def _schedule_auto_training(db, doc):
-    """Schedule automatic model training after document ingestion."""
+def _schedule_auto_training(project_id: int) -> None:
+    """Schedule automatic model training after document ingestion.
+
+    Takes a plain integer ``project_id`` rather than an ORM ``Document``
+    object to avoid any risk of the fire-and-forget background task
+    accessing a detached ORM instance (which would trigger a
+    ``greenlet_spawn`` / ``MissingGreenlet`` error).
+
+    Creates its own database session so the fire-and-forget task does not
+    share the caller's ``AsyncSession``, which may be closed by the time
+    the background task runs.
+    """
     global _last_auto_train
     import time
     now = time.time()
     if now - _last_auto_train < AUTO_TRAIN_COOLDOWN_SEC:
-        return  # Cooldown - don't trigger too often
+        return
     _last_auto_train = now
+
+    if project_id <= 0:
+        return
 
     async def _do_train():
         try:
+            from app.db.database import AsyncSessionLocal
             from app.services.multi_model_trainer import train_models_from_project
-            project_id = int(doc.project_id)
-            result = await train_models_from_project(
-                project_ids=[project_id],
-                db=db,
-            )
-            import logging
-            logging.getLogger().info(f"Auto-training complete for project {project_id}: {result}")
+
+            async with AsyncSessionLocal() as train_db:
+                result = await train_models_from_project(
+                    project_ids=[project_id],
+                    db=train_db,
+                )
+                import logging
+                logging.getLogger().info(f"Auto-training complete for project {project_id}: {result}")
         except Exception as e:
             import logging
             logging.getLogger().warning(f"Auto-training skipped: {e}")
@@ -62,12 +79,15 @@ def _schedule_auto_training(db, doc):
 from app.db.models import Document, DocAnalysis, SuggestedPrompt, Chunk, Embedding
 from app.utils.ollama_client import ollama
 from app.services.model_resolver_service import resolve_model
+from app.config import settings as app_settings
 from app.utils.chroma_client import chroma
+from app.utils.pgvector_client import insert_chunks as pgvector_insert_chunks
 from app.services.embedding_service import (
     generate_embedding,
     resolve_embedding_model,
     store_embedding_records,
 )
+from app.services.knowledge_asset_service import KnowledgeAssetRegistry
 from app.db.models import EMBEDDING_VERSION
 from datetime import datetime
 
@@ -80,6 +100,28 @@ _audio_chunks_cache: dict[str, dict] = {}
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+_STATE_MAP = {
+    "uploaded": "UPLOADED",
+    "ingesting": "PROCESSING",
+    "embedded": "PROCESSING",
+    "summarized": "PROCESSING",
+    "completed": "COMPLETED",
+    "failed": "FAILED",
+}
+
+_SAVE_CHECKPOINT = True
+
+
+def _make_checkpoint(doc_id, step: str, percent: int, detail: str = "") -> str:
+    return json.dumps({
+        "doc_id": str(doc_id),
+        "step": step,
+        "percent": percent,
+        "detail": detail,
+        "ts": _now_iso(),
+    })
+
 
 async def _set_doc_state(
     db: AsyncSession,
@@ -96,7 +138,9 @@ async def _set_doc_state(
     doc.ingest_percent = percent
     doc.ingest_message = message
     doc.error_message = error_message
-    doc.updated_at = _now_iso()
+    doc.processing_step = step
+    doc.processing_state = _STATE_MAP.get(status, "PROCESSING")
+    doc.updated_at = datetime.now(timezone.utc)
     if status == "uploaded":
         doc.ingestion_started = False
         doc.ingestion_completed = False
@@ -113,9 +157,22 @@ async def _set_doc_state(
     elif status == "failed":
         doc.ingestion_started = True
         doc.ingestion_failed = True
+
+    # ── Save checkpoint for resume ──
+    if _SAVE_CHECKPOINT:
+        doc.checkpoint = _make_checkpoint(doc.id, step, percent, message)
+
     db.add(doc)
+
     try:
         await db.commit()
+        # Re-apply RLS context after commit — the underlying connection
+        # may have changed, which would lose the SET SESSION setting.
+        if doc.owner_id:
+            await db.execute(
+                text("SELECT set_config('app.current_user_id', :val, false)"),
+                {"val": str(doc.owner_id)},
+            )
     except Exception:
         try:
             await db.rollback()
@@ -424,12 +481,19 @@ async def analyze_document(text: str, doc_id: int, db: AsyncSession):
 
     await db.commit()
 
-async def ingest_document(doc_id: int, db: AsyncSession):
+async def ingest_document(doc_id: uuid.UUID, db: AsyncSession):
+    # ── DIAG: Check RLS context before SELECT Document ──
+    rls_check = await db.execute(
+        text("SELECT current_setting('app.current_user_id', true)")
+    )
+    rls_val = rls_check.scalar()
+    logger.info(f"[DIAG:INGEST] ingest_document called for doc_id={doc_id} RLS context={rls_val!r}")
+
     # Get document details
     result = await db.execute(select(Document).where(Document.id == doc_id))
     doc = result.scalar_one_or_none()
     if not doc:
-        logger.error(f"[INGEST] Document {doc_id} not found in database")
+        logger.error(f"[DIAG:INGEST] Document {doc_id} NOT FOUND by SELECT — RLS context was {rls_val!r}")
         return
 
     # Log document metadata at start
@@ -453,16 +517,16 @@ async def ingest_document(doc_id: int, db: AsyncSession):
         
         # TEXT EXTRACTION
         logger.info(f"[INGEST] Extracting text from {doc.path}")
-        text = await extract_text(doc.path, doc.mime_type)
-        extracted_length = len(text) if text else 0
-        stripped_length = len(text.strip()) if text else 0
+        extracted_text = await extract_text(doc.path, doc.mime_type)
+        extracted_length = len(extracted_text) if extracted_text else 0
+        stripped_length = len(extracted_text.strip()) if extracted_text else 0
         
         logger.info(f"[INGEST] Extracted {extracted_length} characters from document {doc_id}")
         logger.info(f"[INGEST] After stripping whitespace: {stripped_length} characters")
         
-        if not text or stripped_length < 10:
+        if not extracted_text or stripped_length < 10:
             logger.error(f"[INGEST] Text extraction failed or produced insufficient text for document {doc_id}")
-            logger.error(f"[INGEST] Extracted text sample: {repr(text[:200] if text else '(empty)')}")
+            logger.error(f"[INGEST] Extracted text sample: {repr(extracted_text[:200] if extracted_text else '(empty)')}")
             await _set_doc_state(
                 db,
                 doc,
@@ -477,7 +541,7 @@ async def ingest_document(doc_id: int, db: AsyncSession):
         await _set_doc_state(db, doc, status="ingesting", step="chunk", percent=20, message="Chunking text")
         
         # Log first 500 chars of extracted text for debugging
-        logger.info(f"[INGEST] Text sample for document {doc_id}: {repr(text[:500])}")
+        logger.info(f"[INGEST] Text sample for document {doc_id}: {repr(extracted_text[:500])}")
 
         # Initial chunking (e.g., ~1000 chars = ~250 tokens)
         init_chunk_size = settings.chunk_size
@@ -501,7 +565,7 @@ async def ingest_document(doc_id: int, db: AsyncSession):
                     raise ValueError("Audio chunks produced no text segments")
             else:
                 logger.info(f"[INGEST] Chunking text with chunk_size={c_size}, overlap={c_overlap}")
-                chunks = chunk_text(text, c_size, c_overlap)
+                chunks = chunk_text(extracted_text, c_size, c_overlap)
                 chunks = [c.strip() for c in (chunks or []) if isinstance(c, str) and c.strip()]
                 logger.info(f"[INGEST] Created {len(chunks)} chunks for document {doc_id}")
                 if not chunks:
@@ -550,7 +614,7 @@ async def ingest_document(doc_id: int, db: AsyncSession):
                 meta: dict = {
                     "filename": doc.filename,
                     "chunk_index": i,
-                    "document_id": doc_id,
+                    "document_id": str(doc_id),
                     "source_type": stype,
                 }
                 if pre_chunked and i < len(pre_chunked):
@@ -583,7 +647,7 @@ async def ingest_document(doc_id: int, db: AsyncSession):
         chunk_count = len(ids) if ids else 0
         if chunk_count == 0:
             logger.error(f"[INGEST] ✗ Document {doc_id} produced ZERO chunks. Ingestion FAILED.")
-            logger.error(f"[INGEST] Text length was {len(text)} chars, but chunking produced no valid chunks.")
+            logger.error(f"[INGEST] Text length was {len(extracted_text)} chars, but chunking produced no valid chunks.")
             await _set_doc_state(
                 db,
                 doc,
@@ -591,7 +655,7 @@ async def ingest_document(doc_id: int, db: AsyncSession):
                 step="chunk",
                 percent=20,
                 message="Chunk generation failed",
-                error_message=f"Document produced no chunks. The document may be empty, corrupted, or contain no extractable text. Text extracted: {len(text)} characters.",
+                error_message=f"Document produced no chunks. The document may be empty, corrupted, or contain no extractable text. Text extracted: {len(extracted_text)} characters.",
             )
             return
         
@@ -602,8 +666,13 @@ async def ingest_document(doc_id: int, db: AsyncSession):
                 f"Vector upsert input mismatch: ids={len(ids)} docs={len(documents)} emb={len(embeddings)} meta={len(metadatas)}"
             )
 
+        # ── DUAL-WRITE: ChromaDB + pgvector ────────────────────────────────
+        # Always write to ChromaDB (primary) for backward compatibility.
+        # When USE_PGVECTOR is enabled, also write to pgvector (document_chunks).
+
         batch_size = 96
         failures: list[str] = []
+
         for start in range(0, len(ids), batch_size):
             end = min(len(ids), start + batch_size)
             bid = ids[start:end]
@@ -613,6 +682,7 @@ async def ingest_document(doc_id: int, db: AsyncSession):
             if not (len(bid) == len(bdoc) == len(bemb) == len(bmeta)) or len(bid) == 0:
                 failures.append(f"batch_len_mismatch({start}-{end})")
                 continue
+            # ── ChromaDB write (always) ────────────────────────────────────
             print(f"CHROMA_UPSERT: calling with {len(bid)} ids, {len(bdoc)} docs, {len(bemb)} emb, {len(bmeta)} meta for project_{doc.project_id}", flush=True)
             try:
                 chroma.upsert(str(doc.project_id), bid, bdoc, bemb, bmeta)
@@ -624,6 +694,41 @@ async def ingest_document(doc_id: int, db: AsyncSession):
 
         if failures:
             raise RuntimeError("Embedding upsert failed: " + "; ".join(failures[:3]))
+
+        # ── pgvector dual-write (when feature-flagged) ─────────────────────
+        if app_settings.use_pgvector:
+            pg_success = False
+            pg_error = ""
+            try:
+                # Collect texts and metadata for pgvector insertion
+                pg_texts = []
+                pg_metas = []
+                for i in range(len(ids)):
+                    pg_texts.append(documents[i])
+                    pg_metas.append(metadatas[i] if i < len(metadatas) else {})
+
+                inserted = await pgvector_insert_chunks(
+                    db,
+                    document_id=doc.id,
+                    texts=pg_texts,
+                    embeddings=embeddings,
+                    metadatas=pg_metas,
+                )
+                pg_success = inserted > 0
+                logger.info(
+                    "[PGVECTOR] Dual-write: inserted %d chunks for document %s",
+                    inserted, doc.id,
+                )
+            except Exception as e:
+                pg_error = str(e)
+                logger.error("[PGVECTOR] Dual-write FAILED for document %s: %s", doc.id, e, exc_info=True)
+
+            if not pg_success and pg_error:
+                # pgvector write failed but ChromaDB succeeded — log and continue
+                logger.warning(
+                    "[PGVECTOR] Dual-write failed but ChromaDB succeeded for doc %s: %s",
+                    doc.id, pg_error,
+                )
 
         # ── CHROMA VERIFICATION: check count immediately after upsert ──────
         try:
@@ -649,21 +754,59 @@ async def ingest_document(doc_id: int, db: AsyncSession):
         await db.commit()
         logger.info(f"[INGEST] Document {doc_id} embedding metadata updated: provider={embed_provider}, model={embed_model_id}")
 
+        # ── Knowledge Asset Registry: Register document and chunks ────────
+        try:
+            registry = KnowledgeAssetRegistry(db)
+            await registry.register_document(doc)
+            # Re-fetch chunks to get their IDs for registration
+            chunk_result = await db.execute(
+                select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index)
+            )
+            db_chunks = list(chunk_result.scalars().all())
+            if db_chunks:
+                await registry.register_chunks(doc.id, db_chunks)
+            # Register embeddings
+            emb_result = await db.execute(
+                select(Embedding).where(
+                    Embedding.vector_ref.in_([f"chroma_{doc_id}_{i}_{settings.chunk_size}" for i in range(len(ids))])
+                )
+            )
+            db_embeddings = list(emb_result.scalars().all())
+            if db_embeddings:
+                await registry.register_embeddings(doc.id, db_embeddings)
+            logger.info("[ASSET] Registered document %s and %d chunks + embeddings in knowledge asset registry",
+                        doc.id, len(db_chunks))
+        except Exception as asset_err:
+            logger.warning("[ASSET] Failed to register assets for document %s: %s", doc.id, asset_err)
+
         await _set_doc_state(db, doc, status="summarized", step="summarize", percent=80, message="Generating summaries")
-        await analyze_document(text, doc_id, db)
+        await analyze_document(extracted_text, doc_id, db)
+
+        # ── Knowledge Asset Registry: Register analysis after creation ────
+        try:
+            analysis_result = await db.execute(
+                select(DocAnalysis).where(DocAnalysis.document_id == doc.id)
+            )
+            db_analysis = analysis_result.scalar_one_or_none()
+            if db_analysis:
+                registry = KnowledgeAssetRegistry(db)
+                await registry.register_analysis(db_analysis)
+                logger.info("[ASSET] Registered analysis %s for document %s", db_analysis.id, doc.id)
+        except Exception as asset_err:
+            logger.warning("[ASSET] Failed to register analysis for document %s: %s", doc.id, asset_err)
 
         await _set_doc_state(db, doc, status="completed", step="done", percent=100, message="Completed")
         logger.info(f"[INGEST] ✓ Document {doc_id} ingestion COMPLETED successfully")
         logger.info(f"[INGEST] {'='*60}")
         # Auto-trigger transfer learning on local models
-        _schedule_auto_training(db, doc)
+        _schedule_auto_training(doc.project_id or 0)
     except Exception as e:
         await _set_doc_state(
             db,
             doc,
             status="failed",
             step="failed",
-            percent=doc.ingest_percent or 0,
+            percent=0,
             message="Failed",
             error_message=str(e),
         )

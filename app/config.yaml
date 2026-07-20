@@ -8,7 +8,7 @@ chunk_overlap: 150
 top_k: 6
 use_mmr: true
 bind_host: "127.0.0.1"
-port: 8000
+port: 8199
 offline_only: true
 base_dir: "C:\\Users\\ze9167523\\IdeaProjects\\doctel\\localai"
 security:
@@ -67,7 +67,6 @@ ui:
 storage:
   upload_root: "C:/Users/ze9167523/IdeaProjects/doctel/localai/data/uploads"
   processed_root: "C:/Users/ze9167523/IdeaProjects/doctel/localai/data/processed"
-  vector_root: "C:/Users/ze9167523/IdeaProjects/doctel/localai/data/chroma"
   backup_days: 30
   organize_by_project: true
 

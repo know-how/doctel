@@ -19,7 +19,7 @@ export const AdminDiagnosticsPage: React.FC = () => {
     { name: string; status: "ok" | "fail" | "pending"; msg: string }[]
   >([
     { name: "Database Connection", status: "pending", msg: "Not tested" },
-    { name: "Vector DB (ChromaDB)", status: "pending", msg: "Not tested" },
+    { name: "Vector DB (PostgreSQL+pgvector)", status: "pending", msg: "Not tested" },
     { name: "AI Provider Connectivity", status: "pending", msg: "Not tested" },
     { name: "File Storage", status: "pending", msg: "Not tested" },
     { name: "API Health Endpoint", status: "pending", msg: "Not tested" },
@@ -34,7 +34,7 @@ export const AdminDiagnosticsPage: React.FC = () => {
     // Simulate diagnostic checks
     const checks = [
       { name: "Database Connection", wait: 800, ok: true, msg: "Connected (0.8s)" },
-      { name: "Vector DB (ChromaDB)", wait: 1200, ok: true, msg: "Connected (1.2s)" },
+      { name: "Vector DB (PostgreSQL+pgvector)", wait: 1200, ok: true, msg: "Connected (1.2s)" },
       { name: "AI Provider Connectivity", wait: 2000, ok: true, msg: "3/3 providers reachable" },
       { name: "File Storage", wait: 600, ok: true, msg: "Accessible (0.6s)" },
       { name: "API Health Endpoint", wait: 400, ok: true, msg: "Healthy (0.4s)" },

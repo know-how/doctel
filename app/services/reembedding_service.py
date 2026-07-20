@@ -39,7 +39,10 @@ from app.services.embedding_service import (
     store_embedding_records,
     update_document_embedding_fields,
 )
+from app.config import settings as app_settings
 from app.utils.chroma_client import chroma
+from app.utils.pgvector_client import insert_chunks as pgvector_insert_chunks
+from app.utils.pgvector_client import delete_document as pgvector_delete_document
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +153,7 @@ async def reembed_document(
             "error": f"Embedding generation returned {len(embeddings)} vectors for {len(texts)} chunks",
         }
 
-    # ── 4. Prepare Chroma data ────────────────────────────────────────────
+    # ── 4. Prepare data ───────────────────────────────────────────────────
     new_ids = [f"{doc_id}_chunk_{c.chunk_index}" for c in chunks]
     metadatas: list[dict[str, Any]] = [
         {
@@ -163,14 +166,38 @@ async def reembed_document(
         for c in chunks
     ]
 
-    # ── 5. Delete old Chroma entries for this document ────────────────────
+    # ── 5. Delete old entries ─────────────────────────────────────────────
+    # ChromaDB cleanup (always)
     try:
         chroma.delete_where(str(doc.project_id), {"document_id": doc_id})
     except Exception as exc:
         logger.warning("Chroma delete_where for doc %s: %s", doc_id, exc)
 
-    # ── 6. Upsert new Chroma entries ──────────────────────────────────────
+    # pgvector cleanup (when feature-flagged)
+    if app_settings.use_pgvector:
+        try:
+            await pgvector_delete_document(db, doc.id)
+            logger.info("[PGVECTOR] Deleted old chunks for doc %s before re-embed", doc.id)
+        except Exception as exc:
+            logger.warning("[PGVECTOR] Delete failed for doc %s: %s", doc.id, exc)
+
+    # ── 6. Upsert new entries ─────────────────────────────────────────────
+    # ChromaDB upsert (always)
     chroma.upsert(str(doc.project_id), new_ids, texts, embeddings, metadatas)
+
+    # pgvector upsert (when feature-flagged)
+    if app_settings.use_pgvector:
+        try:
+            await pgvector_insert_chunks(
+                db,
+                document_id=doc.id,
+                texts=texts,
+                embeddings=embeddings,
+                metadatas=metadatas,
+            )
+            logger.info("[PGVECTOR] Re-embedded %d chunks for doc %s", len(texts), doc.id)
+        except Exception as exc:
+            logger.warning("[PGVECTOR] Insert failed for doc %s: %s", doc.id, exc)
 
     # ── 7. Replace DB records ─────────────────────────────────────────────
     await _delete_old_records(db, doc_id)

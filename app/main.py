@@ -30,7 +30,7 @@ from starlette.responses import JSONResponse
 from app.config import settings
 from app.db.database import init_db, get_db, AsyncSessionLocal
 from app.security.rbac import get_current_user, require_role
-from app.services.ingest_worker import start_worker
+from app.services.job_poller import start_poller, stop_poller
 from app.services.bootstrap_service import run_bootstrap_scan, start_watcher, get_bootstrap_status
 from app.services.system_settings_service import (
     get_effective_settings,
@@ -52,19 +52,23 @@ include_routers(app)
 # These are registered early so they are ready before @app.on_event("startup")
 # fires.  The startup event only calls start_critical/start_non_critical.
 
-async def _start_ingest():
-    """Schedule the ingest worker as a background task (non-blocking)."""
+async def _start_poller():
+    """Start the persistent job poller (non-blocking).
+    
+    start_poller() launches its own background tasks internally so we await
+    it directly rather than wrapping in another create_task().
+    """
     try:
-        print("=== STARTUP: _start_ingest creating task ===", flush=True)
-        asyncio.create_task(start_worker())
-        print("=== STARTUP: _start_ingest done ===", flush=True)
+        print("=== STARTUP: _start_poller starting ===", flush=True)
+        await start_poller()
+        print("=== STARTUP: _start_poller done ===", flush=True)
         return {"status": "healthy"}
     except Exception as e:
-        logger.exception("Failed to start ingest worker: %s", e)
+        logger.exception("Failed to start job poller: %s", e)
         return {"status": "failed", "error": str(e)}
 
-startup_manager.register("ingest_worker", _start_ingest, critical=True)
-print("=== STARTUP: module-level registrations done (ingest_worker, bootstrap_scan) ===", flush=True)
+startup_manager.register("job_poller", _start_poller, critical=True)
+print("=== STARTUP: module-level registrations done (job_poller, bootstrap_scan) ===", flush=True)
 startup_manager.register("bootstrap_scan", lambda: asyncio.create_task(run_bootstrap_scan()))
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -186,7 +190,7 @@ async def startup():
     startup_manager.register("configuration", _load_settings, critical=True, depends_on=["database"])
 
     # Start critical services (sequential, dependency-ordered)
-    # (ingest_worker and bootstrap_scan already registered at module level)
+    # (job_poller and bootstrap_scan already registered at module level)
     print("=== STARTUP: calling start_critical() ===", flush=True)
     critical_results = await startup_manager.start_critical()
     print(f"=== STARTUP: start_critical() returned {len(critical_results)} results ===", flush=True)
@@ -288,6 +292,23 @@ async def startup():
     logger.info("=" * 60)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Shutdown event — graceful tear-down
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Gracefully shut down background services."""
+    print("=== SHUTDOWN: stopping job poller ===", flush=True)
+    try:
+        await stop_poller()
+        print("=== SHUTDOWN: job poller stopped ===", flush=True)
+    except Exception as e:
+        logger.exception("Error stopping job poller: %s", e)
+    print("=== SHUTDOWN: complete ===", flush=True)
+
+
 def _setup_logging() -> None:
     """Configure logging handlers (called early in startup)."""
     try:
@@ -320,4 +341,4 @@ def _setup_logging() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host=settings.bind_host, port=settings.port, reload=True)
+    uvicorn.run("app.main:app", host=settings.bind_host, port=settings.port)

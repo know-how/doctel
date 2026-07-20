@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from "react"
-import { getDocumentLibrary, getIngestStatus, retryIngest } from "../api/client"
+import { getDocumentLibrary, getIngestStatus, retryIngest, pauseIngestion, resumeIngestion, restartIngestion, cancelIngestion } from "../api/client"
 import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
 import { Pagination } from "../components/Pagination"
@@ -8,29 +8,46 @@ interface ProcDoc {
   id: string
   filename: string
   status: string
+  processing_state: string
   step: string
   percent: number
   message: string
   error_message?: string
   elapsed: number
+  pause_requested?: boolean
+  cancel_requested?: boolean
+  retry_count?: number
 }
 
 function stepLabel(step: string): string {
   const map: Record<string, string> = {
     uploaded: "Uploaded",
     queued: "Queued",
-    ocr: "OCR",
-    ocr_complete: "OCR Complete",
-    chunking: "Chunking",
-    chunking_complete: "Chunking Complete",
-    embedding: "Embedding",
-    embedding_complete: "Embedding Complete",
-    indexing: "Indexing",
-    complete: "Complete",
-    ready: "Ready",
+    dequeued: "Dequeued",
+    extract: "Extracting",
+    chunk: "Chunking",
+    embed: "Embedding",
+    summarize: "Summarizing",
+    done: "Complete",
     failed: "Failed",
   }
   return map[step?.toLowerCase()] || step || "—"
+}
+
+function processingStateColor(state: string): string {
+  const s = state.toUpperCase()
+  if (s === "COMPLETED") return "success"
+  if (s === "PROCESSING" || s === "QUEUED" || s === "UPLOADED" || s === "RESUMED") return "warning"
+  if (s === "FAILED" || s === "CANCELLED") return "error"
+  if (s === "PAUSED" || s === "RETRYING") return "info"
+  return "muted"
+}
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.round(seconds % 60)
+  return `${mins}m ${secs}s`
 }
 
 export const ProcessingStatusPage: React.FC = () => {
@@ -40,7 +57,7 @@ export const ProcessingStatusPage: React.FC = () => {
   const [documents, setDocuments] = useState<ProcDoc[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [retrying, setRetrying] = useState<Record<string, boolean>>({})
+  const [actioning, setActioning] = useState<Record<string, boolean>>({})
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const startTimes = useRef<Record<string, number>>({})
@@ -66,10 +83,14 @@ export const ProcessingStatusPage: React.FC = () => {
               id: doc.id,
               filename: doc.filename,
               status: st.status || doc.status || "unknown",
+              processing_state: st.processing_state || st.status?.toUpperCase() || "UPLOADED",
               step: st.step || st.status || "—",
               percent: st.percent ?? 0,
               message: st.message || "",
               error_message: st.error_message,
+              pause_requested: st.pause_requested,
+              cancel_requested: st.cancel_requested,
+              retry_count: st.retry_count,
               elapsed: (now - (startTimes.current[doc.id] || now)) / 1000,
             }
           } catch {
@@ -77,6 +98,7 @@ export const ProcessingStatusPage: React.FC = () => {
               id: doc.id,
               filename: doc.filename,
               status: doc.status || "unknown",
+              processing_state: "UPLOADED",
               step: "—",
               percent: 0,
               message: "",
@@ -91,8 +113,8 @@ export const ProcessingStatusPage: React.FC = () => {
         .map((s) => s.value)
 
       newDocs.sort((a, b) => {
-        if (a.status === "processing" && b.status !== "processing") return -1
-        if (a.status !== "processing" && b.status === "processing") return 1
+        if (a.processing_state === "PROCESSING" && b.processing_state !== "PROCESSING") return -1
+        if (a.processing_state !== "PROCESSING" && b.processing_state === "PROCESSING") return 1
         return b.elapsed - a.elapsed
       })
 
@@ -106,53 +128,36 @@ export const ProcessingStatusPage: React.FC = () => {
 
   useEffect(() => {
     fetchStatus()
-    const hasProcessing = documents.some(
-      (d) => d.status === "processing" || d.step === "processing" || d.percent < 100,
-    )
-    if (!hasProcessing && !loading) return
-    const interval = setInterval(fetchStatus, 3000)
-    return () => clearInterval(interval)
-  }, [fetchStatus, page])
+  }, [fetchStatus])
 
   useEffect(() => {
     const hasProcessing = documents.some(
-      (d) =>
-        d.status === "processing" ||
-        d.step === "processing" ||
-        (d.percent > 0 && d.percent < 100 && d.status !== "failed" && d.status !== "ready"),
+      (d) => d.processing_state === "PROCESSING" || d.processing_state === "QUEUED",
     )
     if (!hasProcessing) return
     const interval = setInterval(fetchStatus, 3000)
     return () => clearInterval(interval)
-  }, [documents])
+  }, [documents, fetchStatus])
 
-  const handleRetry = async (docId: string) => {
+  const handleAction = async (docId: string, action: string, fn: (id: string) => Promise<any>) => {
     try {
-      setRetrying((prev) => ({ ...prev, [docId]: true }))
+      setActioning((prev) => ({ ...prev, [`${docId}:${action}`]: true }))
       setError(null)
-      await retryIngest(docId)
-      startTimes.current[docId] = Date.now()
+      await fn(docId)
       await fetchStatus()
     } catch (e: any) {
-      setError(e.message ?? "Retry failed")
+      setError(e.message ?? `${action} failed`)
     } finally {
-      setRetrying((prev) => ({ ...prev, [docId]: false }))
+      setActioning((prev) => ({ ...prev, [`${docId}:${action}`]: false }))
     }
   }
 
-  const formatElapsed = (seconds: number): string => {
-    if (seconds < 60) return `${Math.round(seconds)}s`
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.round(seconds % 60)
-    return `${mins}m ${secs}s`
-  }
-
-  const allDone = documents.length > 0 && documents.every(
-    (d) => d.status !== "processing" && d.step !== "processing" && (d.percent >= 100 || d.status === "ready" || d.status === "failed"),
+  const hasProcessing = documents.some(
+    (d) => d.processing_state === "PROCESSING" || d.processing_state === "QUEUED",
   )
 
-  const hasProcessing = documents.some(
-    (d) => d.status === "processing" || d.step === "processing" || (d.percent > 0 && d.percent < 100 && d.status !== "failed" && d.status !== "ready"),
+  const allDone = documents.length > 0 && documents.every(
+    (d) => d.processing_state === "COMPLETED" || d.processing_state === "FAILED" || d.processing_state === "CANCELLED",
   )
 
   const pageContainer: React.CSSProperties = {
@@ -225,11 +230,12 @@ export const ProcessingStatusPage: React.FC = () => {
     width: `${Math.min(100, Math.max(0, pct))}%`,
   })
 
-  const getStatusColor = (status: string): string => {
-    const s = status.toLowerCase()
-    if (s === "ready" || s === "complete") return t.colors.success
-    if (s === "processing" || s === "queued" || s === "uploaded") return t.colors.warning
-    if (s === "failed" || s === "error") return t.colors.error
+  const getStatusColor = (ps: string): string => {
+    const s = ps.toUpperCase()
+    if (s === "COMPLETED") return t.colors.success
+    if (s === "PROCESSING" || s === "QUEUED" || s === "UPLOADED" || s === "RESUMED") return t.colors.warning
+    if (s === "FAILED" || s === "CANCELLED") return t.colors.error
+    if (s === "PAUSED") return t.colors.info
     return t.colors.textMuted
   }
 
@@ -312,8 +318,20 @@ export const ProcessingStatusPage: React.FC = () => {
         ) : (
           <div style={{ display: "grid", gap: 8 }}>
             {documents.map((doc) => {
-              const color = getStatusColor(doc.status)
-              const isFailed = doc.status.toLowerCase() === "failed" || doc.status.toLowerCase() === "error"
+              const ps = doc.processing_state
+              const color = getStatusColor(ps)
+              const isFailed = ps === "FAILED"
+              const isProcessing = ps === "PROCESSING" || ps === "QUEUED" || ps === "UPLOADED"
+              const isPaused = ps === "PAUSED"
+              const isCompleted = ps === "COMPLETED"
+              const isCancelled = ps === "CANCELLED"
+
+              const canPause = isProcessing
+              const canResume = isPaused
+              const canRestart = isCompleted || isFailed || isCancelled
+              const canRetry = isFailed
+              const canCancel = isProcessing || isPaused
+
               return (
                 <div key={doc.id} style={{
                   ...card,
@@ -323,17 +341,22 @@ export const ProcessingStatusPage: React.FC = () => {
                   flexWrap: "wrap",
                 }}>
                   <div style={{ width: 20, flexShrink: 0, textAlign: "center", fontSize: 16 }}>
-                    {isFailed ? "❌" : doc.percent >= 100 || doc.status === "ready" ? "✅" : "📄"}
+                    {isFailed || isCancelled ? "❌" : isCompleted ? "✅" : isPaused ? "⏸" : "📄"}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
                       <span style={{ fontWeight: 600, color: t.colors.text, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {doc.filename}
                       </span>
-                      <span style={statusBadge(color)}>● {doc.status}</span>
+                      <span style={statusBadge(color)}>● {ps}</span>
                       <span style={{ fontSize: 12, color: t.colors.textMuted }}>
                         {formatElapsed(doc.elapsed)}
                       </span>
+                      {(doc.retry_count ?? 0) > 0 && (
+                        <span style={{ fontSize: 11, color: t.colors.textMuted }}>
+                          retry #{doc.retry_count}
+                        </span>
+                      )}
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                       <div style={progressBar}>
@@ -352,22 +375,60 @@ export const ProcessingStatusPage: React.FC = () => {
                       </div>
                     )}
                   </div>
-                  {isFailed && (
-                    <button
-                      type="button"
-                      onClick={() => handleRetry(doc.id)}
-                      disabled={retrying[doc.id]}
-                      style={{
-                        ...btnGhost,
-                        color: t.colors.warning,
-                        borderColor: `${t.colors.warning}40`,
-                        flexShrink: 0,
-                        opacity: retrying[doc.id] ? 0.5 : 1,
-                      }}
-                    >
-                      {retrying[doc.id] ? "Retrying…" : "↺ Retry"}
-                    </button>
-                  )}
+
+                  {/* ── Control Buttons ── */}
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0, flexWrap: "wrap" }}>
+                    {canPause && (
+                      <button
+                        type="button"
+                        onClick={() => handleAction(doc.id, "pause", pauseIngestion)}
+                        disabled={actioning[`${doc.id}:pause`]}
+                        style={{ ...btnGhost, color: t.colors.info, borderColor: `${t.colors.info}40`, opacity: actioning[`${doc.id}:pause`] ? 0.5 : 1 }}
+                      >
+                        {actioning[`${doc.id}:pause`] ? "…" : "⏸ Pause"}
+                      </button>
+                    )}
+                    {canResume && (
+                      <button
+                        type="button"
+                        onClick={() => handleAction(doc.id, "resume", resumeIngestion)}
+                        disabled={actioning[`${doc.id}:resume`]}
+                        style={{ ...btnGhost, color: t.colors.success, borderColor: `${t.colors.success}40`, opacity: actioning[`${doc.id}:resume`] ? 0.5 : 1 }}
+                      >
+                        {actioning[`${doc.id}:resume`] ? "…" : "▶ Resume"}
+                      </button>
+                    )}
+                    {canRestart && (
+                      <button
+                        type="button"
+                        onClick={() => handleAction(doc.id, "restart", restartIngestion)}
+                        disabled={actioning[`${doc.id}:restart`]}
+                        style={{ ...btnGhost, color: t.colors.warning, borderColor: `${t.colors.warning}40`, opacity: actioning[`${doc.id}:restart`] ? 0.5 : 1 }}
+                      >
+                        {actioning[`${doc.id}:restart`] ? "…" : "↻ Restart"}
+                      </button>
+                    )}
+                    {canRetry && (
+                      <button
+                        type="button"
+                        onClick={() => handleAction(doc.id, "retry", retryIngest)}
+                        disabled={actioning[`${doc.id}:retry`]}
+                        style={{ ...btnGhost, color: t.colors.warning, borderColor: `${t.colors.warning}40`, opacity: actioning[`${doc.id}:retry`] ? 0.5 : 1 }}
+                      >
+                        {actioning[`${doc.id}:retry`] ? "…" : "↺ Retry"}
+                      </button>
+                    )}
+                    {canCancel && (
+                      <button
+                        type="button"
+                        onClick={() => handleAction(doc.id, "cancel", cancelIngestion)}
+                        disabled={actioning[`${doc.id}:cancel`]}
+                        style={{ ...btnGhost, color: t.colors.error, borderColor: `${t.colors.error}40`, opacity: actioning[`${doc.id}:cancel`] ? 0.5 : 1 }}
+                      >
+                        {actioning[`${doc.id}:cancel`] ? "…" : "✕ Cancel"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               )
             })}

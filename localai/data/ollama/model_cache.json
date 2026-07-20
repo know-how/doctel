@@ -1,11 +1,12 @@
 {
   "installed": [
+    "deepseek-v4-flash:cloud",
     "llama3.2",
     "qwen3:8b",
     "qwen3:4b",
     "nomic-embed-text"
   ],
-  "updated_at": 1784036363,
+  "updated_at": 1784523426,
   "pulls": {
     "llama3.2:3b-instruct": {
       "state": "in_progress",

@@ -16,7 +16,7 @@ GitHub Copilot-style model management system with:
 - Health Monitoring (Layer 13)
 - Audit & Governance (Layer 14)
 
-All data stored in MySQL via config_service.py — no more JSON file I/O.
+All data stored in PostgreSQL via config_service.py — no more JSON file I/O.
 """
 
 from __future__ import annotations
@@ -1181,27 +1181,31 @@ async def _sync_provider_models(
         supports_embedding = model_data.get("supports_embedding", "embedding" in capabilities or False)
         supports_reasoning = model_data.get("supports_reasoning", "reasoning" in capabilities or False)
         
-        # Determine endpoint type based on provider type
-        endpoint_type = "chat"  # default
-        
-        await cfg.add_model(
-            db=db,
-            provider_id_str=provider_id,
-            model_id=model_id,
-            display_name=model_name,
-            context_window=context_window,
-            capabilities={
-                "chat": supports_chat,
-                "vision": supports_vision,
-                "code": supports_code,
-                "embedding": supports_embedding,
-                "reasoning": supports_reasoning,
-            },
-            state="active",
-            pricing_tier=model_data.get("pricing_tier", "free"),
-        )
-        stats["added"] += 1
-        logger.info(f"Model {model_id} added from {provider_id}")
+        try:
+            await cfg.add_model(
+                db=db,
+                provider_id_str=provider_id,
+                model_id=model_id,
+                display_name=model_name,
+                context_window=context_window,
+                capabilities={
+                    "chat": supports_chat,
+                    "vision": supports_vision,
+                    "code": supports_code,
+                    "embedding": supports_embedding,
+                    "reasoning": supports_reasoning,
+                },
+                state="active",
+                pricing_tier=model_data.get("pricing_tier", "free"),
+            )
+            stats["added"] += 1
+            logger.info(f"Model {model_id} added from {provider_id}")
+        except Exception as add_err:
+            logger.warning(f"Failed to add model {model_id} from {provider_id}: {add_err}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
     
     # STEP 4: Update existing models (preserve admin settings)
     for model_id in ids_to_update:

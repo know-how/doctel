@@ -52,7 +52,7 @@ async def get_team_members(
 
 @router.patch("/api/team/{user_id}/role")
 async def update_member_role(
-    user_id: int,
+    user_id: str,
     payload: dict = Body(...),
     user: User = Depends(require_role(["admin"])),
     db: AsyncSession = Depends(get_db),

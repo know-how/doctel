@@ -145,7 +145,7 @@ async def generate_embeddings_batch(
 async def store_embedding_records(
     db: AsyncSession,
     doc_id: int,
-    project_id: int,
+    project_id,
     chroma_ids: list[str],
     texts: list[str],
     metadatas: list[dict[str, Any]],

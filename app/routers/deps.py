@@ -30,7 +30,7 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 # SQLAlchemy
 # ---------------------------------------------------------------------------
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete, update, and_, or_
+from sqlalchemy import select, func, delete, update, and_, or_, text
 
 # ---------------------------------------------------------------------------
 # App config & database
@@ -142,7 +142,7 @@ from app.services.model_router import (
     select_model_with_fallback,
     force_select,
 )
-from app.services.ingest_worker import start_worker, enqueue as enqueue_ingest
+from app.services.job_poller import create_job as enqueue_ingest, cancel_job
 from app.utils.model_cache import load_model_cache, update_installed_models, set_pull_state
 from app.services.bootstrap_service import run_bootstrap_scan, start_watcher, get_bootstrap_status
 from app.services.system_settings_service import (
@@ -217,16 +217,26 @@ async def _sse_generator(queue: asyncio.Queue):
 # Shared helper functions extracted from main.py
 # ---------------------------------------------------------------------------
 
-def _parse_document_id(document_id: str) -> int:
-    """Parse a document id string (e.g. 'doc_42') into an integer."""
+def _parse_document_id(document_id: str) -> str:
+    """Parse a document id string (e.g. 'doc_<uuid>') into a plain UUID string.
+
+    Accepts:
+      - Raw UUID strings: "550e8400-e29b-41d4-a716-446655440000"
+      - Prefixed UUID strings: "doc_550e8400-e29b-41d4-a716-446655440000"
+      - Legacy integer strings: "42" (for backward compat with old routes)
+    Returns the plain identifier as a string.
+    Raises HTTPException(400) if the input is empty or clearly invalid.
+    """
     if isinstance(document_id, str):
-        match = re.match(r"^doc_(\d+)$", document_id.strip())
+        doc_str = document_id.strip()
+        if not doc_str:
+            raise HTTPException(status_code=400, detail="Empty document id")
+        # Strip legacy "doc_" prefix
+        match = re.match(r"^doc_(.+)$", doc_str)
         if match:
-            return int(match.group(1))
-    try:
-        return int(document_id)
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=400, detail=f"Invalid document id: {document_id}")
+            return match.group(1)
+        return doc_str
+    return str(document_id)
 
 
 def _is_embedding_model(model: str) -> bool:

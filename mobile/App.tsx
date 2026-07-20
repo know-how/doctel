@@ -41,6 +41,19 @@ import { TaskMappingScreen } from "./src/screens/TaskMappingScreen"
 import { SettingsProfileScreen } from "./src/screens/SettingsProfileScreen"
 import { CollaborationTeamScreen } from "./src/screens/CollaborationTeamScreen"
 import { NewChatScreen } from "./src/screens/NewChatScreen"
+// ── New admin & feature screens (frontend alignment) ──────────
+import { AdminEmbeddingsScreen } from "./src/screens/AdminEmbeddingsScreen"
+import { AdminAutoRoutingScreen } from "./src/screens/AdminAutoRoutingScreen"
+import { AdminStorageScreen } from "./src/screens/AdminStorageScreen"
+import { AdminSecurityScreen } from "./src/screens/AdminSecurityScreen"
+import { AdminRBACScreen } from "./src/screens/AdminRBACScreen"
+import { AdminDepartmentsScreen } from "./src/screens/AdminDepartmentsScreen"
+import { AdminDiagnosticsScreen } from "./src/screens/AdminDiagnosticsScreen"
+import { AdminAuditScreen } from "./src/screens/AdminAuditScreen"
+import { AdminIntegrationsScreen } from "./src/screens/AdminIntegrationsScreen"
+import { SettingsSecurityScreen } from "./src/screens/SettingsSecurityScreen"
+import { OutputsExportsScreen } from "./src/screens/OutputsExportsScreen"
+import { OutputsReportsScreen } from "./src/screens/OutputsReportsScreen"
 
 type ScreenType = "main" | "chat" | "upload" | "global-chat" | "models" | "projects" | "sessions" | "status"
 
@@ -70,18 +83,27 @@ function getPageTitle(path: string): string {
     "/outputs/history": "Output History",
     "/outputs/exports": "Exports",
     "/outputs/reports": "Reports",
-    "/admin/models": "Models",
-    "/admin/prompts": "Prompts",
-    "/admin/context": "Context & Tokens",
+    // ── AI PLATFORM ────────────────────────────────────
+    "/admin/providers": "Providers",
+    "/admin/models": "Model Catalog",
+    "/admin/embeddings": "Embeddings",
+    "/admin/prompts": "Prompt Management",
+    "/admin/auto-routing": "Auto Routing",
+    "/admin/system": "System Status",
+    // ── ADMINISTRATION ─────────────────────────────────
+    "/admin/storage": "Storage",
     "/admin/integrations": "Integrations",
-    "/admin/v2": "Model Catalog",
-    "/admin/v2/providers": "Providers",
-    "/admin/v2/task-mapping": "Task Mapping",
+    "/admin/security": "Security",
+    "/admin/rbac": "RBAC",
+    "/admin/departments": "Departments",
+    "/admin/diagnostics": "Diagnostics",
+    "/admin/audit": "Audit",
+    // ── Settings ───────────────────────────────────────
     "/settings/profile": "Profile",
     "/settings/security": "Security",
-    "/settings/billing": "Billing",
+    // ── Collaboration ──────────────────────────────────
     "/team": "Team",
-    "/workspaces/shared": "Shared Workspaces",
+    "/shared": "Shared Workspaces",
     "/activity": "Activity",
   }
   return titles[path] || "Documents"
@@ -130,6 +152,10 @@ function AppContent() {
     initialChecking: connectionChecking,
     liveChecking,
     error: connectionError,
+    startupSteps,
+    backendRunning,
+    ollamaRunning,
+    reconnectAttempt,
     recheck,
   } = useConnectionMonitor()
 
@@ -178,20 +204,17 @@ function AppContent() {
   function renderPage() {
     const isAdmin = userRole === "admin"
 
-    // V2 dynamic routes (paths with variable parameters)
-    if (currentPath.startsWith("/admin/v2/providers/")) {
-      const parts = currentPath.split("/")
-      // /admin/v2/providers/{providerId}
-      if (parts.length === 5) {
-        const providerId = decodeURIComponent(parts[4])
-        return isAdmin ? <ProviderDetailScreen providerId={providerId} onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
-      }
-      // /admin/v2/providers/{providerId}/models/{modelId}
-      if (parts.length === 7 && parts[5] === "models") {
-        const providerId = decodeURIComponent(parts[4])
-        const modelId = decodeURIComponent(parts[6])
-        return isAdmin ? <ModelManagementScreen providerId={providerId} modelId={modelId} onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
-      }
+    // ── Dynamic provider detail routes (support both old v2 and new paths) ──
+    const providerDetailMatch = currentPath.match(/^\/(admin\/v2\/providers|admin\/providers)\/([^/]+)$/)
+    if (providerDetailMatch) {
+      const providerId = decodeURIComponent(providerDetailMatch[2])
+      return isAdmin ? <ProviderDetailScreen providerId={providerId} onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+    }
+    const providerModelMatch = currentPath.match(/^\/(admin\/v2\/providers|admin\/providers)\/([^/]+)\/models\/([^/]+)$/)
+    if (providerModelMatch) {
+      const providerId = decodeURIComponent(providerModelMatch[2])
+      const modelId = decodeURIComponent(providerModelMatch[3])
+      return isAdmin ? <ModelManagementScreen providerId={providerId} modelId={modelId} onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
     }
 
     switch (currentPath) {
@@ -218,32 +241,46 @@ function AppContent() {
       case "/outputs/history":
         return <OutputsHistoryScreen />
       case "/outputs/exports":
-        return <PlaceholderPage title="Exports" emoji="📥" />
+        return <OutputsExportsScreen />
       case "/outputs/reports":
-        return <PlaceholderPage title="Reports" emoji="📊" />
+        return <OutputsReportsScreen />
+      // ── AI PLATFORM (admin) ──────────────────────────────────────
+      case "/admin/providers":
+        return isAdmin ? <ProvidersScreen onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
       case "/admin/models":
-        return isAdmin ? <AdminModelsScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+        return isAdmin ? <V2AdminScreen onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/embeddings":
+        return isAdmin ? <AdminEmbeddingsScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
       case "/admin/prompts":
         return isAdmin ? <AdminPromptsScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
-      case "/admin/context":
-        return isAdmin ? <PlaceholderPage title="Context & Tokens" emoji="🔢" /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/auto-routing":
+        return isAdmin ? <AdminAutoRoutingScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/system":
+        return isAdmin ? <SystemStatusScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      // ── ADMINISTRATION (admin) ──────────────────────────────────
+      case "/admin/storage":
+        return isAdmin ? <AdminStorageScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
       case "/admin/integrations":
-        return isAdmin ? <PlaceholderPage title="Integrations" emoji="🔌" /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
-      case "/admin/v2":
-        return isAdmin ? <V2AdminScreen onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
-      case "/admin/v2/providers":
-        return isAdmin ? <ProvidersScreen onNavigate={handleNavigate} /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
-      case "/admin/v2/task-mapping":
-        return isAdmin ? <TaskMappingScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+        return isAdmin ? <AdminIntegrationsScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/security":
+        return isAdmin ? <AdminSecurityScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/rbac":
+        return isAdmin ? <AdminRBACScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/departments":
+        return isAdmin ? <AdminDepartmentsScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/diagnostics":
+        return isAdmin ? <AdminDiagnosticsScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      case "/admin/audit":
+        return isAdmin ? <AdminAuditScreen /> : <DocumentLibraryScreen onSelectDocument={() => {}} />
+      // ── Settings ────────────────────────────────────────────────
       case "/settings/profile":
         return <SettingsProfileScreen />
       case "/settings/security":
-        return <PlaceholderPage title="Security Settings" emoji="🔒" />
-      case "/settings/billing":
-        return <PlaceholderPage title="Billing" emoji="💳" />
+        return <SettingsSecurityScreen />
+      // ── Collaboration ───────────────────────────────────────────
       case "/team":
         return <CollaborationTeamScreen />
-      case "/workspaces/shared":
+      case "/shared":
         return <WorkspacesScreen onSelectProject={(proj) => { setCurrentPath("/documents/library"); }} />
       case "/activity":
         return <CollaborationTeamScreen />
@@ -258,47 +295,124 @@ function AppContent() {
   }, [])
 
   // ── Connection check gate screens ─────────────────────────────
-  if (connectionChecking) {
-    return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: "#070B14" }}>
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 20 }}>
-          <ActivityIndicator size="large" color="#5B88FF" />
-          <Text style={{ fontSize: 15, fontWeight: "500", color: "rgba(255,255,255,0.7)" }}>
-            Connecting to server…
-          </Text>
-        </View>
-      </SafeAreaView>
-    )
-  }
+  if (connectionChecking || !connectionOk) {
+    const isError = !connectionChecking && !connectionOk
 
-  if (!connectionOk) {
+    const getStepIcon = (step: typeof startupSteps[0]) => {
+      switch (step.status) {
+        case "done": return "✅"
+        case "error": return "❌"
+        case "in-progress": return "⏳"
+        case "skipped": return "⏭️"
+        default: return "⬜"
+      }
+    }
+
+    const getStepColor = (step: typeof startupSteps[0]) => {
+      switch (step.status) {
+        case "done": return "#34D399"
+        case "error": return "#EF4444"
+        case "in-progress": return "#5B88FF"
+        case "skipped": return "#6B7280"
+        default: return "#374151"
+      }
+    }
+
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: "#070B14" }}>
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 16, padding: 32 }}>
-          <Text style={{ fontSize: 48, lineHeight: 52 }}>⚠️</Text>
-          <Text style={{ fontSize: 18, fontWeight: "700", color: "#FFFFFF" }}>
-            Unable to Connect
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 32 }}>
+          {/* Logo / Icon */}
+          <Text style={{ fontSize: 48, lineHeight: 52, marginBottom: 12 }}>
+            {isError ? "⚠️" : "🔄"}
           </Text>
+
+          {/* Title */}
+          <Text style={{ fontSize: 18, fontWeight: "700", color: "#FFFFFF", marginBottom: 8 }}>
+            {isError ? "Unable to Connect" : "Starting Up…"}
+          </Text>
+
+          {/* Subtitle */}
           <Text style={{
             fontSize: 13, color: "rgba(255,255,255,0.55)",
             textAlign: "center", maxWidth: 400, lineHeight: 20,
+            marginBottom: 28,
           }}>
-            {connectionError || "The backend server is not reachable. Please ensure the server is running and try again."}
+            {isError
+              ? connectionError || "The backend server is not reachable. Please ensure the server is running and try again."
+              : "Initializing connection and verifying system components…"
+            }
           </Text>
-          <Pressable
-            onPress={recheck}
-            style={{
-              marginTop: 12,
-              paddingVertical: 12,
-              paddingHorizontal: 32,
-              borderRadius: 10,
-              backgroundColor: "#5B88FF",
-            }}
-          >
-            <Text style={{ color: "#FFFFFF", fontSize: 14, fontWeight: "600" }}>
-              Retry Connection
-            </Text>
-          </Pressable>
+
+          {/* Startup Steps */}
+          <View style={{ width: "100%", maxWidth: 360, gap: 12 }}>
+            {startupSteps.map((step) => (
+              <View
+                key={step.id}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 12,
+                  opacity: step.status === "pending" ? 0.4 : 1,
+                }}
+              >
+                {/* Status indicator */}
+                <View style={{
+                  width: 28, height: 28,
+                  borderRadius: 14,
+                  backgroundColor: step.status === "in-progress" ? "rgba(91,136,255,0.15)" : "transparent",
+                  alignItems: "center", justifyContent: "center",
+                }}>
+                  <Text style={{ fontSize: 14 }}>{getStepIcon(step)}</Text>
+                </View>
+
+                {/* Label + optional message */}
+                <View style={{ flex: 1 }}>
+                  <Text style={{
+                    fontSize: 14,
+                    fontWeight: step.status === "in-progress" ? "600" : "400",
+                    color: step.status === "in-progress" ? "#FFFFFF" : "rgba(255,255,255,0.7)",
+                  }}>
+                    {step.label}
+                  </Text>
+                  {step.message ? (
+                    <Text style={{
+                      fontSize: 11, color: "rgba(255,255,255,0.4)",
+                      marginTop: 1,
+                    }}>
+                      {step.message}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            ))}
+          </View>
+
+          {/* Retry button for error state */}
+          {isError ? (
+            <Pressable
+              onPress={recheck}
+              style={{
+                marginTop: 28,
+                paddingVertical: 12,
+                paddingHorizontal: 32,
+                borderRadius: 10,
+                backgroundColor: "#5B88FF",
+              }}
+            >
+              <Text style={{ color: "#FFFFFF", fontSize: 14, fontWeight: "600" }}>
+                Retry Connection
+              </Text>
+            </Pressable>
+          ) : null}
+
+          {/* Spinner at bottom while checking */}
+          {connectionChecking ? (
+            <ActivityIndicator
+              size="small"
+              color="#5B88FF"
+              style={{ marginTop: 28 }}
+            />
+          ) : null}
         </View>
       </SafeAreaView>
     )

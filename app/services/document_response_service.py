@@ -57,7 +57,7 @@ def _provider_is_cloud(model: str) -> bool:
 # ---------------------------------------------------------------------------
 
 async def generate_document_response(
-    document_id: int,
+    document_id,
     prompt: str,
     selected_model: str,
     db: AsyncSession,
@@ -173,17 +173,22 @@ async def generate_document_response(
 
     doc_context = "\n\n".join(context_parts) if context_parts else None
 
+    # ── GUARDRAIL: No context → return NO_KNOWLEDGE_FOUND ──────────────
+    # Prevent LLM hallucination when no document chunks are available.
+    if not doc_context:
+        logger.warning(
+            "[DOC_RESPONSE] No context available for doc %s — NO_KNOWLEDGE_FOUND guardrail triggered",
+            document_id,
+        )
+        return {
+            "answer_text": "I could not find any relevant information in this document to answer your question. The document content could not be retrieved for analysis.",
+            "citations": citations,
+            "used_model": selected_model,
+        }
+
     fallback_prompt = (
         f"Answer the question using ONLY the provided context. Always cite sources.\n\n"
         f"Question: {question}\n\nContext:\n{doc_context}"
-        if doc_context
-        else (
-            f"Answer the following question about the document titled "
-            f"'{doc.filename or f'Document #{document_id}'}'. "
-            f"The document has been selected but its full content could not be retrieved. "
-            f"Provide your best answer based on the document title and any available context.\n\n"
-            f"Question: {question}"
-        )
     )
 
     # ── 4. Route to the correct provider ─────────────────────────────

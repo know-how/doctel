@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float, Boolean, UniqueConstraint, UUID, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
@@ -15,7 +15,7 @@ DOC_STATUS_EMBEDDING_FAILED = "embedding_failed"  # Last embedding attempt faile
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
     username = Column(String(255), unique=True, index=True)
     ec_number = Column(String(255), index=True)
     email = Column(String(255), index=True)
@@ -31,7 +31,7 @@ class UserIdentityProvider(Base):
     __tablename__ = "user_identity_providers"
     __table_args__ = (UniqueConstraint("provider", "identity", name="uq_identity_provider_identity"),)
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     provider = Column(String(50), index=True)  # ec_password|email_otp
     identity = Column(String(255), index=True)
     verified = Column(Boolean, default=False)
@@ -44,7 +44,7 @@ class UserIdentityProvider(Base):
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
     token = Column(String(512), primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     provider = Column(String(50))
     identity = Column(String(255))
     display_name = Column(String(255), default="")
@@ -54,7 +54,7 @@ class Project(Base):
     __tablename__ = "projects"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True)
-    owner_user_id = Column(Integer, ForeignKey("users.id"))
+    owner_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     archived_at = Column(DateTime(timezone=True), nullable=True, default=None)
 
@@ -68,7 +68,7 @@ class ProjectMember(Base):
     __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_members_project_user"),)
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"))
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     role_in_project = Column(String(50))
 
     project = relationship("Project", back_populates="members")
@@ -76,9 +76,12 @@ class ProjectMember(Base):
 
 class Document(Base):
     __tablename__ = "documents"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True, server_default=text("uuid_generate_v4()"))
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    title = Column(String(500), nullable=False, default="")
     project_id = Column(Integer, ForeignKey("projects.id"))
-    uploaded_by_user_id = Column(Integer, ForeignKey("users.id"))
+    uploaded_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     filename = Column(String(512))
     path = Column(String(512))
     mime_type = Column(String(255))
@@ -101,7 +104,15 @@ class Document(Base):
     ingest_message = Column(String(255), default="")
     error_message = Column(Text, default="")
     detected_type = Column(String(50), default="")
-    updated_at = Column(Text, default="", server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # ── Processing Control Fields v1 ───────────────────────────────────────
+    processing_state = Column(String(20), default="UPLOADED", index=True)
+    processing_step = Column(String(50), default="")
+    pause_requested = Column(Boolean, default=False)
+    cancel_requested = Column(Boolean, default=False)
+    retry_count = Column(Integer, default=0)
+    checkpoint = Column(Text, default=None, comment="JSON checkpoint for worker resume")
 
     # ── Embedding Governance Fields ────────────────────────────────────────
     embedding_provider = Column(String(128), nullable=True, default=None,
@@ -121,7 +132,7 @@ class Document(Base):
 class DocAnalysis(Base):
     __tablename__ = "doc_analysis"
     id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("documents.id"))
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
     executive_summary = Column(Text)
     detailed_summary = Column(Text)
     sentiment = Column(String(50))
@@ -135,7 +146,7 @@ class DocAnalysis(Base):
 class SuggestedPrompt(Base):
     __tablename__ = "suggested_prompts"
     id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("documents.id"))
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
     prompt_text = Column(String(500))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -144,7 +155,7 @@ class SuggestedPrompt(Base):
 class Chunk(Base):
     __tablename__ = "chunks"
     id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("documents.id"))
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
     project_id = Column(Integer, ForeignKey("projects.id"))
     chunk_index = Column(Integer)
     text = Column(Text)
@@ -173,8 +184,8 @@ class Session(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_uuid = Column(String(255), unique=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"))
-    document_id = Column(Integer, ForeignKey("documents.id"))
-    user_id = Column(Integer, ForeignKey("users.id"))
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     model_name = Column(String(255))
     title = Column(String(255), default="")
     scope = Column(String(50), default="document")  # global|project|document
@@ -206,8 +217,8 @@ class Setting(Base):
 class DocumentLink(Base):
     __tablename__ = "document_links"
     id = Column(Integer, primary_key=True, index=True)
-    from_document_id = Column(Integer, ForeignKey("documents.id"))
-    to_document_id = Column(Integer, ForeignKey("documents.id"))
+    from_document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
+    to_document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
     relation = Column(String(255))
     confidence = Column(Float, default=0.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -228,7 +239,7 @@ class SystemSetting(Base):
     key = Column(String(255), primary_key=True)
     value_json = Column(Text)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    updated_by_user_id = Column(Integer, ForeignKey("users.id"))
+    updated_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
 
 class SettingsAudit(Base):
     __tablename__ = "settings_audit"
@@ -236,8 +247,145 @@ class SettingsAudit(Base):
     key = Column(String(255), index=True)
     old_value_json = Column(Text)
     new_value_json = Column(Text)
-    changed_by_user_id = Column(Integer, ForeignKey("users.id"))
+    changed_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     changed_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class DocumentChunk(Base):
+    """pgvector document chunk — the primary retrieval unit for RAG.
+
+    Maps to the `document_chunks` table created by the industrial schema migration.
+    Used by VectorSearchRBAC for RBAC-pre-filtered vector similarity search.
+    """
+    __tablename__ = "document_chunks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    chunk_size = Column(Integer, nullable=True)
+    chunk_text = Column(Text, nullable=False)
+    page_number = Column(Integer, nullable=True)
+    section_heading = Column(String(500), nullable=True)
+    preceding_context = Column(Text, nullable=True)
+    following_context = Column(Text, nullable=True)
+    embedding_model = Column(String(100), nullable=True)
+    embedding_provider = Column(String(50), nullable=True)
+    embedded_at = Column(DateTime(timezone=True), nullable=True)
+    token_count = Column(Integer, nullable=True)
+    quality_score = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class Permission(Base):
+    """Granular action permission."""
+    __tablename__ = "permissions"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    code = Column(String(100), unique=True, nullable=False)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, default="")
+    resource_type = Column(String(50), nullable=False)
+    action = Column(String(50), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class RolePermission(Base):
+    """Role-Permission mapping."""
+    __tablename__ = "role_permissions"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    role_id = Column(UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False)
+    permission_id = Column(UUID(as_uuid=True), ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False)
+    conditions = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),)
+
+
+class UserRole(Base):
+    """User-Role assignment."""
+    __tablename__ = "user_roles"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role_id = Column(UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False)
+    scope_type = Column(String(50), nullable=False)
+    scope_id = Column(UUID(as_uuid=True), nullable=True)
+    granted_at = Column(DateTime(timezone=True), server_default=func.now())
+    granted_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    revoked_reason = Column(Text, default="")
+    __table_args__ = (UniqueConstraint("user_id", "role_id", "scope_type", "scope_id", name="uq_user_role_scope"),)
+
+
+class AccessControl(Base):
+    """Explicit ACL entry for document access."""
+    __tablename__ = "access_control"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    subject_type = Column(String(50), nullable=False)
+    subject_id = Column(UUID(as_uuid=True), nullable=False)
+    resource_type = Column(String(50), nullable=False)
+    resource_id = Column(UUID(as_uuid=True), nullable=False)
+    permission = Column(String(50), nullable=False)
+    inherit_to_descendants = Column(Boolean, default=False)
+    granted_at = Column(DateTime(timezone=True), server_default=func.now())
+    granted_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    revoked_reason = Column(Text, default="")
+    __table_args__ = (UniqueConstraint("subject_type", "subject_id", "resource_type", "resource_id", "permission",
+                                        name="uq_acl_entry"),)
+
+
+class Workspace(Base):
+    """Cross-department workspace."""
+    __tablename__ = "workspaces"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, default="")
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class WorkspaceMember(Base):
+    """Workspace membership."""
+    __tablename__ = "workspace_members"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    workspace_id = Column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role_in_workspace = Column(String(50), default="member")
+    added_at = Column(DateTime(timezone=True), server_default=func.now())
+    added_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    removed_at = Column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_member"),)
+
+
+class AuditLog(Base):
+    """Comprehensive audit trail."""
+    __tablename__ = "audit_log"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    user_ec_number = Column(String(50), nullable=True)
+    impersonated_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    action = Column(String(100), nullable=False)
+    action_category = Column(String(50), nullable=True)
+    resource_type = Column(String(50), nullable=False)
+    resource_id = Column(UUID(as_uuid=True), nullable=True)
+    resource_name = Column(String(500), nullable=True)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    session_id = Column(String(255), nullable=True)
+    request_id = Column(String(255), nullable=True)
+    success = Column(Boolean, default=True)
+    error_message = Column(Text, nullable=True)
+    execution_time_ms = Column(Integer, nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class SystemPrompt(Base):

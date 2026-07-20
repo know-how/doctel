@@ -86,7 +86,7 @@ async def create_chat_session(
             if doc:
                 await _assert_document_workspace_access(doc, user, db)
                 resolved_project_id = int(doc.project_id)
-                resolved_document_id = int(doc.id)
+                resolved_document_id = doc.id
                 if not title:
                     title = (doc.filename or "").strip() or f"Document {doc_int}"
         except HTTPException:

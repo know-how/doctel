@@ -41,7 +41,7 @@ export const AdminStoragePage: React.FC = () => {
           Storage Management
         </div>
         <p style={{ fontSize: 13, color: c.textMuted, margin: "8px 0 0 0" }}>
-          Configure document storage locations, vector database (ChromaDB)
+          Configure document storage locations, vector database (PostgreSQL+pgvector)
           settings, and retention policies here.
         </p>
       </div>
