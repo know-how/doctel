@@ -15,6 +15,7 @@ import { DocumentAnalysisResponse } from "../types/api"
 import { RobotSearching } from "../components/RobotSearching"
 import { UserIcon } from "../components/UserIcon"
 import { useModel } from "../context/ModelContext"
+import { ModelDropdown } from "../components/ModelDropdown"
 
 type MobMsgStatus = "sending" | "waiting" | "success" | "error"
 
@@ -33,7 +34,7 @@ export function ChatScreen({ documentId }: { documentId: string }) {
   const { width } = useWindowDimensions()
   const isTablet = width >= 768
   const maxBubbleWidth = isTablet ? "70%" : "84%"
-  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, loading: loadingModels } = useModel()
+  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, modelLabels, loading: loadingModels, v2Providers } = useModel()
 
   const [messages, setMessages] = useState<MobileMessage[]>([])
   const [question, setQuestion] = useState("")
@@ -113,26 +114,20 @@ export function ChatScreen({ documentId }: { documentId: string }) {
   const toggleRecording = () => { if (isRecording) stopRecording(); else startRecording() }
 
   return (
-    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1, backgroundColor: c.bg }} keyboardVerticalOffset={Platform.OS === "ios" ? 80 : 0}>
+    <KeyboardAvoidingView behavior="padding" style={{ flex: 1, backgroundColor: c.bg }} keyboardVerticalOffset={Platform.OS === "ios" ? 50 : 0}>
       <View style={{ flex: 1, paddingHorizontal: t.spacing.md, paddingTop: t.spacing.md, paddingBottom: t.spacing.xs }}>
         <View style={{ marginBottom: t.spacing.sm }}>
           <Text style={{ fontSize: 18, fontWeight: "800", color: c.text, letterSpacing: -0.3 }}>AI Copilot</Text>
           <Text style={{ fontSize: 12, color: c.textMuted, marginTop: 2 }}>Ask questions about your document</Text>
-          {!loadingModels && availableModels.length > 0 && (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: t.spacing.sm }}>
-              {availableModels.map((m, i) => {
-                const caps = modelCapabilities[m] || []
-                const icons = caps.slice(0, 3).map((cap: string) => ({ reasoning: "🧠", vision: "👁️", audio: "🎤", code: "💻", fast: "⚡", large: "🐘", text: "💬", embedding: "📊" })[cap] || "").filter(Boolean).join(" ")
-                return (
-                  <Pressable key={`cmodel-${i}`} onPress={() => setSelectedModel(m)} style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: t.radii.lg, marginRight: 6, backgroundColor: m === selectedModel ? c.primary : c.surface }}>
-                    <Text style={{ fontSize: 11, color: m === selectedModel ? "#FFF" : c.textSecondary, fontWeight: "600" }}>{m}</Text>
-                    {icons ? <Text style={{ fontSize: 9, color: m === selectedModel ? "#FFD" : c.textMuted, marginTop: 1, textAlign: "center" }}>{icons}</Text> : null}
-                  </Pressable>
-                )
-              })}
-            </ScrollView>
-          )}
-          {loadingModels && <ActivityIndicator size="small" color={c.primary} style={{ marginTop: 6 }} />}
+          <ModelDropdown
+            v2Providers={v2Providers}
+            availableModels={availableModels}
+            selectedModel={selectedModel}
+            modelCapabilities={modelCapabilities}
+            modelLabels={modelLabels}
+            loading={loadingModels}
+            onSelect={setSelectedModel}
+          />
         </View>
 
         {error ? (

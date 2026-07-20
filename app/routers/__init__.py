@@ -59,6 +59,7 @@ def include_routers(app) -> None:
         "agent_gateway",
         "processing_control",
         "admin_jobs",
+        "voice",
     ]
     for name in _ROUTERS:
         router = _try_import_router(name)

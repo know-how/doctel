@@ -7,6 +7,7 @@ import { chatGlobally, setChatSessionModel, createChatSession, transcribeAudio }
 import { useModel } from "../context/ModelContext"
 import { RobotSearching } from "../components/RobotSearching"
 import { UserIcon } from "../components/UserIcon"
+import { ModelDropdown } from "../components/ModelDropdown"
 
 interface MobileMessage {
   id: string
@@ -32,7 +33,7 @@ export function GlobalChatScreen({ onBack }: GlobalChatScreenProps) {
   const [messages, setMessages] = useState<MobileMessage[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
-  const { availableModels, selectedModel, setSelectedModel, loading: modelsLoading, modelCapabilities } = useModel()
+  const { availableModels, selectedModel, setSelectedModel, loading: modelsLoading, modelCapabilities, modelLabels, v2Providers } = useModel()
   const [sessionId, setSessionId] = useState<string>("")
   const [isRecording, setIsRecording] = useState(false)
   const [isTranscribing, setIsTranscribing] = useState(false)
@@ -82,40 +83,22 @@ export function GlobalChatScreen({ onBack }: GlobalChatScreenProps) {
   const toggleRecording = () => { if (isRecording) stopRecording(); else startRecording() }
 
   return (
-    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1 }} keyboardVerticalOffset={Platform.OS === "ios" ? 80 : 0}>
+    <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }} keyboardVerticalOffset={Platform.OS === "ios" ? 50 : 0}>
       <View style={{ flex: 1, backgroundColor: c.bg }}>
         <View style={{ paddingHorizontal: t.spacing.md, paddingVertical: t.spacing.sm, borderBottomWidth: 1, borderBottomColor: c.border, backgroundColor: c.cardBg }}>
           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: t.spacing.sm }}>
             <Text style={{ fontSize: 18, fontWeight: "700", color: c.text }}>🌍 Global Chat</Text>
             {onBack && (<Pressable onPress={onBack}><Text style={{ fontSize: 14, color: c.primary }}>← Back</Text></Pressable>)}
           </View>
-          {!modelsLoading && availableModels.length > 0 && (
-            <View>
-              <Text style={{ fontSize: 12, color: c.textMuted, marginBottom: 6 }}>Model</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                {availableModels.map((model, i) => {
-                  const modelCaps = modelCapabilities[model] || []
-                  const capIcons = modelCaps.slice(0, 3).map((cap: string) => {
-                    if (cap === "reasoning") return "🧠"
-                    if (cap === "vision") return "👁️"
-                    if (cap === "audio") return "🎤"
-                    if (cap === "code") return "💻"
-                    if (cap === "fast") return "⚡"
-                    if (cap === "large") return "🐘"
-                    if (cap === "text") return "💬"
-                    if (cap === "embedding") return "📊"
-                    return ""
-                  }).filter(Boolean).join(" ")
-                  return (
-                    <Pressable key={`model-${i}`} onPress={() => setSelectedModel(model)} style={{ paddingHorizontal: t.spacing.sm, paddingVertical: t.spacing.xs, borderRadius: t.radii.sm, backgroundColor: selectedModel === model ? c.primary : c.bgSecondary, marginRight: t.spacing.sm }}>
-                      <Text style={{ fontSize: 12, fontWeight: "600", color: selectedModel === model ? "#FFFFFF" : c.textMuted }}>{model}</Text>
-                      {capIcons ? <Text style={{ fontSize: 10, color: selectedModel === model ? "#FFFFFFcc" : c.textMuted, marginTop: 2 }}>{capIcons}</Text> : null}
-                    </Pressable>
-                  )
-                })}
-              </ScrollView>
-            </View>
-          )}
+          <ModelDropdown
+            v2Providers={v2Providers}
+            availableModels={availableModels}
+            selectedModel={selectedModel}
+            modelCapabilities={modelCapabilities}
+            modelLabels={modelLabels}
+            loading={modelsLoading}
+            onSelect={setSelectedModel}
+          />
         </View>
 
         <ScrollView ref={scrollRef} style={{ flex: 1, paddingHorizontal: t.spacing.sm + 2, paddingVertical: t.spacing.sm }} contentContainerStyle={{ paddingBottom: t.spacing.md }}>

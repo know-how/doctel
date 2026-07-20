@@ -51,6 +51,7 @@ import { AdminDepartmentsScreen } from "./src/screens/AdminDepartmentsScreen"
 import { AdminDiagnosticsScreen } from "./src/screens/AdminDiagnosticsScreen"
 import { AdminAuditScreen } from "./src/screens/AdminAuditScreen"
 import { AdminIntegrationsScreen } from "./src/screens/AdminIntegrationsScreen"
+import { DocumentViewScreen } from "./src/screens/DocumentViewScreen"
 import { SettingsSecurityScreen } from "./src/screens/SettingsSecurityScreen"
 import { OutputsExportsScreen } from "./src/screens/OutputsExportsScreen"
 import { OutputsReportsScreen } from "./src/screens/OutputsReportsScreen"
@@ -74,6 +75,7 @@ function getPageTitle(path: string): string {
     "/documents/add": "Add Document",
     "/documents/workspaces": "Workspaces",
     "/documents/status": "Processing Status",
+    "/documents/view": "Document View",
     "/chat": "New Chat",
     "/analyze/chat": "Ask Documents",
     "/analyze/extraction": "Extraction",
@@ -125,6 +127,7 @@ function AppContent() {
   const { width: windowWidth } = useWindowDimensions()
   const isTablet = windowWidth >= 768
   const [documentId, setDocumentId] = useState("doc_1")
+  const [documentViewFilename, setDocumentViewFilename] = useState<string | undefined>(undefined)
   const { ecNumber, setEcNumber } = useEcNumber()
   const [activeTab, setActiveTab] = useState<ScreenType>("main")
   const [inputValue, setInputValue] = useState(ecNumber)
@@ -219,7 +222,7 @@ function AppContent() {
 
     switch (currentPath) {
       case "/chat":
-        return <NewChatScreen />
+        return <NewChatScreen onOpenDocument={(docId, filename) => { setDocumentId(docId); setDocumentViewFilename(filename); setCurrentPath("/documents/view"); }} />
       case "/documents/library":
         return <DocumentLibraryScreen key={workspaceProjectId || "all"} onSelectDocument={(doc) => { setDocumentId(doc.id); setCurrentPath("/analyze/chat"); }} initialProjectId={workspaceProjectId} />
       case "/documents/add":
@@ -228,6 +231,8 @@ function AppContent() {
         return <WorkspacesScreen onSelectProject={(proj) => { setWorkspaceProjectId(proj.id); setCurrentPath("/documents/library"); }} />
       case "/documents/status":
         return <ProcessingStatusScreen />
+      case "/documents/view":
+        return <DocumentViewScreen documentId={documentId} onNavigate={handleNavigate} filename={documentViewFilename} />
       case "/analyze/chat":
         return <AnalyzeChatScreen key={documentId} documentId={documentId} />
       case "/analyze/extraction":

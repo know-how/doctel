@@ -39,43 +39,24 @@ export function SidebarDrawer({
   const { isDark, toggleTheme, tokens } = useTheme()
   const t = tokens
 
-  const translateX = useRef(new Animated.Value(-DRAWER_WIDTH)).current
-  const backdropOpacity = useRef(new Animated.Value(0)).current
+  const translateX = useRef(new Animated.Value(visible ? 0 : -DRAWER_WIDTH)).current
+  const backdropOpacity = useRef(new Animated.Value(visible ? 1 : 0)).current
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({})
   const expandedAnimValues = useRef<Record<string, Animated.Value>>({})
-  const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
-    if (visible) {
-      setMounted(true)
-      Animated.parallel([
-        Animated.timing(translateX, {
-          toValue: 0,
-          duration: ANIM_DURATION,
-          useNativeDriver: true,
-        }),
-        Animated.timing(backdropOpacity, {
-          toValue: 1,
-          duration: ANIM_DURATION,
-          useNativeDriver: true,
-        }),
-      ]).start()
-    } else {
-      Animated.parallel([
-        Animated.timing(translateX, {
-          toValue: -DRAWER_WIDTH,
-          duration: ANIM_DURATION,
-          useNativeDriver: true,
-        }),
-        Animated.timing(backdropOpacity, {
-          toValue: 0,
-          duration: ANIM_DURATION,
-          useNativeDriver: true,
-        }),
-      ]).start(() => {
-        setMounted(false)
-      })
-    }
+    Animated.parallel([
+      Animated.timing(translateX, {
+        toValue: visible ? 0 : -DRAWER_WIDTH,
+        duration: ANIM_DURATION,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backdropOpacity, {
+        toValue: visible ? 1 : 0,
+        duration: ANIM_DURATION,
+        useNativeDriver: true,
+      }),
+    ]).start()
   }, [visible])
 
   useEffect(() => {
@@ -120,12 +101,11 @@ export function SidebarDrawer({
 
   const visibleItems = sidebarConfig.filter(isNavVisible)
 
-  if (!mounted) {
-    return null
-  }
-
   return (
-    <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 1000 }} pointerEvents="box-none">
+    <View
+      style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 1000 }}
+      pointerEvents={visible ? "auto" : "none"}
+    >
       <Animated.View
         style={{
           position: "absolute",

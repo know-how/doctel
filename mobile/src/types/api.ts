@@ -64,12 +64,30 @@ export interface ChatSource {
   snippet: string
 }
 
+export interface Citation {
+  document_id?: string | null
+  filename?: string
+  chunk_index?: number
+  text?: string
+  snippet?: string
+  full_text_available?: boolean
+  distance?: number
+  can_view?: boolean
+  can_download?: boolean
+  open_url?: string
+  download_url?: string
+  preview_url?: string
+  source_type?: string
+  project_id?: string | number
+}
+
 export interface ChatAskOkResponse {
   answer: string
-  citations: { filename: string; chunk_index: number; text: string }[]
+  citations: Citation[]
   cross_references?: { filename: string; reason: string }[]
   used_model: string
   session_id: string
+  reasoning?: string
 }
 
 export interface ChatAskQueuedResponse {

@@ -435,6 +435,33 @@ export async function createProject(
   return handleResponse<ProjectResponse>(res)
 }
 
+export async function updateProject(
+  projectId: string,
+  payload: { name?: string },
+): Promise<any> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders,
+    },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<any>(res)
+}
+
+export async function deleteProject(
+  projectId: string,
+): Promise<{ ok: boolean }> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    headers: authHeaders,
+  })
+  return handleResponse<{ ok: boolean }>(res)
+}
+
 export async function getProjects(): Promise<ProjectListResponse> {
   const authHeaders = await buildAuthHeaders()
   const res = await fetch(`${BASE_URL}/projects`, {
@@ -529,7 +556,9 @@ export async function createChatSession(
 }
 
 export async function getAvailableModels(): Promise<ModelsAvailableResponse> {
-  const res = await fetch(`${BASE_URL}/api/models/available`)
+  const res = await fetch(`${BASE_URL}/api/models/available`, {
+    headers: await buildAuthHeaders(),
+  })
   return handleResponse<ModelsAvailableResponse>(res)
 }
 
@@ -539,7 +568,9 @@ export async function getModelCapabilities(): Promise<{
   capabilities: Record<string, string[]>
   labels: Record<string, string>
 }> {
-  const res = await fetch(`${BASE_URL}/api/models/capabilities`)
+  const res = await fetch(`${BASE_URL}/api/models/capabilities`, {
+    headers: await buildAuthHeaders(),
+  })
   return handleResponse<{
     capabilities: Record<string, string[]>
     labels: Record<string, string>
@@ -616,22 +647,176 @@ export async function downloadDocumentFileApi(documentId: string): Promise<Blob>
 
 // Already implemented above as getChatSessions()
 
-export async function chatGlobally(payload: ChatRequest): Promise<ChatResponse> {
+export async function chatGlobally(
+  payload: ChatRequest,
+  timeoutMs: number = 120_000,
+): Promise<ChatResponse> {
   const authHeaders = await buildAuthHeaders()
-  const res = await fetch(`${BASE_URL}/api/ask`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders,
-    },
-    body: JSON.stringify(payload),
-  })
-  return handleResponse<ChatResponse>(res)
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(`${BASE_URL}/api/ask`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+    clearTimeout(timeoutId)
+    return handleResponse<ChatResponse>(res)
+  } catch (err: any) {
+    clearTimeout(timeoutId)
+    if (err?.name === "AbortError") {
+      throw new ApiError(
+        "Request timed out. The AI model did not respond within the time limit.",
+        0,
+        { error: "timeout" },
+      )
+    }
+    throw err
+  }
 }
 
-// Streaming chat is only available on the web frontend (requires ReadableStream/SSE).
-// React Native / Expo does not natively support SSE; mobile uses the non-streaming endpoints above.
-// If SSE support is needed on mobile in the future, add `react-native-sse` or `expo-text-stream`.
+// ══════════════════════════════════════════════════════════════════════════════
+// SSE Streaming chat — mirrors the web frontend's chatGloballyStream
+// ══════════════════════════════════════════════════════════════════════════════
+
+export interface StreamCallbacks {
+  onChunk: (chunk: string, model: string, sessionId: string) => void
+  onReasoning?: (reasoning: string, model: string, sessionId: string) => void
+  onDone: (fullText: string, model: string, sessionId: string) => void
+  onError: (error: string) => void
+}
+
+/**
+ * Send a streaming chat request using SSE (Server-Sent Events) via fetch + ReadableStream.
+ * Falls back to the non-streaming endpoint if ReadableStream is not available.
+ */
+export async function chatGloballyStream(
+  payload: ChatRequest,
+  callbacks: StreamCallbacks,
+  timeoutMs: number = 120_000,
+): Promise<void> {
+  const authHeaders = await buildAuthHeaders()
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(`${BASE_URL}/api/ask/stream`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
+
+    if (!res.ok) {
+      clearTimeout(timeoutId)
+      const errText = await res.text().catch(() => "")
+      let errMsg: string
+      try {
+        const parsed = JSON.parse(errText)
+        errMsg = parsed.error || parsed.message || `HTTP ${res.status}`
+      } catch {
+        errMsg = `HTTP ${res.status}${errText ? ": " + errText : ""}`
+      }
+      callbacks.onError(errMsg)
+      return
+    }
+
+    const reader = res.body?.getReader()
+    if (!reader) {
+      clearTimeout(timeoutId)
+      // ReadableStream not available — fall back to non-streaming
+      try {
+        const fallbackRes = await chatGlobally(payload)
+        const ans = (fallbackRes as any).answer || ""
+        if (ans) {
+          callbacks.onChunk(ans, "", "")
+        }
+        callbacks.onDone(ans, "", "")
+      } catch (fallbackErr: any) {
+        callbacks.onError(fallbackErr?.message || "Fallback failed")
+      }
+      return
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ""
+    let fullText = ""
+    let model = ""
+    let sessionId = ""
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n")
+        buffer = lines.pop() || ""
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed.startsWith("data: ")) continue
+          const dataPayload = trimmed.slice(6).trim()
+
+          if (dataPayload === "[DONE]") {
+            clearTimeout(timeoutId)
+            callbacks.onDone(fullText, model, sessionId)
+            return
+          }
+
+          try {
+            const data = JSON.parse(dataPayload)
+            if (data.error) {
+              clearTimeout(timeoutId)
+              callbacks.onError(data.error)
+              return
+            }
+            model = data.model || model
+            sessionId = data.session_id || sessionId
+            if (data.type === "reasoning") {
+              if (callbacks.onReasoning) {
+                callbacks.onReasoning(data.content || "", model, sessionId)
+              }
+            } else if (data.type === "content") {
+              fullText += data.content || ""
+              callbacks.onChunk(data.content || "", model, sessionId)
+            } else if (data.chunk) {
+              // Legacy backward-compat format
+              fullText += data.chunk
+              callbacks.onChunk(data.chunk, model, sessionId)
+            }
+          } catch {
+            // skip malformed JSON lines
+          }
+        }
+      }
+    } catch (readErr: any) {
+      clearTimeout(timeoutId)
+      if (readErr?.name !== "AbortError") {
+        callbacks.onError(readErr?.message || "Stream read error")
+      }
+      return
+    }
+
+    clearTimeout(timeoutId)
+    callbacks.onDone(fullText, model, sessionId)
+  } catch (err: any) {
+    clearTimeout(timeoutId)
+    if (err?.name === "AbortError") {
+      callbacks.onError("Request timed out. The AI model did not respond within the time limit.")
+    } else {
+      callbacks.onError(err?.message || "Failed to get streaming response")
+    }
+  }
+}
 
 export async function suggestPrompts(
   documentId: string,
@@ -1014,6 +1199,16 @@ export async function askVision(
     body: formData,
   })
   return handleResponse<{ answer: string }>(res)
+}
+
+export async function getRandomPromptSuggestions(
+  count: number = 6,
+): Promise<{ suggestions: { id: number; title: string; prompt_text: string; icon: string; category: string }[]; count: number }> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/api/prompt-suggestions/random?count=${encodeURIComponent(String(count))}`, {
+    headers: authHeaders,
+  })
+  return handleResponse<{ suggestions: { id: number; title: string; prompt_text: string; icon: string; category: string }[]; count: number }>(res)
 }
 
 export async function transcribeAudio(

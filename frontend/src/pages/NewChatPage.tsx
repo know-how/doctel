@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from "react"
+import React, { useState, useEffect, useRef, useCallback } from "react"
 import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
 import { chatGlobally, chatGloballyStream, createChatSession, getChatMessages, setChatSessionModel, transcribeAudio, askVision, uploadDocumentWithProgress, getRandomPromptSuggestions, PromptSuggestion } from "../api/client"
 import { useModel } from "../context/ModelContext"
 import { ChatHeader, WelcomeScreen, ChatMessage, ChatInput } from "../components"
+import { VoiceAssistant } from "../components/voice/VoiceAssistant"
 import type { Message, Citation, AttachmentMeta } from "../components/ChatMessage"
 import { isCloudModel } from "../utils/modelUtils"
 
@@ -38,8 +39,7 @@ export const NewChatPage: React.FC = () => {
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const [isRecording, setIsRecording] = useState(false)
-  const [isTranscribing, setIsTranscribing] = useState(false)
+  const [showVoiceAssistant, setShowVoiceAssistant] = useState(false)
   const [attachedFile, setAttachedFile] = useState<File | null>(null)
   const [attachedPreview, setAttachedPreview] = useState<string | null>(null)
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
@@ -48,10 +48,9 @@ export const NewChatPage: React.FC = () => {
   const [promptSuggestions, setPromptSuggestions] = useState<PromptSuggestion[]>([])
   const [loadingPrompts, setLoadingPrompts] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const audioChunksRef = useRef<Blob[]>([])
   const chatEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const voiceAssistantRef = useRef<HTMLDivElement>(null)
   const { selectedModel: model, setSelectedModel: setModel, availableModels: models, modelCapabilities, modelLabels, modelDetails, loading: loadingModels, setModelForTask, v2Providers, taskDefaults } = useModel()
 
   // Load random prompt suggestions on mount
@@ -122,55 +121,29 @@ export const NewChatPage: React.FC = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages])
 
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" })
-      audioChunksRef.current = []
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data)
-      }
-      mediaRecorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop())
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-        await transcribeRecording(blob)
-      }
-      mediaRecorderRef.current = mediaRecorder
-      mediaRecorder.start()
-      setIsRecording(true)
-    } catch {
-      setIsRecording(false)
-    }
-  }
+  // ── Voice Assistant Integration ──────────────────────────────────────────
+  // When voice transcription completes, insert the text into the chat input
+  // so the user can review/edit and press Enter to send
+  const handleVoiceTranscription = useCallback((text: string) => {
+    setInput(text)
+    setShowVoiceAssistant(false)
+    // Focus the input so user can review/edit the transcribed text
+    setTimeout(() => inputRef.current?.focus(), 100)
+  }, [])
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop()
-      setIsRecording(false)
-    }
-  }
+  const handleVoiceCommand = useCallback((command: string, intent: string) => {
+    console.log("Voice command detected:", intent, command)
+    // Future: route to specific pages or actions based on intent
+  }, [])
 
-  const transcribeRecording = async (blob: Blob) => {
-    setIsTranscribing(true)
-    try {
-      const result = await transcribeAudio(blob)
-      const text = result.text?.trim()
-      if (text) {
-        setInput(text)
-      }
-    } catch {
-    } finally {
-      setIsTranscribing(false)
-    }
-  }
+  const handleVoiceResponse = useCallback((text: string) => {
+    // After full voice conversation mode completes, the AI response
+    // is already spoken via TTS. Nothing extra needed here.
+  }, [])
 
-  const toggleRecording = () => {
-    if (isRecording) {
-      stopRecording()
-    } else {
-      startRecording()
-    }
-  }
+  const toggleVoiceAssistant = useCallback(() => {
+    setShowVoiceAssistant((prev) => !prev)
+  }, [])
 
   const handleAttachFile = () => {
     fileInputRef.current?.click()
@@ -577,8 +550,27 @@ export const NewChatPage: React.FC = () => {
         </div>
       )}
 
+      {/* Voice Assistant Panel */}
+      {showVoiceAssistant && (
+        <div ref={voiceAssistantRef} style={{
+          flexShrink: 0, position: "relative", zIndex: 2,
+          padding: `0 40px 6px`,
+        }}>
+          <div style={{ maxWidth: 860, margin: "0 auto" }}>
+            <VoiceAssistant
+              onTranscriptionComplete={handleVoiceTranscription}
+              onCommandDetected={handleVoiceCommand}
+              onResponseComplete={handleVoiceResponse}
+              variant="compact"
+              defaultMode="push-to-talk"
+              conversationMode={false}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Input area — extracted component */}
-      <ChatInput t={t} loading={loading} input={input} onInputChange={setInput} onSend={handleSend} isRecording={isRecording} isTranscribing={isTranscribing} onToggleRecording={toggleRecording} onAttachFile={handleAttachFile} model={model} />
+      <ChatInput t={t} loading={loading} input={input} onInputChange={setInput} onSend={handleSend} isRecording={showVoiceAssistant} isTranscribing={false} onToggleRecording={toggleVoiceAssistant} onAttachFile={handleAttachFile} model={model} />
 
       <style>{`
         @keyframes dot-bounce {

@@ -5,6 +5,7 @@ import { getTokens } from "../theme/themeTokens"
 import { chatWithDocument, chatGlobally, getMyDocuments } from "../api/client"
 import { useModel } from "../context/ModelContext"
 import { MyDocument } from "../types/api"
+import { ModelDropdown } from "../components/ModelDropdown"
 
 interface ChatMessage {
   id: string
@@ -40,7 +41,7 @@ export function AnalyzeChatScreen({ documentId }: AnalyzeChatScreenProps) {
   const c = t.colors
   const { width } = useWindowDimensions()
   const isTablet = width >= 768
-  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, loading: loadingModels } = useModel()
+  const { selectedModel, setSelectedModel, availableModels, modelCapabilities, modelLabels, loading: loadingModels, v2Providers } = useModel()
 
   useEffect(() => {
     loadDocuments()
@@ -110,8 +111,8 @@ export function AnalyzeChatScreen({ documentId }: AnalyzeChatScreenProps) {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: c.bg }}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={90}
+      behavior="padding"
+      keyboardVerticalOffset={Platform.OS === "ios" ? 50 : 0}
     >
       {loadingDocs ? (
         <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
@@ -223,35 +224,15 @@ export function AnalyzeChatScreen({ documentId }: AnalyzeChatScreenProps) {
           </ScrollView>
 
           <View style={{ paddingHorizontal: isTablet ? t.spacing.lg : t.spacing.md, paddingVertical: 4, backgroundColor: c.cardBg, borderTopWidth: 1, borderTopColor: c.border }}>
-            {!loadingModels && availableModels.length > 0 && (
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8, marginTop: 4 }}>
-                {availableModels.map((m, i) => {
-                  const caps = modelCapabilities[m] || []
-                  const icons = caps.slice(0, 3).map((cap: string) => ({ reasoning: "🧠", vision: "👁️", audio: "🎤", code: "💻", fast: "⚡", large: "🐘", text: "💬", embedding: "📊" })[cap] || "").filter(Boolean).join(" ")
-                  return (
-                    <Pressable
-                      key={`amodel-${i}`}
-                      onPress={() => setSelectedModel(m)}
-                      style={{
-                        paddingHorizontal: 10,
-                        paddingVertical: 5,
-                        borderRadius: t.radii.lg,
-                        marginRight: 6,
-                        backgroundColor: m === selectedModel ? c.primary : c.surface,
-                        borderWidth: 1,
-                        borderColor: m === selectedModel ? c.primary : c.border,
-                      }}
-                    >
-                      <Text style={{ fontSize: 11, color: m === selectedModel ? "#FFF" : c.textSecondary, fontWeight: "600" }}>
-                        {m.length > 25 ? m.slice(0, 23) + "..." : m}
-                      </Text>
-                      {icons ? <Text style={{ fontSize: 9, color: m === selectedModel ? "#FFD" : c.textMuted, marginTop: 1, textAlign: "center" }}>{icons}</Text> : null}
-                    </Pressable>
-                  )
-                })}
-              </ScrollView>
-            )}
-            {loadingModels && <ActivityIndicator size="small" color={c.primary} style={{ marginBottom: 8 }} />}
+            <ModelDropdown
+              v2Providers={v2Providers}
+              availableModels={availableModels}
+              selectedModel={selectedModel}
+              modelCapabilities={modelCapabilities}
+              modelLabels={modelLabels}
+              loading={loadingModels}
+              onSelect={setSelectedModel}
+            />
 
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
               {suggestedPrompts.map((prompt, i) => (
