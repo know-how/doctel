@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +24,122 @@ from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
+# ── last-transcription-error tracker ────────────────────────────────────────
+_last_error: Optional[str] = None
+_last_error_time: Optional[float] = None
+
+
+def get_last_transcription_error() -> Optional[dict]:
+    """Return the most recent transcription error (if any)."""
+    global _last_error, _last_error_time
+    if _last_error is None:
+        return None
+    return {"error": _last_error, "timestamp": _last_error_time}
+
+
+def _set_last_error(msg: str) -> None:
+    global _last_error, _last_error_time
+    _last_error = msg
+    _last_error_time = time.time()
+
+
+def _clear_last_error() -> None:
+    global _last_error, _last_error_time
+    _last_error = None
+    _last_error_time = None
+
+
+def diagnose_transcription_failure() -> dict:
+    """
+    Inspect the environment and return a structured diagnosis of *why*
+    audio transcription is currently unavailable.
+
+    Returns a dict with:
+      "available" (bool), "primary" (str | None), "fallback" (str | None),
+      "details" (dict) with per-component status, and
+      "message" (str) — a single user-facing sentence.
+    """
+    result: dict = {"available": False, "primary": None, "fallback": None,
+                     "details": {}, "message": ""}
+
+    # 1. Gemini
+    gemini_ok = False
+    gemini_error: str | None = None
+    try:
+        from app.services.gemini_service import _api_key as _gemini_api_key
+        from app.services.gemini_service import get_display_name
+        key = _gemini_api_key()
+        gemini_ok = bool(key)
+        if not key:
+            gemini_error = "Gemini API key not configured via Admin > Providers or .env file"
+        else:
+            result["display_name"] = get_display_name()
+    except Exception as e:
+        gemini_error = f"Gemini module error: {e}"
+    result["details"]["gemini"] = {"available": gemini_ok,
+                                     "error": gemini_error}
+    if gemini_ok:
+        result["primary"] = "gemini"
+
+    # 2. Whisper local
+    whisper_ok = False
+    whisper_errors: list[str] = []
+    try:
+        import importlib.util as _imp_util
+        for mod_name in ("transformers", "torch", "librosa"):
+            if _imp_util.find_spec(mod_name) is None:
+                whisper_errors.append(f"Missing dependency: {mod_name}")
+        whisper_ok = len(whisper_errors) == 0
+    except Exception as e:
+        whisper_errors.append(str(e))
+    result["details"]["whisper_local"] = {"available": whisper_ok,
+                                             "errors": whisper_errors}
+    if whisper_ok:
+        result["fallback"] = "whisper_local"
+        if not result["primary"]:
+            result["primary"] = "whisper_local"
+
+    # 3. FFmpeg
+    ffmpeg_ok = False
+    try:
+        ffmpeg_ok = _has_ffmpeg()
+    except Exception:
+        pass
+    result["details"]["ffmpeg"] = {"available": ffmpeg_ok}
+
+    # 4. Build user-facing message
+    parts: list[str] = []
+    if not gemini_ok:
+        if gemini_error and "not configured" in gemini_error:
+            parts.append("GEMINI_API_KEY is not configured via Admin > Providers")
+        else:
+            parts.append("Gemini transcription unavailable")
+    if not whisper_ok:
+        if whisper_errors:
+            deps = [e.split(": ")[-1] for e in whisper_errors]
+            parts.append(f"Whisper dependencies missing: {', '.join(deps)}")
+        else:
+            parts.append("Whisper model not installed")
+    if not ffmpeg_ok:
+        parts.append("ffmpeg not found (required for video audio extraction)")
+
+    if parts:
+        result["message"] = "Audio transcription unavailable. " + " | ".join(parts)
+    else:
+        result["message"] = "Audio transcription is available."
+        result["available"] = True
+
+    # Include last stored error if any
+    last_err = get_last_transcription_error()
+    if last_err:
+        result["last_error"] = last_err
+
+    return result
+
 
 @dataclass
+
+
 class TranscriptionSegment:
     """A single timed segment from an audio/video transcription."""
     start_sec: float
@@ -70,6 +185,29 @@ _ZETDC_TRANSCRIPTION_PROMPT = (
 )
 
 
+def _get_audio_duration(file_path: str) -> Optional[float]:
+    """Extract audio/video duration in seconds via ffprobe.
+
+    Uses ffprobe (part of ffmpeg) to read the container's duration.
+    Returns None if ffprobe is unavailable or the file cannot be read.
+    """
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration", "-of",
+             "default=noprint_wrappers=1:nokey=1",
+             file_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+        return None
+    except (ValueError, subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    except Exception:
+        return None
+
+
 def _has_ffmpeg() -> bool:
     try:
         result = subprocess.run(
@@ -112,17 +250,29 @@ def _extract_audio_from_video(video_path: str, output_path: Optional[str] = None
 
 async def transcribe_via_gemini(file_path: str, mime_type: Optional[str] = None) -> Optional[str]:
     from app.services.gemini_service import is_configured as gemini_ok
+    from app.services.gemini_service import _api_key as _gemini_api_key
+    from app.services.gemini_service import _model_name as _gemini_model_name
+    logger.info("[TRANSCRIBE:GEMINI] Starting transcription for %s (mime=%s)", file_path, mime_type)
     if not gemini_ok():
+        logger.warning("[TRANSCRIBE:GEMINI] Gemini not configured — is_configured() returned False")
         return None
 
     import httpx
 
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    api_key = _gemini_api_key()
+    if not api_key:
+        logger.warning("[TRANSCRIBE:GEMINI] API key resolved to empty — cannot proceed")
+        return None
+    key_prefix = api_key[:8] + "..." if len(api_key) > 8 else "[present]"
+    model = _gemini_model_name()
+    logger.info("[TRANSCRIBE:GEMINI] Using model=%s api_key=%s", model, key_prefix)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
+    file_size = Path(file_path).stat().st_size if Path(file_path).exists() else -1
+    logger.info("[TRANSCRIBE:GEMINI] Audio file size=%d bytes, encoding base64", file_size)
     with open(file_path, "rb") as f:
         audio_b64 = base64.standard_b64encode(f.read()).decode()
+    logger.info("[TRANSCRIBE:GEMINI] Base64 payload size=%d bytes, sending to Gemini API", len(audio_b64))
 
     ext = Path(file_path).suffix.lower()
     resolved_mime = mime_type or AUDIO_MIME_MAP.get(ext, "audio/wav")
@@ -142,12 +292,17 @@ async def transcribe_via_gemini(file_path: str, mime_type: Optional[str] = None)
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
+            logger.info("[TRANSCRIBE:GEMINI] POST to %s (model=%s)", url[:80] + "...", model)
             resp = await client.post(url, json=body)
+            logger.info("[TRANSCRIBE:GEMINI] Response status=%d", resp.status_code)
             resp.raise_for_status()
             data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            logger.info("[TRANSCRIBE:GEMINI] Success — got %d chars of transcript", len(text))
+            return text
     except Exception as e:
-        logger.warning("Gemini transcription failed: %s", e)
+        logger.warning("[TRANSCRIBE:GEMINI] Failed: %s", e)
+        _set_last_error(f"Gemini API error: {e}")
         return None
 
 
@@ -182,6 +337,7 @@ async def transcribe_via_whisper_local(file_path: str) -> Optional[str]:
         return transcription.strip()
     except Exception as e:
         logger.warning("Local Whisper transcription failed: %s", e)
+        _set_last_error(f"Whisper local error: {e}")
         return None
 
 
@@ -274,12 +430,23 @@ async def transcribe_file_structured(
         else:
             logger.warning("Cannot extract audio from video %s", file_path)
 
-    # Get file size for duration estimate (rough)
+    # Get duration via ffprobe (available if ffmpeg is installed)
+    duration_sec = _get_audio_duration(file_path)
+    # Get file size for rough estimate if ffprobe unavailable
     file_size = Path(file_path).stat().st_size if Path(file_path).exists() else 0
+    if duration_sec is None and file_size > 0:
+        # Rough estimate: ~16 KB/s for 16-bit 16kHz mono WAV
+        if mime in ("audio/wav", "audio/mpeg"):
+            duration_sec = file_size / 16000.0
 
     # --- Try Gemini first (can return SRT-structured output) ---
     gemini_text = await transcribe_via_gemini(audio_path, mime)
+    _t_start = time.time()
     if gemini_text:
+        from app.services.gemini_service import _model_name as _gemini_model_name
+        gemini_model = _gemini_model_name()
+        _clear_last_error()
+        _t_elapsed = int((time.time() - _t_start) * 1000)
         # Try to parse as SRT (Gemini can be prompted to return SRT)
         segments = _parse_srt(gemini_text)
         if not segments:
@@ -307,9 +474,9 @@ async def transcribe_file_structured(
             full_text=full_text,
             segments=segments,
             language="en",
-            duration_sec=None,
+            duration_sec=duration_sec,
             source_type=source_type,
-            model_used="gemini-2.5-flash",
+            model_used=gemini_model,
             word_count=word_count,
         )
 
@@ -322,6 +489,7 @@ async def transcribe_file_structured(
             pass
 
     if whisper_text:
+        _clear_last_error()
         word_count = len(whisper_text.split())
         return TranscriptionResult(
             full_text=whisper_text,
@@ -332,7 +500,7 @@ async def transcribe_file_structured(
                 confidence=0.8,
             )],
             language="en",
-            duration_sec=None,
+            duration_sec=duration_sec,
             source_type=source_type,
             model_used=f"whisper-local",
             word_count=word_count,
@@ -344,11 +512,13 @@ async def transcribe_file_structured(
             Path(temp_audio).unlink()
         except Exception:
             pass
+    if _last_error is None:
+        _set_last_error("All transcription methods failed: Gemini API unavailable and local Whisper unavailable")
     return TranscriptionResult(
         full_text="",
         segments=[],
         language="en",
-        duration_sec=None,
+        duration_sec=duration_sec,
         source_type=source_type,
         model_used="",
         word_count=0,

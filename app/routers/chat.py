@@ -305,6 +305,46 @@ async def update_chat_session(
     return {"ok": True}
 
 
+@router.get("/api/chat/sessions/{session_id}/state")
+async def get_chat_session_state(
+    session_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the conversation_state (including audio context) for a session.
+
+    Used by the frontend to restore audio context when re-opening a chat.
+    """
+    from app.services.session_state_service import get_session_state
+
+    res = await db.execute(select(DbSession).where(DbSession.session_uuid == session_id))
+    sess = res.scalar_one_or_none()
+    if not sess:
+        return JSONResponse(status_code=404, content={"error": "Session not found"})
+    if sess.user_id != user.id and user.role != "admin":
+        return JSONResponse(status_code=403, content={"error": "Access denied"})
+
+    state = await get_session_state(db, session_id)
+    if not state:
+        return {"session_id": session_id, "audio_context": None}
+
+    # Extract only the audio-related fields for the frontend
+    audio_source = state.get("current_audio_source")
+    if not audio_source:
+        return {"session_id": session_id, "audio_context": None}
+
+    audio_context = {
+        "filename": audio_source,
+        "transcript": (state.get("current_transcript") or ""),
+        "summary": (state.get("current_audio_summary") or ""),
+        "duration_sec": state.get("audio_duration_sec"),
+        "entities": state.get("audio_entities", []),
+        "topics": state.get("audio_topics", []),
+        "speaker_count": state.get("audio_speaker_count"),
+    }
+    return {"session_id": session_id, "audio_context": audio_context}
+
+
 @router.delete("/api/chat/sessions/{session_id}")
 async def delete_chat_session(
     session_id: str,

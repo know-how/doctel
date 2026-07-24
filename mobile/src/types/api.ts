@@ -211,6 +211,7 @@ export interface ModelsAvailableResponse {
   embed_model?: string
   vision_model?: string
   ollama_healthy?: boolean
+  defaults?: Record<string, string>
   v2_providers?: V2Provider[]
   v2_auto_routing?: boolean
 }
@@ -358,6 +359,332 @@ export interface V2ReferenceResponse {
 
 export interface V2RoutingSelectResponse {
   model: V2ModelMetadata & { provider_id: string; provider_name?: string; selection?: string; reason?: string }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Knowledge Asset Types (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export interface KnowledgeAsset {
+  id: string
+  asset_type: "document" | "audio" | "video" | "csv" | "image" | "database"
+  title: string
+  description?: string
+  tags?: string[]
+  entities?: string[]
+  topics?: string[]
+  metadata?: Record<string, any>
+  workspace_id?: string
+  repository_id?: string
+  source_uri?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface KnowledgeAssetRelationship {
+  id?: string
+  source_asset_id: string
+  target_asset_id: string
+  type: string
+  metadata?: Record<string, any>
+  created_at?: string
+}
+
+export interface KnowledgeAssetListResponse {
+  assets: KnowledgeAsset[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface KnowledgeAssetRelatedResponse {
+  related: KnowledgeAsset[]
+  total: number
+}
+
+export interface KnowledgeAssetStatsResponse {
+  counts: Record<string, number>
+  total: number
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Knowledge Space Types (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export interface KnowledgeSpace {
+  space_id: string
+  name: string
+  description?: string
+  department?: string
+  tags?: string[]
+  owner_id?: string
+  is_active?: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface KnowledgeSpaceListResponse {
+  spaces: KnowledgeSpace[]
+  total: number
+}
+
+export interface KnowledgeSpaceAssetsResponse {
+  assets: KnowledgeAsset[]
+  total: number
+}
+
+export interface KnowledgeSpaceInsightsResponse {
+  space_id: string
+  name: string
+  asset_counts: Record<string, number>
+  recent_assets: KnowledgeAsset[]
+  related_spaces: KnowledgeSpace[]
+  media_breakdown: Record<string, number>
+}
+
+export interface KnowledgeSpaceRelatedResponse {
+  related: KnowledgeSpace[]
+  total: number
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Knowledge Graph Types (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export interface GraphNode {
+  id: string
+  node_id: string
+  node_type: string
+  label: string
+  description?: string
+  metadata?: Record<string, any>
+  importance?: number
+  source_document_id?: string
+  is_active?: boolean
+  created_at?: string
+}
+
+export interface GraphEdge {
+  id: number
+  source_node_id: number
+  target_node_id: number
+  relation: string
+  weight?: number
+  source_document_id?: string
+  metadata?: Record<string, any>
+  created_at?: string
+}
+
+export interface GraphNodeListResponse {
+  nodes: GraphNode[]
+  total: number
+}
+
+export interface GraphEdgeListResponse {
+  edges: GraphEdge[]
+  total: number
+}
+
+export interface GraphDiscoverByEntityResponse {
+  entity: string
+  related_entities: any[]
+  related_assets: KnowledgeAsset[]
+  total_entities: number
+  total_assets: number
+}
+
+export interface GraphPathResponse {
+  paths: { nodes: GraphNode[]; edges: GraphEdge[] }[]
+  total_paths: number
+}
+
+export interface GraphExploreResponse {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  total_nodes: number
+  total_edges_shown: number
+}
+
+export interface GraphStatsResponse {
+  total_nodes: number
+  total_edges: number
+  node_type_counts: Record<string, number>
+  edge_type_counts: Record<string, number>
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Agent Runtime Types (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export interface AgentInfo {
+  agent_type: string
+  name?: string
+  description?: string
+  purpose?: string
+  tools?: string[]
+}
+
+export interface AgentResult {
+  agent_type: string
+  status: string
+  duration_ms: number
+  summary?: string
+  key_findings?: string[]
+  entities_count?: number
+  actions_count?: number
+  decisions_count?: number
+  risks_count?: number
+  has_evidence?: boolean
+  error?: string
+}
+
+export interface AgentExecutionBundle {
+  agents_executed: number
+  agent_results: AgentResult[]
+  execution_summary?: string
+  merged_entities?: string[]
+  merged_actions?: any[]
+  merged_decisions?: any[]
+  merged_risks?: any[]
+  total_duration_ms?: number
+}
+
+export interface AgentExecuteResponse {
+  execution_summary?: string
+  entities?: string[]
+  actions?: any[]
+  decisions?: any[]
+  risks?: any[]
+  agent_results?: AgentResult[]
+  total_duration_ms?: number
+}
+
+export interface AgentMemoryEntry {
+  id: number
+  agent_execution_id: number
+  session_id?: number
+  memory_type: string
+  key: string
+  value: any
+  created_at?: string
+}
+
+export interface AgentMemoryContextResponse {
+  session_id: number
+  context: string
+  context_length: number
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Workflow Engine Types (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export interface WorkflowDefinition {
+  workflow_type: string
+  name: string
+  description: string
+  agent_count: number
+  expected_deliverables: string[]
+  success_criteria: string[]
+}
+
+export interface WorkflowStep {
+  step_id: number
+  agent_type: string
+  purpose: string
+  status: string
+  result?: Record<string, any>
+  duration_ms?: number
+  error?: string
+}
+
+export interface WorkflowExecution {
+  execution_id: string
+  workflow_type: string
+  objective: string
+  status: string
+  steps: WorkflowStep[]
+  deliverables?: Record<string, any>
+  merged_entities?: string[]
+  merged_actions_count?: number
+  merged_decisions_count?: number
+  merged_risks_count?: number
+  execution_summary?: string
+  error?: string
+  started_at?: string
+  completed_at?: string
+  total_duration_ms?: number
+}
+
+export interface WorkflowExecuteResponse extends WorkflowExecution {}
+
+export interface WorkflowListResponse {
+  workflows: WorkflowDefinition[]
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Chat / Streaming Types (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export interface ToolPlanTool {
+  tool: string
+  purpose: string
+  optional: boolean
+}
+
+export interface ExecutionMetadata {
+  tools_executed?: string[]
+  completed?: number
+  failed?: number
+  total_time_sec?: number
+  results?: Record<string, { elapsed_sec: number; status: string; error?: string }>
+  errors?: Record<string, string>
+}
+
+export interface ExecutionPlan {
+  intent: string
+  tools: ToolPlanTool[]
+  estimated_steps: number
+  render_hint: string
+  citation_mode: string
+  strategy_summary: string
+  execution_metadata?: ExecutionMetadata
+  agent_execution?: AgentExecutionBundle
+}
+
+export interface DocumentStreamCallbacks {
+  onChunk: (chunk: string, model: string, sessionId: string) => void
+  onReasoning?: (reasoning: string, model: string, sessionId: string) => void
+  onCitations?: (citations: any[]) => void
+  onMetadata?: (metadata: Record<string, any>) => void
+  onDone: (fullText: string, model: string, sessionId: string) => void
+  onError: (error: string) => void
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Audio Context Types (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export interface AudioContextData {
+  filename: string
+  transcript: string
+  summary?: string
+  durationSec?: number | null
+  entities?: string[]
+  topics?: string[]
+  speakerCount?: number
+}
+
+export interface MeetingAnalysis {
+  summary: string
+  participants: string[]
+  topics: string[]
+  decisions: { decision: string; made_by?: string }[]
+  action_items: { action: string; owner?: string; priority?: string; due_date?: string }[]
+  risks: { risk: string; severity?: string }[]
+  follow_ups: string[]
+  key_dates: string[]
+  systems_mentioned: string[]
 }
 
 export interface ModelPullStatusResponse {

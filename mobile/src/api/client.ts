@@ -1,4 +1,4 @@
-import {
+import type {
   DocumentCreateResponse,
   DocumentAnalysisResponse,
   PromptListResponse,
@@ -38,6 +38,32 @@ import {
   V2VisibleChatModelsResponse,
   V2RoutingStatusResponse,
   V2RoutingSelectResponse,
+  // Knowledge Asset types
+  KnowledgeAsset,
+  KnowledgeAssetListResponse,
+  KnowledgeAssetRelatedResponse,
+  KnowledgeAssetStatsResponse,
+  // Knowledge Space types
+  KnowledgeSpace,
+  KnowledgeSpaceListResponse,
+  KnowledgeSpaceAssetsResponse,
+  KnowledgeSpaceRelatedResponse,
+  KnowledgeSpaceInsightsResponse,
+  // Knowledge Graph types
+  GraphNode,
+  GraphNodeListResponse,
+  GraphEdgeListResponse,
+  GraphDiscoverByEntityResponse,
+  GraphPathResponse,
+  GraphExploreResponse,
+  // Agent Runtime types
+  AgentInfo,
+  AgentExecutionBundle,
+  AgentExecuteResponse,
+  AgentMemoryContextResponse,
+  // Workflow Engine types
+  WorkflowDefinition,
+  WorkflowExecuteResponse,
 } from "../types/api"
 import AsyncStorage from "@react-native-async-storage/async-storage"
 
@@ -693,13 +719,37 @@ export interface StreamCallbacks {
 
 /**
  * Send a streaming chat request using SSE (Server-Sent Events) via fetch + ReadableStream.
- * Falls back to the non-streaming endpoint if ReadableStream is not available.
+ * On React Native (Expo Go), ReadableStream may not be available via fetch,
+ * so we use XMLHttpRequest for SSE streaming instead, which is more widely supported.
  */
 export async function chatGloballyStream(
   payload: ChatRequest,
   callbacks: StreamCallbacks,
   timeoutMs: number = 120_000,
 ): Promise<void> {
+  // ── Pre-check: React Native's fetch does NOT support ReadableStream on
+  // response bodies. Checking here BEFORE the streaming fetch avoids firing
+  // the streaming endpoint at all — which would otherwise cause the backend
+  // to process the same prompt twice (once for the stream, once for the
+  // fallback non-streaming call).
+  if (typeof ReadableStream !== "function") {
+    try {
+      const fallbackRes = await chatGlobally(payload)
+      const ans = (fallbackRes as any).answer || ""
+      const reasoning = (fallbackRes as any).reasoning || ""
+      if (reasoning && callbacks.onReasoning) {
+        callbacks.onReasoning(reasoning, "", "")
+      }
+      if (ans) {
+        callbacks.onChunk(ans, "", "")
+      }
+      callbacks.onDone(ans, "", "")
+    } catch (fallbackErr: any) {
+      callbacks.onError(fallbackErr?.message || "Request failed")
+    }
+    return
+  }
+
   const authHeaders = await buildAuthHeaders()
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
@@ -732,10 +782,15 @@ export async function chatGloballyStream(
     const reader = res.body?.getReader()
     if (!reader) {
       clearTimeout(timeoutId)
-      // ReadableStream not available — fall back to non-streaming
+      // ReadableStream is available globally but fetch response body is null
+      // (React Native Hermes quirk). Fall back to non-streaming endpoint.
       try {
         const fallbackRes = await chatGlobally(payload)
         const ans = (fallbackRes as any).answer || ""
+        const reasoning = (fallbackRes as any).reasoning || ""
+        if (reasoning && callbacks.onReasoning) {
+          callbacks.onReasoning(reasoning, "", "")
+        }
         if (ans) {
           callbacks.onChunk(ans, "", "")
         }
@@ -1211,6 +1266,587 @@ export async function getRandomPromptSuggestions(
   return handleResponse<{ suggestions: { id: number; title: string; prompt_text: string; icon: string; category: string }[]; count: number }>(res)
 }
 
+/* ══════════════════════════════════════════════════════════════════════════════
+   Knowledge Asset API (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function getKnowledgeAssets(
+  query: string = "",
+  asset_type?: string,
+  limit: number = 20,
+  offset: number = 0,
+): Promise<KnowledgeAssetListResponse> {
+  const params = new URLSearchParams()
+  if (query) params.set("query", query)
+  if (asset_type) params.set("asset_type", asset_type)
+  params.set("limit", String(limit))
+  params.set("offset", String(offset))
+  const res = await fetch(`${BASE_URL}/api/knowledge-assets?${params}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<KnowledgeAssetListResponse>(res)
+}
+
+export async function getKnowledgeAsset(assetId: string): Promise<KnowledgeAsset> {
+  const res = await fetch(`${BASE_URL}/api/knowledge-assets/${encodeURIComponent(assetId)}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<KnowledgeAsset>(res)
+}
+
+export async function findRelatedAssets(
+  assetId: string,
+  limit: number = 10,
+): Promise<KnowledgeAssetRelatedResponse> {
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-assets/${encodeURIComponent(assetId)}/related?limit=${limit}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<KnowledgeAssetRelatedResponse>(res)
+}
+
+export async function getAssetStats(): Promise<KnowledgeAssetStatsResponse> {
+  const res = await fetch(`${BASE_URL}/api/knowledge-assets/stats/by-type`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<KnowledgeAssetStatsResponse>(res)
+}
+
+export async function exploreKnowledge(
+  query: string = "",
+  asset_type?: string,
+  limit: number = 20,
+): Promise<any> {
+  const params = new URLSearchParams()
+  if (query) params.set("query", query)
+  if (asset_type) params.set("asset_type", asset_type)
+  params.set("limit", String(limit))
+  const res = await fetch(`${BASE_URL}/api/knowledge-assets/discover/explore?${params}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<any>(res)
+}
+
+export async function getAssetRelationships(
+  assetId: string,
+): Promise<{ relationships: any[]; total: number }> {
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-assets/${encodeURIComponent(assetId)}/relationships`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<{ relationships: any[]; total: number }>(res)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Knowledge Space API (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function getKnowledgeSpaces(
+  query: string = "",
+  department?: string,
+  limit: number = 20,
+  offset: number = 0,
+): Promise<KnowledgeSpaceListResponse> {
+  const params = new URLSearchParams()
+  if (query) params.set("query", query)
+  if (department) params.set("department", department)
+  params.set("limit", String(limit))
+  params.set("offset", String(offset))
+  const res = await fetch(`${BASE_URL}/api/knowledge-spaces?${params}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<KnowledgeSpaceListResponse>(res)
+}
+
+export async function getKnowledgeSpace(spaceId: string): Promise<KnowledgeSpace> {
+  const res = await fetch(`${BASE_URL}/api/knowledge-spaces/${encodeURIComponent(spaceId)}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<KnowledgeSpace>(res)
+}
+
+export async function getKnowledgeSpaceAssets(
+  spaceId: string,
+  asset_type?: string,
+  limit: number = 50,
+  offset: number = 0,
+): Promise<KnowledgeSpaceAssetsResponse> {
+  const params = new URLSearchParams()
+  if (asset_type) params.set("asset_type", asset_type)
+  params.set("limit", String(limit))
+  params.set("offset", String(offset))
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-spaces/${encodeURIComponent(spaceId)}/assets?${params}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<KnowledgeSpaceAssetsResponse>(res)
+}
+
+export async function getRelatedSpaces(
+  spaceId: string,
+  limit: number = 5,
+): Promise<KnowledgeSpaceRelatedResponse> {
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-spaces/${encodeURIComponent(spaceId)}/related?limit=${limit}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<KnowledgeSpaceRelatedResponse>(res)
+}
+
+export async function getSpaceInsights(spaceId: string): Promise<KnowledgeSpaceInsightsResponse> {
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-spaces/${encodeURIComponent(spaceId)}/insights`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<KnowledgeSpaceInsightsResponse>(res)
+}
+
+export async function discoverSpacesByQuestion(
+  question: string,
+  limit: number = 5,
+): Promise<KnowledgeSpaceInsightsResponse> {
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-spaces/discover/by-question?question=${encodeURIComponent(question)}&limit=${limit}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<KnowledgeSpaceInsightsResponse>(res)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Knowledge Graph API (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function searchGraphNodes(
+  query: string = "",
+  node_type?: string,
+  limit: number = 20,
+  offset: number = 0,
+): Promise<GraphNodeListResponse> {
+  const params = new URLSearchParams()
+  if (query) params.set("query", query)
+  if (node_type) params.set("node_type", node_type)
+  params.set("limit", String(limit))
+  params.set("offset", String(offset))
+  const res = await fetch(`${BASE_URL}/api/knowledge-graph/nodes?${params}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<GraphNodeListResponse>(res)
+}
+
+export async function getGraphNode(nodeId: string): Promise<GraphNode> {
+  const res = await fetch(`${BASE_URL}/api/knowledge-graph/nodes/${encodeURIComponent(nodeId)}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<GraphNode>(res)
+}
+
+export async function getGraphNodeEdges(
+  nodeId: string,
+  direction: "outgoing" | "incoming" | "both" = "both",
+  limit: number = 50,
+): Promise<GraphEdgeListResponse> {
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-graph/nodes/${encodeURIComponent(nodeId)}/edges?direction=${direction}&limit=${limit}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<GraphEdgeListResponse>(res)
+}
+
+export async function discoverByGraphEntity(
+  entity: string,
+  limit: number = 20,
+): Promise<GraphDiscoverByEntityResponse> {
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-graph/discover/by-entity?entity=${encodeURIComponent(entity)}&limit=${limit}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<GraphDiscoverByEntityResponse>(res)
+}
+
+export async function findGraphPath(
+  source: string,
+  target: string,
+  maxDepth: number = 5,
+): Promise<GraphPathResponse> {
+  const res = await fetch(
+    `${BASE_URL}/api/knowledge-graph/path?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}&max_depth=${maxDepth}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<GraphPathResponse>(res)
+}
+
+export async function exploreGraph(
+  query: string = "",
+  node_type?: string,
+  limit: number = 50,
+): Promise<GraphExploreResponse> {
+  const params = new URLSearchParams()
+  if (query) params.set("query", query)
+  if (node_type) params.set("node_type", node_type)
+  params.set("limit", String(limit))
+  const res = await fetch(`${BASE_URL}/api/knowledge-graph/explore?${params}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<GraphExploreResponse>(res)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Agent Runtime API (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function listAgents(): Promise<AgentInfo[]> {
+  const res = await fetch(`${BASE_URL}/api/agent/agents`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<AgentInfo[]>(res)
+}
+
+export async function executeAgentPlan(payload: {
+  query: string
+  intent?: string
+  session_id?: number
+  document_id?: string
+  project_ids?: number[]
+  audio_transcript?: string
+}): Promise<AgentExecutionBundle> {
+  const res = await fetch(`${BASE_URL}/api/agent/execute`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await buildAuthHeaders()),
+    },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<AgentExecutionBundle>(res)
+}
+
+export async function executeAgentPlanSummary(payload: {
+  query: string
+  intent?: string
+  session_id?: number
+  document_id?: string
+  project_ids?: number[]
+  audio_transcript?: string
+}): Promise<AgentExecuteResponse> {
+  const res = await fetch(`${BASE_URL}/api/agent/execute/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await buildAuthHeaders()),
+    },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<AgentExecuteResponse>(res)
+}
+
+export async function getMemoryContext(
+  sessionId: number,
+  maxTokens: number = 2000,
+): Promise<AgentMemoryContextResponse> {
+  const res = await fetch(
+    `${BASE_URL}/api/agent/memory-context/${sessionId}?max_tokens=${maxTokens}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<AgentMemoryContextResponse>(res)
+}
+
+export async function buildMemoryContext(payload: {
+  session_id?: number
+  audio_transcript?: string
+}): Promise<{ context: string; context_length: number }> {
+  const res = await fetch(`${BASE_URL}/api/agent/memory-context/build`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await buildAuthHeaders()),
+    },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<{ context: string; context_length: number }>(res)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Workflow Engine API (P0 mobile-web parity)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function listWorkflowTemplates(): Promise<WorkflowDefinition[]> {
+  const res = await fetch(`${BASE_URL}/api/workflows/templates`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<WorkflowDefinition[]>(res)
+}
+
+export async function executeWorkflow(payload: {
+  objective: string
+  session_id?: number
+  project_ids?: number[]
+  document_id?: string
+  force_type?: string
+}): Promise<WorkflowExecuteResponse> {
+  const res = await fetch(`${BASE_URL}/api/workflows/execute`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await buildAuthHeaders()),
+    },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<WorkflowExecuteResponse>(res)
+}
+
+export async function executeWorkflowSummary(payload: {
+  objective: string
+  session_id?: number
+  project_ids?: number[]
+  document_id?: string
+  force_type?: string
+}): Promise<WorkflowExecuteResponse> {
+  const res = await fetch(`${BASE_URL}/api/workflows/execute/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await buildAuthHeaders()),
+    },
+    body: JSON.stringify(payload),
+  })
+  return handleResponse<WorkflowExecuteResponse>(res)
+}
+
+export async function getWorkflowExecution(
+  executionId: string,
+): Promise<any> {
+  const res = await fetch(
+    `${BASE_URL}/api/workflows/executions/${encodeURIComponent(executionId)}`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<any>(res)
+}
+
+export async function listWorkflowExecutions(
+  limit: number = 20,
+  status?: string,
+  session_id?: number,
+): Promise<any> {
+  const params = new URLSearchParams()
+  params.set("limit", String(limit))
+  if (status) params.set("status", status)
+  if (session_id) params.set("session_id", String(session_id))
+  const res = await fetch(`${BASE_URL}/api/workflows/executions?${params}`, {
+    headers: await buildAuthHeaders(),
+  })
+  return handleResponse<any>(res)
+}
+
+export async function getWorkflowDeliverables(
+  executionId: string,
+): Promise<any> {
+  const res = await fetch(
+    `${BASE_URL}/api/workflows/executions/${encodeURIComponent(executionId)}/deliverables`,
+    { headers: await buildAuthHeaders() },
+  )
+  return handleResponse<any>(res)
+}
+
+export async function resolveWorkflowObjective(
+  objective: string,
+): Promise<any> {
+  const res = await fetch(`${BASE_URL}/api/workflows/resolve`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await buildAuthHeaders()),
+    },
+    body: JSON.stringify({ objective }),
+  })
+  return handleResponse<any>(res)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Document Streaming API (P0 mobile-web parity)
+   Uses same SSE pattern as chatGloballyStream
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function chatWithDocumentStream(
+  documentId: string,
+  payload: ChatRequest,
+  callbacks: StreamCallbacks & {
+    onCitations?: (citations: any[]) => void
+    onMetadata?: (metadata: Record<string, any>) => void
+  },
+  timeoutMs: number = 120_000,
+): Promise<void> {
+  // Fallback: if ReadableStream not available, use non-streaming endpoint
+  if (typeof ReadableStream !== "function") {
+    try {
+      const fallbackRes = await chatWithDocument(documentId, payload)
+      const ans = (fallbackRes as any).answer || ""
+      const reasoning = (fallbackRes as any).reasoning || ""
+      if (reasoning && callbacks.onReasoning) {
+        callbacks.onReasoning(reasoning, "", "")
+      }
+      const citations = (fallbackRes as any).citations || []
+      if (callbacks.onCitations) {
+        callbacks.onCitations(citations)
+      }
+      if (ans) {
+        callbacks.onChunk(ans, "", "")
+      }
+      callbacks.onDone(ans, "", "")
+    } catch (fallbackErr: any) {
+      callbacks.onError(fallbackErr?.message || "Request failed")
+    }
+    return
+  }
+
+  const authHeaders = await buildAuthHeaders()
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(
+      `${BASE_URL}/api/ask/${encodeURIComponent(documentId)}/stream`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      },
+    )
+
+    if (!res.ok) {
+      clearTimeout(timeoutId)
+      const errText = await res.text().catch(() => "")
+      let errMsg: string
+      try {
+        const parsed = JSON.parse(errText)
+        errMsg = parsed.error || parsed.message || `HTTP ${res.status}`
+      } catch {
+        errMsg = `HTTP ${res.status}${errText ? ": " + errText : ""}`
+      }
+      callbacks.onError(errMsg)
+      return
+    }
+
+    const reader = res.body?.getReader()
+    if (!reader) {
+      clearTimeout(timeoutId)
+      try {
+        const fallbackRes = await chatWithDocument(documentId, payload)
+        const ans = (fallbackRes as any).answer || ""
+        const reasoning = (fallbackRes as any).reasoning || ""
+        if (reasoning && callbacks.onReasoning) {
+          callbacks.onReasoning(reasoning, "", "")
+        }
+        const citations = (fallbackRes as any).citations || []
+        if (callbacks.onCitations) {
+          callbacks.onCitations(citations)
+        }
+        if (ans) {
+          callbacks.onChunk(ans, "", "")
+        }
+        callbacks.onDone(ans, "", "")
+      } catch (fallbackErr: any) {
+        callbacks.onError(fallbackErr?.message || "Fallback failed")
+      }
+      return
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ""
+    let fullText = ""
+    let model = ""
+    let sessionId = ""
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n")
+        buffer = lines.pop() || ""
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed.startsWith("data: ")) continue
+          const dataPayload = trimmed.slice(6).trim()
+
+          if (dataPayload === "[DONE]") {
+            clearTimeout(timeoutId)
+            callbacks.onDone(fullText, model, sessionId)
+            return
+          }
+
+          try {
+            const data = JSON.parse(dataPayload)
+            if (data.error) {
+              clearTimeout(timeoutId)
+              callbacks.onError(data.error)
+              return
+            }
+            model = data.model || model
+            sessionId = data.session_id || sessionId
+
+            if (data.type === "reasoning") {
+              if (callbacks.onReasoning) {
+                callbacks.onReasoning(data.content || "", model, sessionId)
+              }
+            } else if (data.citations) {
+              if (callbacks.onCitations) {
+                callbacks.onCitations(data.citations)
+              }
+            } else if (data.metadata) {
+              if (callbacks.onMetadata) {
+                callbacks.onMetadata(data.metadata)
+              }
+            } else if (data.type === "content") {
+              fullText += data.content || ""
+              callbacks.onChunk(data.content || "", model, sessionId)
+            } else if (data.chunk) {
+              fullText += data.chunk
+              callbacks.onChunk(data.chunk, model, sessionId)
+            }
+          } catch {
+            // skip malformed JSON lines
+          }
+        }
+      }
+    } catch (readErr: any) {
+      clearTimeout(timeoutId)
+      if (readErr?.name !== "AbortError") {
+        callbacks.onError(readErr?.message || "Stream read error")
+      }
+      return
+    }
+
+    clearTimeout(timeoutId)
+    callbacks.onDone(fullText, model, sessionId)
+  } catch (err: any) {
+    clearTimeout(timeoutId)
+    if (err?.name === "AbortError") {
+      callbacks.onError("Request timed out. The AI model did not respond within the time limit.")
+    } else {
+      callbacks.onError(err?.message || "Failed to get streaming response")
+    }
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Audio streaming chat — ask with audio context attached to session
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+export async function chatWithAudioStream(
+  payload: ChatRequest & { audio_source?: string; transcript?: string },
+  callbacks: StreamCallbacks,
+  timeoutMs: number = 120_000,
+): Promise<void> {
+  // Reuse chatGloballyStream logic — audio context is injected server-side via session state
+  return chatGloballyStream(payload, callbacks, timeoutMs)
+}
+
 export async function transcribeAudio(
   fileUri: string,
   fileName: string,
@@ -1461,6 +2097,19 @@ export async function v2GetReference(): Promise<V2ReferenceResponse> {
     headers: await buildAuthHeaders(),
   })
   return handleResponse<V2ReferenceResponse>(res)
+}
+
+export async function getDocumentChunks(documentId: string): Promise<{
+  document_id: string
+  filename: string
+  total_chunks: number
+  chunks: { chunk_index: number; text: string }[]
+}> {
+  const authHeaders = await buildAuthHeaders()
+  const res = await fetch(`${BASE_URL}/api/documents/${encodeURIComponent(documentId)}/chunks`, {
+    headers: authHeaders,
+  })
+  return handleResponse<any>(res)
 }
 
 export async function v2GetVisibleChatModels(): Promise<V2VisibleChatModelsResponse> {

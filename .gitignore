@@ -1,31 +1,105 @@
-
+# =========================
 # Python
+# =========================
 .venv/
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# Models
+# =========================
+# AI Models
+# =========================
 *.gguf
 
-# Local data
+# =========================
+# LocalAI
+# =========================
 localai/data/
 localai/cache/
-
-# VS Code
-.vscode/
-
-# Windows
-Thumbs.db
-
-
 localai/logs/
 *.log
 
-.venv/
-*.gguf
-__pycache__/
-
+# =========================
+# Node / React / React Native
+# =========================
+node_modules/
 frontend/node_modules/
 mobile/node_modules/
-node_modules/
+
+# Build output
+frontend/dist/
+mobile/.expo/
+mobile/android/
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# Windows
+# =========================
+Thumbs.db
+Desktop.ini
+
+# Reserved Windows filenames accidentally created
+nul
+**/nul
+
+# =========================
+# Databases
+# =========================
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# =========================
+# Python cache files
+# =========================
+**/__pycache__/
+
+# =========================
+# Application data
+# =========================
+data/chroma/
+
+# =========================
+# Temporary files
+# =========================
+tmp_otp.txt
+_temp*
+_check*
+_block*
+_section*
+_sig*
+_eg*
+_stamp*
+
+# =========================
+# Environment files
+# =========================
+.env
+.env.*
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+
+# =========================
+# Testing / Coverage
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Logs
+# =========================
+logs/
+*.out
+*.err

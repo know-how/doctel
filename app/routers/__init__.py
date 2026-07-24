@@ -60,6 +60,11 @@ def include_routers(app) -> None:
         "processing_control",
         "admin_jobs",
         "voice",
+        "knowledge_assets",
+        "knowledge_spaces",
+        "knowledge_graph",
+        "agent_runtime",
+        "workflow_engine",
     ]
     for name in _ROUTERS:
         router = _try_import_router(name)
@@ -84,4 +89,5 @@ __all__ = [
     "analyze_router",
     "outputs_router",
     "compat_router",
+    "knowledge_assets_router",
 ]

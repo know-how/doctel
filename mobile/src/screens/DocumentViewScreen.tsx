@@ -7,6 +7,7 @@ import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
 import {
   getDocumentAnalysis,
+  getDocumentChunks,
   downloadDocumentFileApi,
   getDocumentLibrary,
   getIngestStatus,
@@ -40,6 +41,9 @@ export function DocumentViewScreen({ documentId, onNavigate, filename: initialFi
   const [error, setError] = useState<string | null>(null)
   const [downloading, setDownloading] = useState(false)
   const [ingestStatus, setIngestStatus] = useState<string | null>(null)
+  const [chunks, setChunks] = useState<{ chunk_index: number; text: string }[] | null>(null)
+  const [loadingChunks, setLoadingChunks] = useState(false)
+  const [showContent, setShowContent] = useState(false)
 
   const { letter: fileLetter, color: fileColor } = fileIconInfo(initialFilename || documentInfo?.filename)
 
@@ -92,11 +96,24 @@ export function DocumentViewScreen({ documentId, onNavigate, filename: initialFi
             created_at: "",
           })
         }
-      } catch (err: any) {
-        setError(err?.message || "Failed to load document")
+      // Load document chunks for content preview
+      try {
+        setLoadingChunks(true)
+        const chunkRes = await getDocumentChunks(documentId)
+        if (chunkRes?.chunks && chunkRes.chunks.length > 0) {
+          setChunks(chunkRes.chunks)
+        }
+      } catch {
+        // Chunks not available — document may still be processing
+        setChunks(null)
       } finally {
-        setLoading(false)
+        setLoadingChunks(false)
       }
+    } catch (err: any) {
+      setError(err?.message || "Failed to load document")
+    } finally {
+      setLoading(false)
+    }
     }
     load()
   }, [documentId])
@@ -559,6 +576,119 @@ export function DocumentViewScreen({ documentId, onNavigate, filename: initialFi
             <Text style={{ fontSize: 10, color: c.textMuted }}>🆔 ID:</Text>
             <Text style={{ fontSize: 10, color: c.textSecondary, fontWeight: "500" }}>{documentId}</Text>
           </View>
+        </View>
+      )}
+
+      {/* ── Document Content Preview ── */}
+      {chunks && chunks.length > 0 && (
+        <View style={{
+          backgroundColor: c.cardBg,
+          borderRadius: 12,
+          borderWidth: 1,
+          borderColor: c.border,
+          marginBottom: 12,
+          overflow: "hidden",
+        }}>
+          <Pressable
+            onPress={() => setShowContent(!showContent)}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+              paddingHorizontal: 14,
+              paddingVertical: 12,
+              backgroundColor: c.surfaceActive,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Text style={{ fontSize: 16 }}>📖</Text>
+              <View>
+                <Text style={{ fontSize: 13, fontWeight: "700", color: c.text }}>
+                  Document Content
+                </Text>
+                <Text style={{ fontSize: 10, color: c.textMuted }}>
+                  {chunks.length} section{chunks.length !== 1 ? "s" : ""} • {showContent ? "tap to collapse" : "tap to expand"}
+                </Text>
+              </View>
+            </View>
+            <Text style={{ fontSize: 14, color: c.textMuted, transform: [{ rotate: showContent ? "180deg" : "0deg" }] }}>
+              ▼
+            </Text>
+          </Pressable>
+
+          {showContent && (
+            <View style={{ padding: 14 }}>
+              {chunks.map((chunk, idx) => (
+                <View
+                  key={idx}
+                  style={{
+                    marginBottom: idx < chunks.length - 1 ? 12 : 0,
+                    paddingBottom: idx < chunks.length - 1 ? 12 : 0,
+                    borderBottomWidth: idx < chunks.length - 1 ? 1 : 0,
+                    borderBottomColor: c.border,
+                  }}
+                >
+                  <View style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 6,
+                  }}>
+                    <Text style={{
+                      fontSize: 9,
+                      fontWeight: "700",
+                      color: c.primary,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                    }}>
+                      Section {chunk.chunk_index + 1}
+                    </Text>
+                  </View>
+                  <Text style={{
+                    fontSize: 12,
+                    color: c.textSecondary,
+                    lineHeight: 19,
+                  }}>
+                    {chunk.text}
+                  </Text>
+                </View>
+              ))}
+
+              <Pressable
+                onPress={() => setShowContent(false)}
+                style={{
+                  alignSelf: "center",
+                  marginTop: 8,
+                  backgroundColor: c.surfaceActive,
+                  borderRadius: 8,
+                  paddingVertical: 6,
+                  paddingHorizontal: 16,
+                }}
+              >
+                <Text style={{ fontSize: 11, color: c.textMuted, fontWeight: "600" }}>
+                  Collapse Content
+                </Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* Loading chunks indicator */}
+      {loadingChunks && (
+        <View style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 12,
+          padding: 14,
+          backgroundColor: c.cardBg,
+          borderRadius: 12,
+          borderWidth: 1,
+          borderColor: c.border,
+        }}>
+          <ActivityIndicator size="small" color={c.primary} />
+          <Text style={{ fontSize: 12, color: c.textMuted }}>Loading document content...</Text>
         </View>
       )}
 

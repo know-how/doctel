@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
 
 from app.routers.deps import (
-    _sse_broadcast,
     get_db,
     get_current_user,
     settings,
@@ -19,11 +18,12 @@ from app.routers.deps import (
     Document as DbDocument,
     SystemSetting,
     SettingsAudit,
-    auth_service,
     verify_ad_credentials,
     request_email_code,
     verify_email_code,
     create_session,
+    _sse_poll_buffers,
+    _sse_poll_lock,
 )
 
 router = APIRouter(tags=["auth"])
@@ -168,6 +168,10 @@ async def login(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
         db.add(eprov)
     await db.commit()
 
+    # Clear any stale poll buffer events for this user (e.g. stale session.logout)
+    async with _sse_poll_lock:
+        _sse_poll_buffers.pop(str(user.id), None)
+
     token = await create_session(
         user.id, user.display_name or display_name, provider, identity
     )
@@ -297,6 +301,9 @@ async def email_verify(
                     existing.ec_number = normalized.split("@")[0]
                     session.add(existing)
                     await session.commit()
+                # Clear any stale poll buffer events for this user
+                async with _sse_poll_lock:
+                    _sse_poll_buffers.pop(str(existing.id), None)
                 return {
                     "access_token": token,
                     "token_type": "bearer",
@@ -324,6 +331,11 @@ async def email_verify(
     prov.verified = True
     db.add(prov)
     await db.commit()
+
+    # Clear any stale poll buffer events for this user (e.g. stale session.logout)
+    async with _sse_poll_lock:
+        _sse_poll_buffers.pop(str(user.id), None)
+
     token = await create_session(
         user.id,
         user.display_name or user.username,
@@ -345,44 +357,4 @@ async def email_verify(
     }
 
 
-@router.post("/auth/logout")
-async def auth_logout_with_broadcast(
-    request: Request,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Log out the current user: invalidate session token and broadcast logout event."""
-    try:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            if token and not token.startswith("local-"):
-                await auth_service.revoke_token(token)
-    except Exception:
-        pass
-    try:
-        from app.services.job_poller import cancel_job
-        from sqlalchemy import select as _select
-        from app.db.models import Document as _Document
 
-        pending_result = await db.execute(
-            _select(_Document.id).where(
-                _Document.uploaded_by_user_id == user.id,
-                _Document.status.in_(["uploaded", "ingesting"]),
-            )
-        )
-        pending_ids = [row[0] for row in pending_result.all()]
-        for pid in pending_ids:
-            await cancel_job(document_id=pid, owner_id=user.id)
-    except Exception:
-        pass
-    try:
-        from app.services.model_router import force_select
-
-        force_select(None)
-    except Exception:
-        pass
-    await _sse_broadcast(
-        "session.logout", {"user_id": user.id, "ec_number": user.ec_number or ""}
-    )
-    return {"success": True, "broadcast": True}

@@ -8,11 +8,13 @@ import { useModel } from "../context/ModelContext"
 import { RobotSearching } from "../components/RobotSearching"
 import { UserIcon } from "../components/UserIcon"
 import { ModelDropdown } from "../components/ModelDropdown"
+import { ReasoningBlock } from "../components/ReasoningBlock"
 
 interface MobileMessage {
   id: string
   question: string
   answer: string
+  reasoning?: string
   sources: any
   status: "sending" | "waiting" | "success" | "error"
   model?: string
@@ -59,7 +61,7 @@ export function GlobalChatScreen({ onBack }: GlobalChatScreenProps) {
     try {
       if (sessionId && selectedModel) { try { await setChatSessionModel(sessionId, selectedModel) } catch {} }
       const res = (await chatGlobally({ question: q, model: selectedModel, session_id: sessionId })) as any
-      setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, answer: res.answer, sources: res.sources || res.citations || [], status: "success" } : m))
+      setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, answer: res.answer, reasoning: res.reasoning || undefined, sources: res.sources || res.citations || [], status: "success" } : m))
     } catch (e: any) {
       setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, answer: e.message || "Failed to get answer", status: "error" } : m))
     } finally {
@@ -120,6 +122,7 @@ export function GlobalChatScreen({ onBack }: GlobalChatScreenProps) {
                 ) : (
                   <>
                     <Text style={{ color: c.text, fontSize: 14, lineHeight: 20 }}>{msg.answer}</Text>
+                    {msg.reasoning && <ReasoningBlock reasoning={msg.reasoning} colors={c} />}
                     {msg.sources && msg.sources.length > 0 && (
                       <View style={{ marginTop: t.spacing.sm }}>
                         <Text style={{ fontSize: 12, color: c.textMuted, fontWeight: "600", marginBottom: 4 }}>Sources:</Text>

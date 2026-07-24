@@ -4,6 +4,11 @@ import { getTokens } from "../theme/themeTokens"
 import { chatGlobally, chatGloballyStream, createChatSession, getChatMessages, setChatSessionModel, transcribeAudio, askVision, uploadDocumentWithProgress, getRandomPromptSuggestions, PromptSuggestion } from "../api/client"
 import { useModel } from "../context/ModelContext"
 import { ChatHeader, WelcomeScreen, ChatMessage, ChatInput } from "../components"
+import AudioWorkflowChooser from "../components/audio/AudioWorkflowChooser"
+import type { AudioWorkflowAction } from "../components/audio/AudioWorkflowChooser"
+import AudioContextCard from "../components/audio/AudioContextCard"
+import type { AudioContextData } from "../components/audio/AudioContextCard"
+import { attachAudioToSession, removeAudioFromSession, getSessionState } from "../api/client"
 import { VoiceAssistant } from "../components/voice/VoiceAssistant"
 import type { Message, Citation, AttachmentMeta } from "../components/ChatMessage"
 import { isCloudModel } from "../utils/modelUtils"
@@ -45,6 +50,10 @@ export const NewChatPage: React.FC = () => {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [uploadStatusMsg, setUploadStatusMsg] = useState<string | null>(null)
   const [capabilityWarning, setCapabilityWarning] = useState<string | null>(null)
+  const [audioWorkflowVisible, setAudioWorkflowVisible] = useState(false)
+  const [audioTranscript, setAudioTranscript] = useState<string | null>(null)
+  const [audioWorkflowAction, setAudioWorkflowAction] = useState<AudioWorkflowAction | null>(null)
+  const [audioContext, setAudioContext] = useState<AudioContextData | null>(null)
   const [promptSuggestions, setPromptSuggestions] = useState<PromptSuggestion[]>([])
   const [loadingPrompts, setLoadingPrompts] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -102,7 +111,7 @@ export const NewChatPage: React.FC = () => {
     }
   }
 
-  // Restore session model when loading existing session
+  // Restore session model and audio context when loading existing session
   useEffect(() => {
     if (!sessionId) return
     ;(async () => {
@@ -112,6 +121,22 @@ export const NewChatPage: React.FC = () => {
         const savedModel = sessionInfo?.model_name || sessionInfo?.model
         if (savedModel && savedModel !== model && models.includes(savedModel)) {
           setModel(savedModel)
+        }
+      } catch {}
+
+      // Restore audio context if attached to this session
+      try {
+        const state = await getSessionState(sessionId)
+        if (state?.audio_context) {
+          setAudioContext({
+            filename: state.audio_context.filename,
+            transcript: state.audio_context.transcript,
+            summary: state.audio_context.summary,
+            durationSec: state.audio_context.duration_sec,
+            entities: state.audio_context.entities,
+            topics: state.audio_context.topics,
+            speakerCount: state.audio_context.speaker_count,
+          })
         }
       } catch {}
     })()
@@ -161,30 +186,122 @@ export const NewChatPage: React.FC = () => {
       setAttachedPreview(null)
     }
 
-    // Capability validation
+    // ── Smart audio detection: show workflow chooser ────────────────
+    if (file.type.startsWith("audio/")) {
+      setAudioWorkflowVisible(true)
+      setAudioTranscript(null)
+      setAudioWorkflowAction(null)
+      // Clear any generic warnings — the chooser replaces them
+      setCapabilityWarning(null)
+      e.target.value = ""
+      return
+    }
+
+    // ── Image capability validation (non-audio) ─────────────────────
     const caps = model ? (modelCapabilities[model] || []) : []
     let warning: string | null = null
     if (file.type.startsWith("image/") && !caps.includes("vision")) {
       warning = `The model "${model}" does not support image understanding (vision). Uploading as a document instead.`
-    } else if (file.type.startsWith("audio/") && !caps.includes("audio")) {
-      warning = `The model "${model}" does not support audio processing. Uploading as a document instead.`
     }
     setCapabilityWarning(warning)
 
     e.target.value = ""
   }
 
+  /** Handle the audio workflow action from the workflow chooser. */
+  const handleAudioWorkflow = useCallback((action: AudioWorkflowAction) => {
+    setAudioWorkflowAction(action)
+    if (action === "add_to_kb") {
+      // Full ingestion: immediately trigger upload + ingestion
+      setAudioWorkflowVisible(false)
+      // Use microtask to let React state settle, then trigger upload
+      Promise.resolve().then(() => {
+        handleSend(`Add this audio recording "${attachedFile?.name}" to the knowledge base for full indexing.`)
+      })
+    }
+  }, [attachedFile, handleSend])
+
+  /** Receive the transcription result from the workflow chooser. */
+  const handleAudioTranscription = useCallback(async (text: string) => {
+    setAudioTranscript(text)
+    if (!text) return
+
+    // Build the audio context data
+    const ctx: AudioContextData = {
+      filename: attachedFile?.name || "audio_recording.mp3",
+      transcript: text,
+      durationSec: null, // Could be enhanced with actual duration from transcription
+    }
+
+    // Ensure a session exists before attaching — create one if needed
+    let sid = sessionId
+    if (!sid) {
+      try {
+        const created = await createChatSession(null, "global")
+        sid = created.session_id
+        setSessionId(sid)
+        localStorage.setItem("docintel_newchat_session", sid)
+      } catch (e: any) {
+        console.warn("[AUDIO_CTX] Failed to create session:", e)
+      }
+    }
+
+    // Persist to backend session for long-lived context
+    if (sid) {
+      try {
+        await attachAudioToSession({
+          session_id: sid,
+          filename: ctx.filename,
+          transcript: text,
+          duration_sec: null,
+        })
+      } catch (e: any) {
+        console.warn("[AUDIO_CTX] Failed to attach to session:", e)
+      }
+    }
+
+    // For transcribe/analyze action, show as a visible message
+    if (audioWorkflowAction === "transcribe" || audioWorkflowAction === "analyze_meeting") {
+      setAudioContext(ctx)
+      const transcriptId = generateId()
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: transcriptId,
+          role: "assistant",
+          content: text.slice(0, 3000),
+          uiStatus: "done",
+          citations: [],
+          createdAt: new Date().toISOString(),
+        },
+      ])
+      setAudioWorkflowVisible(false)
+    }
+
+    if (audioWorkflowAction === "chat_with_audio") {
+      // Set audio context so the card stays visible above input
+      setAudioContext(ctx)
+      // Pre-fill the input with a starter question
+      setInput("What decisions were made in this recording?")
+      setAudioWorkflowVisible(false)
+    }
+  }, [audioWorkflowAction, attachedFile, sessionId])
+
   const clearAttachment = () => {
     setAttachedFile(null)
     setAttachedPreview(null)
     setCapabilityWarning(null)
+    setAudioWorkflowVisible(false)
+    setAudioTranscript(null)
+    setAudioWorkflowAction(null)
+    setAudioContext(null)
   }
 
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
 
-  const handleSend = async (text?: string) => {
+  async function handleSend(text?: string) {
     const q = (text || input).trim()
     if ((!q && !attachedFile) || loading) return
 
@@ -228,7 +345,18 @@ export const NewChatPage: React.FC = () => {
         setUploadStatusMsg(`Uploading ${file.name} as document (audio not supported by ${model})...`)
       }
 
-      if (file) {
+      // ── Inject audio transcript context if available ────────────────
+      // This must happen BEFORE cloudModel is used below (avoid TDZ).
+      let effectiveQuestion = q
+      const storedAudioContext = localStorage.getItem("doctel_audio_context") || ""
+      if (storedAudioContext) {
+        effectiveQuestion = storedAudioContext + q
+        content = effectiveQuestion // Update display content
+        localStorage.removeItem("doctel_audio_context")
+        localStorage.removeItem("doctel_temp_audio_transcript")
+      }
+
+      if (file && !audioTranscript) {
         try {
           setUploadStatusMsg(`Uploading ${file.name}...`)
           const uploadRes = await uploadDocumentWithProgress(
@@ -263,10 +391,11 @@ export const NewChatPage: React.FC = () => {
 
       // Always use streaming for any model found in the V2 provider catalog.
       // Non-V2 (pure Ollama/local) models can use the non-streaming endpoint.
+      // Use effectiveQuestion (may be augmented with audio transcript context).
       if (cloudModel) {
         await chatGloballyStream(
           {
-            question: q,
+            question: effectiveQuestion,
             session_id: sid,
             model: model || undefined,
             scope: "all",
@@ -290,6 +419,15 @@ export const NewChatPage: React.FC = () => {
                 ),
               )
             },
+            onCitations: (citations) => {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === thinkingId
+                    ? { ...m, citations }
+                    : m,
+                ),
+              )
+            },
             onDone: () => {
               setMessages((prev) =>
                 prev.map((m) =>
@@ -299,6 +437,23 @@ export const NewChatPage: React.FC = () => {
                 ),
               )
               setLoading(false)
+            },
+            onMetadata: (metadata) => {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === thinkingId
+                    ? {
+                        ...m,
+                        render_hint: metadata.render_hint,
+                        citation_mode: metadata.citation_mode,
+                        knowledge_type: metadata.knowledge_type,
+                        evidence_count: metadata.evidence_count,
+                        source_count: metadata.source_count,
+                        execution_plan: metadata.execution_plan,
+                      }
+                    : m,
+                ),
+              )
             },
             onError: (error) => {
               setMessages((prev) =>
@@ -316,7 +471,7 @@ export const NewChatPage: React.FC = () => {
       }
 
       await chatGlobally({
-        question: q,
+        question: effectiveQuestion,
         session_id: sid,
         model: model || undefined,
       })
@@ -356,6 +511,17 @@ export const NewChatPage: React.FC = () => {
       inputRef.current?.focus()
     }
   }
+
+  const handleRemoveAudioContext = useCallback(() => {
+    setAudioContext(null)
+    setAudioTranscript(null)
+    setAudioWorkflowAction(null)
+    if (sessionId) {
+      removeAudioFromSession(sessionId).catch((e: any) =>
+        console.warn("[AUDIO_CTX] Failed to remove from session:", e)
+      )
+    }
+  }, [sessionId])
 
   const handleRetry = (msg: Message) => {
     setMessages((prev) => prev.filter((m) => m.id !== msg.id))
@@ -433,17 +599,34 @@ export const NewChatPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Hidden file input */}
+      {/* Hidden file input — accept audio files too */}
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*,application/pdf,text/plain,.docx,.doc"
+        accept="image/*,audio/*,video/*,application/pdf,text/plain,.docx,.doc"
         onChange={onFilePicked}
         style={{ display: "none" }}
       />
 
-      {/* Attachment preview */}
-      {attachedFile && (
+      {/* ── Audio Workflow Chooser (shown when audio file attached) ── */}
+      {audioWorkflowVisible && attachedFile && attachedFile.type.startsWith("audio/") && (
+        <div style={{
+          flexShrink: 0, position: "relative", zIndex: 2,
+          padding: `0 40px 6px`,
+        }}>
+          <div style={{ maxWidth: 480, margin: "0 auto" }}>
+            <AudioWorkflowChooser
+              file={attachedFile}
+              onClose={() => { setAudioWorkflowVisible(false); clearAttachment() }}
+              onWorkflowSelect={handleAudioWorkflow}
+              onTranscriptionResult={handleAudioTranscription}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Attachment preview (for non-audio files) */}
+      {attachedFile && !audioWorkflowVisible && !attachedFile.type.startsWith("audio/") && (
         <div style={{
           flexShrink: 0, position: "relative", zIndex: 2,
           padding: `0 40px 6px`,
@@ -477,7 +660,7 @@ export const NewChatPage: React.FC = () => {
         </div>
       )}
 
-      {/* Capability warning */}
+      {/* Capability warning (non-audio) */}
       {capabilityWarning && (
         <div style={{
           flexShrink: 0, position: "relative", zIndex: 2,
@@ -547,6 +730,21 @@ export const NewChatPage: React.FC = () => {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ── Audio Context Card (persistent recording indicator) ── */}
+      {audioContext && !audioWorkflowVisible && (
+        <div style={{
+          flexShrink: 0, position: "relative", zIndex: 2,
+          padding: `0 40px 6px`,
+        }}>
+          <AudioContextCard
+            t={t}
+            sessionId={sessionId}
+            audioCtx={audioContext}
+            onRemove={handleRemoveAudioContext}
+          />
         </div>
       )}
 

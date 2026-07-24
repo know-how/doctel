@@ -13,6 +13,40 @@ export interface DocumentCreateResponse {
   metadata?: DocumentMetadata | null
 }
 
+/** Enterprise summary — structured business intelligence sections per document type. */
+export interface EnterpriseSummary {
+  doc_type: "policy" | "frs" | "meeting" | "sop" | "generic"
+  executive_summary: string
+  key_findings: string[]
+  responsibilities?: { role: string; department: string; responsibility: string }[]
+  risks?: { risk: string; mitigation: string }[]
+  actions?: string[]
+  business_impact?: string
+  systems_entities?: { name: string; type: string }[]
+  // Policy-specific
+  objectives?: string[]
+  scope?: string
+  compliance_requirements?: string[]
+  // FRS-specific
+  business_overview?: string
+  functional_requirements?: string[]
+  integrations?: { system: string; integration_type: string; description: string }[]
+  actors?: string[]
+  workflows?: { name: string; steps: string[]; actors_involved: string[] }[]
+  business_rules?: string[]
+  // Meeting-specific
+  meeting_purpose?: string
+  participants?: string[]
+  topics_discussed?: string[]
+  decisions?: string[]
+  action_items?: { owner: string; action: string; due_date: string }[]
+  next_steps?: string[]
+  // SOP-specific
+  purpose?: string
+  process_steps?: { step_number: number; step: string; responsible: string }[]
+  controls?: string[]
+}
+
 export interface DocumentAnalysisResponse {
   id: string
   project_name?: string

@@ -10,6 +10,7 @@ from app.routers.deps import (
     asyncio,
     datetime,
     uuid,
+    Any,
     Optional,
     # fastapi
     APIRouter,
@@ -60,6 +61,12 @@ from app.routers.deps import (
 
 from app.services.document_permission_service import enrich_citations
 from app.services.copilot_service import detect_intent, CopilotMode, _MODE_SYSTEM_PROMPTS as _cs_prompts
+from app.services.knowledge_orchestrator_service import (
+    detect_knowledge_intent,
+    resolve_strategy,
+    classify_document_type,
+    execute_agentic_plan,
+)
 
 # Shared IMAGE_GENERATION system prompt — imported from copilot_service to avoid duplication
 _IMAGE_GENERATION_SYSTEM_PROMPT = _cs_prompts.get(
@@ -155,6 +162,226 @@ async def _stream_cloud_answer(
             yield {"type": "content", "content": f"⚠️ {user_message}"}
     else:
         yield {"type": "content", "content": "⚠️ No database session available for provider routing."}
+
+
+# ── Agent-native execution helper ──────────────────────────────────────
+
+async def _execute_agent_native_plan(
+    intent: str,
+    user_query: str,
+    db: Any,
+    session_id: Optional[int] = None,
+    document_id: Optional[str] = None,
+    project_ids: Optional[list[int]] = None,
+    audio_transcript: Optional[str] = None,
+) -> dict[str, Any]:
+    """Execute the agent-native plan and return agent findings.
+
+    This is the primary entry point for the Multi-Agent Runtime.
+    Called from all four ask endpoints after resolve_strategy().
+
+    Also fetches past agent memory context via AgentCoordinator
+    so that previous agent learnings are included in the prompt.
+
+    Returns a dict with:
+    - agent_results: list of agent execution results
+    - execution_summary: human-readable summary of all agent work
+    - merged_entities: list of entity names merged from all agents
+    - merged_actions: list of action items
+    - merged_decisions: list of decisions
+    - merged_risks: list of risks
+    - memory_context: past agent memory context string (if session_id provided)
+    - total_duration_ms: total execution time
+    - error: error message if execution failed
+    """
+    logger.info(
+        "[AGENT_NATIVE] Starting agent plan for intent=%s query=%r session=%s",
+        intent, user_query[:80], session_id,
+    )
+    start = asyncio.get_event_loop().time()
+
+    try:
+        bundle = await execute_agentic_plan(
+            db=db,
+            intent=intent,
+            user_query=user_query,
+            session_id=session_id,
+            document_id=document_id,
+            project_ids=project_ids,
+            audio_transcript=audio_transcript,
+        )
+        elapsed = (asyncio.get_event_loop().time() - start) * 1000
+        logger.info(
+            "[AGENT_NATIVE] Complete: %d agents in %.0fms",
+            len(bundle.get("agent_results", [])),
+            elapsed,
+        )
+
+        # Fetch past agent memory context for this session
+        memory_context = ""
+        if session_id is not None:
+            try:
+                from app.services.agent_runtime_service import AgentCoordinator
+                _coord = AgentCoordinator(db)
+                await _coord.initialize()
+                memory_context = await _coord.build_memory_prompt_section(
+                    session_id=session_id,
+                    audio_transcript=audio_transcript,
+                )
+                if memory_context:
+                    logger.info(
+                        "[AGENT_MEMORY] Past agent memory context: %d chars",
+                        len(memory_context),
+                    )
+            except Exception as mem_exc:
+                logger.warning("[AGENT_MEMORY] Failed to fetch memory context: %s", mem_exc)
+                # Rollback to prevent PostgreSQL transaction abort from propagating
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+
+        # Build a compact context string from agent findings for prompt injection
+        agent_findings_str = _build_agent_context_string(bundle)
+        bundle["memory_context"] = memory_context
+        bundle["context_string"] = agent_findings_str
+        bundle["total_duration_ms"] = elapsed
+        return bundle
+    except Exception as exc:
+        logger.warning("[AGENT_NATIVE] Execution failed: %s", exc)
+        # Roll back the DB transaction to clear PostgreSQL's aborted state
+        # so the caller's subsequent db.commit() does not fail.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return {
+            "error": str(exc),
+            "agent_results": [],
+            "execution_summary": "",
+            "merged_entities": [],
+            "merged_actions": [],
+            "merged_decisions": [],
+            "merged_risks": [],
+            "memory_context": "",
+            "context_string": "",
+            "total_duration_ms": 0,
+        }
+
+
+def _build_agent_context_string(bundle: dict[str, Any]) -> str:
+    """Build a compact agent findings context string for prompt injection."""
+    parts = []
+
+    summary = bundle.get("execution_summary", "")
+    if summary:
+        parts.append(f"[AGENT FINDINGS]\n{summary}\n")
+
+    entities = bundle.get("merged_entities", [])
+    if entities:
+        parts.append(
+            f"[ENTITIES DISCOVERED]\n"
+            f"The following entities were discovered by AI agents:\n"
+            + ", ".join(entities[:20])
+        )
+
+    actions = bundle.get("merged_actions", [])
+    if actions:
+        actions_str = "\n".join(
+            f"- {a.get('action', str(a))} [Owner: {a.get('owner', 'N/A')}]"
+            for a in actions[:10]
+        )
+        parts.append(f"[ACTION ITEMS]\n{actions_str}")
+
+    decisions = bundle.get("merged_decisions", [])
+    if decisions:
+        decisions_str = "\n".join(
+            f"- {d.get('decision', str(d))}"
+            for d in decisions[:10]
+        )
+        parts.append(f"[DECISIONS]\n{decisions_str}")
+
+    risks = bundle.get("merged_risks", [])
+    if risks:
+        risks_str = "\n".join(
+            f"- {r.get('risk', str(r))} [Severity: {r.get('severity', 'N/A')}]"
+            for r in risks[:10]
+        )
+        parts.append(f"[RISKS]\n{risks_str}")
+
+    combined = "\n\n".join(parts)
+    if len(combined) > 4000:
+        combined = combined[:4000] + "\n...[truncated]"
+    return combined
+
+
+# ── Evidence-aware reasoning helper ──────────────────────────────────────
+
+async def _execute_tools_and_build_evidence(
+    strategy: Any,
+    user_query: str,
+    db: Any,
+    project_ids: list[int],
+    rag_citations: list[dict],
+    rag_answer_text: str = "",
+    session_state: Optional[dict] = None,
+    skip_tools: Optional[list[str]] = None,
+) -> tuple[Optional[Any], Optional[str]]:
+    """Execute analysis tools on RAG content and build evidence context.
+
+    Returns (evidence_bundle, evidence_context_string).
+    Both may be None if execution fails or no tools are needed.
+    """
+    if not strategy or not strategy.execution_plan:
+        return None, None
+    try:
+        from app.services.tool_execution_service import execute_plan
+
+        exec_plan = strategy.execution_plan
+        rag_content = "\n\n".join(
+            c.get("text", "") or "" for c in (rag_citations or [])
+        ) if rag_citations else rag_answer_text
+
+        if not rag_content:
+            logger.info("[EVIDENCE] No RAG content for tool execution - skipping")
+            return None, None
+
+        from app.services.tool_planner_service import ExecutionObserver as _Obs
+        _observer = _Obs()
+        bundle = await execute_plan(
+            plan=exec_plan,
+            user_query=user_query,
+            db=db,
+            observer=_observer,
+            project_ids=project_ids,
+            content_source=rag_content,
+            session_state=session_state,
+            skip_tools=skip_tools or [],
+        )
+
+        if bundle and bundle.results:
+            logger.info(
+                "[EVIDENCE] %d tools executed, context=%d chars",
+                len(bundle.results),
+                len(bundle.build_context_string() or ""),
+            )
+            context_str = bundle.build_context_string()
+
+            # Attach observer metadata to the plan for frontend display
+            if isinstance(exec_plan, dict):
+                exec_plan["execution_metadata"] = _observer.summary()
+
+            return bundle, context_str
+
+        return None, None
+    except Exception as ex:
+        logger.warning("[EVIDENCE] Tool execution failed: %s - continuing without evidence", ex)
+        # Roll back to prevent PostgreSQL transaction abort from propagating
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return None, None
 
 
 # ── Diagnostics ───────────────────────────────────────────────────────────
@@ -623,6 +850,68 @@ async def ask_global(
         rag.get("used_model", "?"),
         "present" if rag.get("answer_text") else "missing",
     )
+
+    # ── Knowledge Orchestration: detect intent & resolve strategy ──────
+    _strategy = resolve_strategy(
+        detect_knowledge_intent(question),
+        has_rag_context=bool(rag and rag.get("citations")),
+        has_audio_context=False,
+        has_agent_memory=True,
+    )
+    logger.info("[ORCHESTRATOR] Intent=%s render_hint=%s citation=%s",
+                _strategy.intent.value, _strategy.render_hint, _strategy.citation_mode.value)
+
+    # ── Agent-Native Execution: Launch multi-agent plan ────────────────
+    _agent_bundle = await _execute_agent_native_plan(
+        intent=_strategy.intent.value,
+        user_query=question,
+        db=db,
+        session_id=s.id if s else None,
+        document_id=None,
+        project_ids=project_ids,
+    )
+    if _agent_bundle.get("context_string"):
+        logger.info(
+            "[AGENT_NATIVE] Agent context available: %d chars across %d agents",
+            len(_agent_bundle["context_string"]),
+            len(_agent_bundle.get("agent_results", [])),
+        )
+        # Inject agent execution metadata into the strategy plan for observability
+        if hasattr(_strategy, 'execution_plan') and _strategy.execution_plan:
+            _plan = _strategy.execution_plan
+            if isinstance(_plan, dict) or hasattr(_plan, 'execution_metadata'):
+                _agent_exec_data = {
+                    "agents_executed": len(_agent_bundle.get("agent_results", [])),
+                    "agent_results": _agent_bundle.get("agent_results", []),
+                    "execution_summary": _agent_bundle.get("execution_summary", ""),
+                    "total_duration_ms": _agent_bundle.get("total_duration_ms", 0),
+                }
+                if isinstance(_plan, dict):
+                    _plan["agent_execution"] = _agent_exec_data
+                else:
+                    _plan.execution_metadata["agent_execution"] = _agent_exec_data
+
+    # ── Evidence-Aware Reasoning: Execute analysis tools on RAG content ──
+    _evidence_bundle, _evidence_context = await _execute_tools_and_build_evidence(
+        strategy=_strategy,
+        user_query=question,
+        db=db,
+        project_ids=project_ids,
+        rag_citations=rag.get("citations", []) if rag else [],
+        rag_answer_text=rag.get("answer_text", "") if rag else "",
+        session_state=_session_state if '_session_state' in dir() else None,
+        skip_tools=["rag_search", "entity_extraction", "meeting_analysis",
+                     "audio_analysis", "risk_analysis", "action_extraction",
+                     "decision_extraction", "policy_analysis", "workflow_extraction"],
+    )
+    # If evidence was generated and we're in the fallback path (no RAG citations),
+    # inject evidence context into the system prompt for the LLM call.
+    if _evidence_context and (not rag or not rag.get("citations")):
+        logger.info(
+            "[EVIDENCE] Evidence context available for fallback: %d chars",
+            len(_evidence_context),
+        )
+
     user_msg.status = "done"
     db.add(user_msg)
     # Get reasoning if available from RAG response
@@ -846,6 +1135,95 @@ async def ask_global_stream(
         else:
             logger.warning("[RAG_FALLBACK] reason=no_context_stream | scope=%s | project_ids=%s", scope, project_ids)
             print(f"[RAG] No context — sending question without RAG context", flush=True)
+
+        # ── Knowledge Orchestration: detect intent & resolve strategy ──────
+        _stream_strategy = resolve_strategy(
+            detect_knowledge_intent(question),
+            has_rag_context=bool(rag_context is not None),
+            has_audio_context=False,
+            has_agent_memory=True,
+        )
+        logger.info("[ORCHESTRATOR_STREAM] Intent=%s render_hint=%s citation=%s",
+                    _stream_strategy.intent.value, _stream_strategy.render_hint, _stream_strategy.citation_mode.value)
+
+        # ── Agent-Native Execution: Launch multi-agent plan ────────────────
+        _agent_bundle_stream = await _execute_agent_native_plan(
+            intent=_stream_strategy.intent.value,
+            user_query=question,
+            db=db,
+            session_id=s.id if s else None,
+            document_id=None,
+            project_ids=project_ids,
+        )
+        if _agent_bundle_stream.get("context_string"):
+            _agent_ctx = _agent_bundle_stream["context_string"]
+            logger.info(
+                "[AGENT_NATIVE_STREAM] Agent context available: %d chars across %d agents",
+                len(_agent_ctx),
+                len(_agent_bundle_stream.get("agent_results", [])),
+            )
+
+        # ── Evidence-Aware Reasoning: Execute tools & inject into context ──
+        _evidence_bundle_stream, _evidence_context_stream = await _execute_tools_and_build_evidence(
+            strategy=_stream_strategy,
+            user_query=question,
+            db=db,
+            project_ids=project_ids,
+            rag_citations=citations_list,
+            rag_answer_text="",
+            session_state=None,
+            skip_tools=["rag_search", "entity_extraction", "meeting_analysis",
+                         "audio_analysis", "risk_analysis", "action_extraction",
+                         "decision_extraction", "policy_analysis", "workflow_extraction"],
+        )
+
+        # Build enriched context with tool evidence + agent findings
+        _combined_context_parts = []
+        if rag_context:
+            _combined_context_parts.append(rag_context)
+        if _evidence_context_stream:
+            _combined_context_parts.append(f"[TOOL EVIDENCE]\n{_evidence_context_stream}")
+        if _agent_bundle_stream.get("context_string"):
+            _combined_context_parts.append(f"[AGENT INTELLIGENCE]\n{_agent_bundle_stream['context_string']}")
+
+        if _combined_context_parts:
+            full_context = "\n\n".join(_combined_context_parts)
+            if rag_context:
+                # Has RAG context — use standard augmented prompt
+                rag_context = full_context
+                augmented_question = (
+                    f"Answer the question using ONLY the provided context and tool evidence. "
+                    f"Always cite sources.\n\n"
+                    f"Question: {question}\n\n"
+                    f"Context:\n{rag_context}"
+                )
+                logger.info(
+                    "[EVIDENCE_STREAM] Combined context injected: %d chars | total_prompt=%d chars",
+                    len(full_context),
+                    len(augmented_question),
+                )
+            else:
+                # No RAG context — inject combined evidence directly
+                augmented_question = (
+                    f"Answer the question using the following analysis findings.\n\n"
+                    f"{full_context}\n\n"
+                    f"Question: {question}"
+                )
+
+            # Attach agent metadata to strategy plan for observability
+            if hasattr(_stream_strategy, 'execution_plan') and _stream_strategy.execution_plan:
+                _plan_s = _stream_strategy.execution_plan
+                if isinstance(_plan_s, dict) or hasattr(_plan_s, 'execution_metadata'):
+                    _agent_exec_data_s = {
+                        "agents_executed": len(_agent_bundle_stream.get("agent_results", [])),
+                        "agent_results": _agent_bundle_stream.get("agent_results", []),
+                        "execution_summary": _agent_bundle_stream.get("execution_summary", ""),
+                        "total_duration_ms": _agent_bundle_stream.get("total_duration_ms", 0),
+                    }
+                    if isinstance(_plan_s, dict):
+                        _plan_s["agent_execution"] = _agent_exec_data_s
+                    else:
+                        _plan_s.execution_metadata["agent_execution"] = _agent_exec_data_s
 
         # Resolve API key: model → provider → key (database is SOURCE OF TRUTH)
         zen_api_key = None
@@ -1270,6 +1648,84 @@ async def ask_document(
                     source_type=c.get("source_type"),
                     project_id=c.get("project_id"),
                 ))
+
+        # ── Knowledge Orchestration: detect intent & resolve strategy ──────
+        _doc_strategy = resolve_strategy(
+            detect_knowledge_intent(question),
+            has_rag_context=bool(rag.get("citations")),
+            has_audio_context=False,
+            has_agent_memory=True,
+            document_type=classify_document_type({"filename": doc.filename or ""}),
+        )
+        logger.info("[ORCHESTRATOR_DOC] Intent=%s render_hint=%s citation=%s",
+                    _doc_strategy.intent.value, _doc_strategy.render_hint, _doc_strategy.citation_mode.value)
+
+        # ── Agent-Native Execution: Launch multi-agent plan ────────────────
+        _doc_agent_bundle = await _execute_agent_native_plan(
+            intent=_doc_strategy.intent.value,
+            user_query=question,
+            db=db,
+            session_id=s.id if s else None,
+            document_id=str(doc_int) if doc_int else None,
+            project_ids=[int(doc.project_id)] if doc.project_id else [],
+        )
+        if _doc_agent_bundle.get("context_string"):
+            logger.info(
+                "[AGENT_NATIVE_DOC] Agent context available: %d chars across %d agents",
+                len(_doc_agent_bundle["context_string"]),
+                len(_doc_agent_bundle.get("agent_results", [])),
+            )
+            if hasattr(_doc_strategy, 'execution_plan') and _doc_strategy.execution_plan:
+                _plan_doc = _doc_strategy.execution_plan
+                if isinstance(_plan_doc, dict) or hasattr(_plan_doc, 'execution_metadata'):
+                    _agent_exec_data_doc = {
+                        "agents_executed": len(_doc_agent_bundle.get("agent_results", [])),
+                        "agent_results": _doc_agent_bundle.get("agent_results", []),
+                        "execution_summary": _doc_agent_bundle.get("execution_summary", ""),
+                        "total_duration_ms": _doc_agent_bundle.get("total_duration_ms", 0),
+                    }
+                    if isinstance(_plan_doc, dict):
+                        _plan_doc["agent_execution"] = _agent_exec_data_doc
+                    else:
+                        _plan_doc.execution_metadata["agent_execution"] = _agent_exec_data_doc
+
+        _doc_skip_tools_due_to_agents = [
+            "rag_search",
+            "entity_extraction", "meeting_analysis", "audio_analysis",
+            "risk_analysis", "action_extraction", "decision_extraction",
+            "policy_analysis", "workflow_extraction",
+        ]
+        # ── Evidence-Aware Reasoning: Execute tools on document content ──
+        _doc_evidence_bundle, _doc_evidence_context = await _execute_tools_and_build_evidence(
+            strategy=_doc_strategy,
+            user_query=question,
+            db=db,
+            project_ids=[int(doc.project_id)] if doc.project_id else [],
+            rag_citations=rag.get("citations", []),
+            rag_answer_text=rag.get("answer_text", ""),
+            session_state=None,
+            skip_tools=_doc_skip_tools_due_to_agents,
+        )
+        # If evidence was generated, prepare it for the response
+        # Inject agent findings + memory context into the response
+        _doc_agent_ctx_str = ""
+        if _doc_agent_bundle.get("context_string") or _doc_agent_bundle.get("memory_context"):
+            parts = []
+            if _doc_agent_bundle.get("memory_context"):
+                parts.append(f"[AGENT MEMORY]\n{_doc_agent_bundle['memory_context']}")
+            if _doc_agent_bundle.get("context_string"):
+                parts.append(f"[AGENT FINDINGS]\n{_doc_agent_bundle['context_string']}")
+            _doc_agent_ctx_str = "\n\n".join(parts)
+            logger.info(
+                "[AGENT_NATIVE_DOC] Agent context injected into prompt: %d chars",
+                len(_doc_agent_ctx_str),
+            )
+
+        if _doc_evidence_context:
+            logger.info(
+                "[EVIDENCE_DOC] Evidence context available: %d chars",
+                len(_doc_evidence_context),
+            )
         
         return AskResponse(
             answer=rag.get("answer_text", ""),
@@ -1407,17 +1863,93 @@ async def ask_document_stream(
         except Exception as e2:
             print(f"\n=== DB FALLBACK: Error: {e2} ===", flush=True)
 
+    # ── Knowledge Orchestration: detect intent & resolve strategy ──────
+    _ds_strategy = resolve_strategy(
+        detect_knowledge_intent(question),
+        has_rag_context=bool(rag_context is not None),
+        has_audio_context=False,
+        has_agent_memory=True,
+        document_type=classify_document_type({"filename": doc.filename or ""}),
+    )
+    logger.info("[ORCHESTRATOR_DS] Intent=%s render_hint=%s citation=%s",
+                _ds_strategy.intent.value, _ds_strategy.render_hint, _ds_strategy.citation_mode.value)
+
+    # ── Agent-Native Execution: Launch multi-agent plan ────────────────
+    _ds_agent_bundle = await _execute_agent_native_plan(
+        intent=_ds_strategy.intent.value,
+        user_query=question,
+        db=db,
+        session_id=s.id if s else None,
+        document_id=str(doc.id) if doc else None,
+        project_ids=[int(doc.project_id)] if doc.project_id else [],
+    )
+    if _ds_agent_bundle.get("context_string"):
+        logger.info(
+            "[AGENT_NATIVE_DS] Agent context available: %d chars across %d agents",
+            len(_ds_agent_bundle["context_string"]),
+            len(_ds_agent_bundle.get("agent_results", [])),
+        )
+        if hasattr(_ds_strategy, 'execution_plan') and _ds_strategy.execution_plan:
+            _plan_ds = _ds_strategy.execution_plan
+            if isinstance(_plan_ds, dict) or hasattr(_plan_ds, 'execution_metadata'):
+                _agent_exec_data_ds = {
+                    "agents_executed": len(_ds_agent_bundle.get("agent_results", [])),
+                    "agent_results": _ds_agent_bundle.get("agent_results", []),
+                    "execution_summary": _ds_agent_bundle.get("execution_summary", ""),
+                    "total_duration_ms": _ds_agent_bundle.get("total_duration_ms", 0),
+                }
+                if isinstance(_plan_ds, dict):
+                    _plan_ds["agent_execution"] = _agent_exec_data_ds
+                else:
+                    _plan_ds.execution_metadata["agent_execution"] = _agent_exec_data_ds
+
+    _ds_skip_tools_due_to_agents = [
+        "rag_search",
+        "entity_extraction", "meeting_analysis", "audio_analysis",
+        "risk_analysis", "action_extraction", "decision_extraction",
+        "policy_analysis", "workflow_extraction",
+    ]
+    # ── Evidence-Aware Reasoning: Execute tools & inject into doc prompt ──
+    _ds_evidence_bundle, _ds_evidence_context = await _execute_tools_and_build_evidence(
+        strategy=_ds_strategy,
+        user_query=question,
+        db=db,
+        project_ids=[int(doc.project_id)] if doc.project_id else [],
+        rag_citations=citations_list,
+        rag_answer_text="",
+        session_state=None,
+        skip_tools=_ds_skip_tools_due_to_agents,
+    )
+
+    # Build combined agent context for prompt injection
+    _ds_agent_ctx_str = ""
+    if _ds_agent_bundle.get("context_string") or _ds_agent_bundle.get("memory_context"):
+        parts = []
+        if _ds_agent_bundle.get("memory_context"):
+            parts.append(f"[AGENT MEMORY]\n{_ds_agent_bundle['memory_context']}")
+        if _ds_agent_bundle.get("context_string"):
+            parts.append(f"[AGENT FINDINGS]\n{_ds_agent_bundle['context_string']}")
+        _ds_agent_ctx_str = "\n\n".join(parts)
+        logger.info(
+            "[AGENT_NATIVE_DS] Agent context: %d chars for prompt injection",
+            len(_ds_agent_ctx_str),
+        )
+
     async def event_gen():
         full_text = ""
         reasoning_text = ""
         try:
             if rag_context:
-                doc_prompt = f"Answer the question using ONLY the provided context. Always cite sources.\n\nQuestion: {question}\n\nContext:\n{rag_context}"
+                _combined_ds_parts = [rag_context]
+                if _ds_evidence_context:
+                    _combined_ds_parts.append(f"[TOOL EVIDENCE]\n{_ds_evidence_context}")
+                if _ds_agent_ctx_str:
+                    _combined_ds_parts.append(f"[AGENT INTELLIGENCE]\n{_ds_agent_ctx_str}")
+                rag_context_enhanced = "\n\n".join(_combined_ds_parts)
+                doc_prompt = f"Answer the question using ONLY the provided context, tool evidence, and agent findings. Always cite sources.\n\nQuestion: {question}\n\nContext:\n{rag_context_enhanced}"
                 logger.info(
-                    "[RAG_PROMPT] doc_stream — context=%d chars | total_prompt=%d chars | "
-                    "chunks=%d | citations=%d",
-                    len(rag_context), len(doc_prompt),
-                    len(citations_list), len(citations_list),
+                    "[EVIDENCE_DS_STREAM] Combined context: %d chars | total_prompt=%d chars",
+                    len(rag_context_enhanced), len(doc_prompt),
                 )
             else:
                 doc_title = doc.filename or doc.title or f"Document #{doc_int}"

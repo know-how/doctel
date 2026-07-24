@@ -27,6 +27,12 @@ async def api_health_app():
     return BasicResponse(ok=True)
 
 
+@router.get("/healthz", response_model=BasicResponse)
+async def healthz():
+    """Legacy health endpoint used by frontend for connection checks."""
+    return BasicResponse(ok=True)
+
+
 @router.get("/health/database")
 async def health_database():
     """Return database connection health status."""

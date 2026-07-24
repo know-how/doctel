@@ -385,7 +385,20 @@ async def _post_generate_audit(
                 overall_score=0.7,  # Default — enhance later with actual model confidence
             )
 
-    await db.commit()
+    # Safely commit audit records. If a failed db.flush() inside one of the
+    # individual record helpers (InteractionAudit, CostRecord, ConfidenceScore)
+    # left the PostgreSQL transaction in the "aborted" state, this commit will
+    # fail.  In that case, rollback to reset the transaction so the caller can
+    # continue with its own DB operations without InFailedSQLTransactionError.
+    # Note: we do NOT unconditionally rollback BEFORE the commit — that would
+    # discard perfectly valid audit/cost/confidence records on the success path.
+    try:
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

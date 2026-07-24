@@ -1,0 +1,55 @@
+=== Global stream (1469-1500) ===
+                        "score": validation.get("score", 0.0),
+                        "model": chosen_model,
+                        "session_id": final_session_uuid,
+                    })
+                                        yield f"data: {correction_data}
+
+"
+ssistant",
+                    content=cleaned_text,
+                    reasoning=reasoning_text or None,
+                    status="done",
+                    citations_json=json.dumps(citations_list),
+                )
+                db.add(assistant)
+                s.updated_at = datetime.datetime.now(datetime.timezone.utc)
+                db.add(s)
+                await db.commit()
+            except Exception:
+                pass
+
+            # Track conversation state for conversational continuity
+            entities = list(_rewrite_result.get("resolved_entities", [])) if _rewrite_result else []
+            await update_session_state(db, session_uuid, question, cleaned_text, entities, retrieval_question)
+
+            # ── Session summarization (every 5 turns) ─────────────────────────
+            try:
+                _ss_state = await get_session_state(db, session_uuid)
+                _ss_turn = _ss_state.get("turn_count", 0) if _ss_state else 0
+                if _ss_turn > 0 and should_summarize(_ss_turn):
+                    # Load multi-turn segment from DB for better summaries
+                    _ss_segment = raw_history[-10:] if raw_history else [
+                        {"role": "user", "content": question},
+
+=== Doc stream (2180-2215) ===
+                    "replacement": replacement,
+                    "score": validation.get("score", 0.0),
+                    "model": chosen_model,
+                    "session_id": final_session_uuid,
+                })
+                                    yield f"data: {correction_data}
+
+"
+ssistant",
+                content=cleaned_text,
+                reasoning=reasoning_text or None,
+                status="done",
+                citations_json=json.dumps(citations_list),
+            )
+            db.add(assistant)
+            s.updated_at = datetime.datetime.now(datetime.timezone.utc)
+            db.add(s)
+            await db.commit()
+            logger.info(
+                "[REASONING] doc_stream_saved — assistant_msg reasoning=%d chars | citations=%d",

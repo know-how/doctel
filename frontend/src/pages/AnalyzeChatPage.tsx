@@ -29,6 +29,12 @@ type Message = {
   status: "pending" | "done" | "failed"
   uiStatus?: "sending" | "waiting" | "streaming" | "error"
   retryText?: string
+  render_hint?: string
+  citation_mode?: string
+  knowledge_type?: string
+  evidence_count?: number
+  source_count?: number
+  execution_plan?: any
 }
 
 type DocumentItem = { id: string; filename: string; status: string }
@@ -379,6 +385,15 @@ export const AnalyzeChatPage: React.FC = () => {
               ),
             )
           },
+          onCitations: (citations: any[]) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === thinkingId
+                  ? { ...m, citations }
+                  : m,
+              ),
+            )
+          },
           onDone: () => {
             setMessages((prev) =>
               prev.map((m) =>
@@ -388,6 +403,23 @@ export const AnalyzeChatPage: React.FC = () => {
               ),
             )
             setLoadingChat(false)
+          },
+          onMetadata: (metadata) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === thinkingId
+                  ? {
+                      ...m,
+                      render_hint: metadata.render_hint,
+                      citation_mode: metadata.citation_mode,
+                      knowledge_type: metadata.knowledge_type,
+                      evidence_count: metadata.evidence_count,
+                      source_count: metadata.source_count,
+                      execution_plan: metadata.execution_plan,
+                    }
+                  : m,
+              ),
+            )
           },
           onError: (error: string) => {
             setMessages((prev) =>

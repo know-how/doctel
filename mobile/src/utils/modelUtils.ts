@@ -3,25 +3,16 @@
  * Mirrors frontend/src/utils/modelUtils.ts
  */
 
-import type { V2Provider } from "../types/api"
-
-const CLOUD_ID_PATTERNS = [
-  "gemini",
-  "deepseek",
-  "zen/",
-  "go/",
-  "huggingface/",
-  "openai/",
-  "anthropic/",
-  "cloud",
-]
+import type { V2Provider, OllamaModelDetail } from "../types/api"
 
 /**
  * Determine whether a model ID is a cloud/API model (vs a local Ollama model).
- * First checks V2 providers (authoritative), then falls back to well-known ID patterns.
+ * First checks V2 providers (authoritative), then falls back to model details
+ * and well-known ID patterns.
  */
 export function isCloudModel(
   modelId: string | undefined | null,
+  modelDetails?: OllamaModelDetail[],
   v2Providers?: V2Provider[],
 ): boolean {
   if (!modelId) return false
@@ -41,7 +32,23 @@ export function isCloudModel(
     return true
   }
 
-  // 3) Fallback: check known cloud model ID patterns
+  // 3) Check model details from /api/models/available
+  if (modelDetails?.length) {
+    const entry = modelDetails.find((m) => m.name === modelId)
+    if (entry) {
+      return entry.size_human === "Cloud" || entry.size_human === "cloud"
+    }
+  }
+
+  // 4) Fallback: check known cloud model ID patterns
   const id = modelId.toLowerCase()
-  return CLOUD_ID_PATTERNS.some((pattern) => id.startsWith(pattern) || id === pattern)
+  return (
+    id === "gemini-api" ||
+    id === "deepseek-api" ||
+    id.startsWith("zen/") ||
+    id.startsWith("go/") ||
+    id.startsWith("huggingface/") ||
+    id.startsWith("openai/") ||
+    id.startsWith("anthropic/")
+  )
 }

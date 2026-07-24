@@ -61,6 +61,7 @@ async def generate_document_response(
     prompt: str,
     selected_model: str,
     db: AsyncSession,
+    conversation_context: Optional[str] = None,
 ) -> dict:
     """
     Generate an AI answer grounded in *document_id* using *selected_model*.
@@ -127,6 +128,7 @@ async def generate_document_response(
                 db,
                 document_id=document_id,
                 model_name=selected_model,
+                conversation_context=conversation_context or None,
             )
             if result and result.get("answer_text"):
                 answer_text = result["answer_text"]
@@ -186,9 +188,19 @@ async def generate_document_response(
             "used_model": selected_model,
         }
 
+    # Build LLM prompt with conversation context when available
+    # This ensures the model maintains conversational continuity even in the
+    # fallback (non-embedding) path.
+    fallback_question = question
+    if conversation_context:
+        fallback_question = (
+            f"Conversation history:\n{conversation_context}\n\n"
+            f"---\n\n"
+            f"Current question: {question}"
+        )
     fallback_prompt = (
-        f"Answer the question using ONLY the provided context. Always cite sources.\n\n"
-        f"Question: {question}\n\nContext:\n{doc_context}"
+        f"Answer the question using ONLY the provided context.\n\n"
+        f"Question: {fallback_question}\n\nContext:\n{doc_context}"
     )
 
     # ── 4. Route to the correct provider ─────────────────────────────

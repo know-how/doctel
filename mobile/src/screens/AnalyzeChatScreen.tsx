@@ -6,11 +6,13 @@ import { chatWithDocument, chatGlobally, getMyDocuments } from "../api/client"
 import { useModel } from "../context/ModelContext"
 import { MyDocument } from "../types/api"
 import { ModelDropdown } from "../components/ModelDropdown"
+import { ReasoningBlock } from "../components/ReasoningBlock"
 
 interface ChatMessage {
   id: string
   role: "user" | "assistant"
   content: string
+  reasoning?: string
   citations: string[]
   citationsFull?: { filename: string; chunk_index: number; text: string }[]
 }
@@ -97,6 +99,7 @@ export function AnalyzeChatScreen({ documentId }: AnalyzeChatScreenProps) {
         id: (Date.now() + 1).toString(),
         role: "assistant",
         content: response?.answer || "No response",
+        reasoning: response?.reasoning || undefined,
         citations: response?.citations?.map((cit: any) => cit.filename) || [],
         citationsFull: response?.citations || [],
       }
@@ -187,6 +190,9 @@ export function AnalyzeChatScreen({ documentId }: AnalyzeChatScreenProps) {
                   <Text style={{ fontSize: 14, color: msg.role === "user" ? "#FFFFFF" : c.text, lineHeight: 20 }}>
                     {msg.content}
                   </Text>
+                  {msg.role === "assistant" && msg.reasoning && (
+                    <ReasoningBlock reasoning={msg.reasoning} colors={c} />
+                  )}
                 </View>
                 {msg.role === "assistant" && msg.citationsFull && msg.citationsFull.length > 0 && (
                   <View style={{ marginTop: 6, marginLeft: 4 }}>

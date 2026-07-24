@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from "react"
-import { generateSummary, getDocumentLibrary, exportOutput } from "../api/client"
+import { generateSummary, getEnterpriseSummary, getDocumentLibrary, exportOutput } from "../api/client"
 import { useTheme } from "../context/ThemeContext"
 import { getTokens } from "../theme/themeTokens"
+import type { EnterpriseSummary } from "../types/api"
 
 type DocumentItem = { id: string; filename: string; status: string }
-type SummaryResult = { document_id: string; document_name: string; summary: string; executive_summary?: string; topics?: string[] }
+type SummaryResult = { document_id: string; document_name: string; summary: string; executive_summary?: string; topics?: string[]; enterprise?: EnterpriseSummary | null }
 
 export const AnalyzeSummariesPage: React.FC = () => {
   const { theme: themeName, isDark } = useTheme()
@@ -73,16 +74,51 @@ export const AnalyzeSummariesPage: React.FC = () => {
       setError(null)
       setSummaries(null)
 
-      const res = await generateSummary(selectedDocIds)
-      const results: SummaryResult[] = (res.summaries || res.results || res.data || []).map((item: any) => ({
-        document_id: item.document_id || item.id,
-        document_name: item.document_name || item.filename || "Unknown",
-        summary: item.summary || item.text || item.content || "",
-        executive_summary: item.executive_summary,
-        topics: item.topics,
-      }))
+      // Try to get enterprise summaries for each selected document in parallel
+      const docMap = new Map(documents.map(d => [d.id, d]))
+      const results = await Promise.allSettled(
+        selectedDocIds.map(docId =>
+          getEnterpriseSummary(docId).then(esRes => ({
+            document_id: docId,
+            document_name: docMap.get(docId)?.filename || esRes.filename || "Unknown",
+            summary: esRes.summary?.executive_summary || "",
+            executive_summary: esRes.summary?.executive_summary,
+            topics: [],
+            enterprise: esRes.summary as EnterpriseSummary | null,
+          }))
+        )
+      )
 
-      setSummaries(results)
+      const enterpriseResults: SummaryResult[] = []
+      for (const r of results) {
+        if (r.status === "fulfilled") {
+          enterpriseResults.push(r.value)
+        } else {
+          enterpriseResults.push({
+            document_id: "",
+            document_name: "Failed to load",
+            summary: "",
+            topics: [],
+            enterprise: null,
+          })
+        }
+      }
+
+      // If enterprise summaries failed entirely, fall back to batch
+      if (enterpriseResults.every(r => !r.enterprise)) {
+        const res = await generateSummary(selectedDocIds)
+        const fallbackResults: SummaryResult[] = (res.summaries || res.results || res.data || []).map((item: any) => ({
+          document_id: item.document_id || item.id,
+          document_name: item.document_name || item.filename || "Unknown",
+          summary: item.summary || item.text || item.content || "",
+          executive_summary: item.executive_summary,
+          topics: item.topics,
+          enterprise: null,
+        }))
+        setSummaries(fallbackResults)
+      } else {
+        setSummaries(enterpriseResults)
+      }
     } catch (e: any) {
       setError(e.message ?? "Failed to generate summaries")
     } finally {

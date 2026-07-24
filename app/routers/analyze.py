@@ -222,6 +222,84 @@ async def api_analyze_classification(
     return {"classifications": results, "rules": rules}
 
 
+@router.get("/api/analyze/enterprise-summary/{document_id}")
+async def api_enterprise_summary(
+    document_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve the enterprise summary for a document.
+
+    Returns the structured enterprise summary JSON (doc_type, executive_summary,
+    key_findings, responsibilities, risks, etc.) if available, or generates it
+    on-demand if the document has been ingested but the enterprise summary
+    was not yet generated.
+    """
+    doc_int = _parse_document_id(document_id)
+    res = await db.execute(select(Document).where(Document.id == doc_int))
+    doc = res.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Try to load existing enterprise summary
+    analysis_res = await db.execute(select(DocAnalysis).where(DocAnalysis.document_id == doc_int))
+    analysis = analysis_res.scalar_one_or_none()
+
+    if analysis and analysis.summary_json:
+        try:
+            summary_data = json.loads(analysis.summary_json)
+            return {
+                "document_id": f"doc_{doc_int}",
+                "filename": doc.filename,
+                "summary": summary_data,
+                "status": "available",
+            }
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # If document is ingested but no enterprise summary, generate it on-demand
+    if doc.ingestion_completed and not analysis:
+        try:
+            # Read the document text and generate summary
+            from app.services.ingestion_service import extract_text
+            extracted_text = await extract_text(doc.path, doc.mime_type)
+            if extracted_text and len(extracted_text.strip()) > 50:
+                from app.services.document_summarizer import generate_enterprise_summary
+                summary_data = await generate_enterprise_summary(
+                    db, extracted_text,
+                    filename=doc.filename or "",
+                    detected_type=doc.detected_type or "",
+                )
+                return {
+                    "document_id": f"doc_{doc_int}",
+                    "filename": doc.filename,
+                    "summary": summary_data,
+                    "status": "generated",
+                }
+        except Exception as e:
+            logger.warning("[ENTERPRISE SUMMARY] On-demand generation failed for %s: %s", doc.filename, e)
+
+    # Fallback: return what we have from legacy analysis
+    data = {
+        "document_id": f"doc_{doc_int}",
+        "filename": doc.filename or "",
+        "status": "legacy",
+    }
+    if analysis:
+        data["summary"] = {
+            "doc_type": analysis.doc_type or "generic",
+            "executive_summary": analysis.executive_summary or "",
+            "key_findings": [],
+            "systems_entities": [],
+            "responsibilities": [],
+            "risks": [],
+            "actions": [],
+        }
+    else:
+        data["summary"] = None
+    return data
+
+
 @router.post("/api/analyze/compare")
 async def api_analyze_compare(
     payload: dict = Body(...),

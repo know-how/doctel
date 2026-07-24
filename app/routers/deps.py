@@ -174,7 +174,8 @@ _metrics: dict[str, int] = {"uploads_total": 0, "ingest_total": 0}
 # SSE globals – cross‑platform sync (logout, training, etc.)
 # ---------------------------------------------------------------------------
 _sse_clients: set[asyncio.Queue] = set()
-_sse_poll_buffer: list[dict] = []
+# Per-user poll buffer: each user only sees events they triggered
+_sse_poll_buffers: dict[str, list[dict]] = {}
 _sse_poll_lock = asyncio.Lock()
 
 
@@ -182,7 +183,7 @@ _sse_poll_lock = asyncio.Lock()
 # SSE helpers
 # ---------------------------------------------------------------------------
 async def _sse_broadcast(event_type: str, data: dict) -> None:
-    """Push an event to all connected SSE clients and poll buffer."""
+    """Push an event to all connected SSE clients and per-user poll buffer."""
     payload = json.dumps({"event": event_type, "data": data})
     dead = set()
     for q in _sse_clients:
@@ -191,10 +192,15 @@ async def _sse_broadcast(event_type: str, data: dict) -> None:
         except asyncio.QueueFull:
             dead.add(q)
     _sse_clients.difference_update(dead)
-    async with _sse_poll_lock:
-        _sse_poll_buffer.append({"event": event_type, "data": data})
-        if len(_sse_poll_buffer) > 50:
-            _sse_poll_buffer[:25] = []
+    # Store in per-user poll buffer so other users don't receive this event
+    user_id = str(data.get("user_id", "")) if data else ""
+    if user_id:
+        async with _sse_poll_lock:
+            if user_id not in _sse_poll_buffers:
+                _sse_poll_buffers[user_id] = []
+            _sse_poll_buffers[user_id].append({"event": event_type, "data": data})
+            if len(_sse_poll_buffers[user_id]) > 50:
+                _sse_poll_buffers[user_id][:25] = []
 
 
 async def _sse_generator(queue: asyncio.Queue):

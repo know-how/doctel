@@ -18,7 +18,7 @@ import { login, setAuthToken, requestEmailOtp, verifyEmailOtp, logout } from "./
 import zetdcLogo from "./src/assets/zetdc-logo.png"
 import { DocChatAnimation } from "./src/components/DocChatAnimation"
 import { ThemeProvider, useTheme } from "./src/context/ThemeContext"
-import { ModelProvider } from "./src/context/ModelContext"
+import { ModelProvider, useModel } from "./src/context/ModelContext"
 import { SidebarDrawer } from "./src/navigation/SidebarDrawer"
 import { InlineSidebar } from "./src/navigation/InlineSidebar"
 import { DocumentLibraryScreen } from "./src/screens/DocumentLibraryScreen"
@@ -129,6 +129,7 @@ function AppContent() {
   const [documentId, setDocumentId] = useState("doc_1")
   const [documentViewFilename, setDocumentViewFilename] = useState<string | undefined>(undefined)
   const { ecNumber, setEcNumber } = useEcNumber()
+  const { reloadModels } = useModel()
   const [activeTab, setActiveTab] = useState<ScreenType>("main")
   const [inputValue, setInputValue] = useState(ecNumber)
   const [password, setPassword] = useState("")
@@ -642,6 +643,8 @@ function AppContent() {
                         setDisplayName(res.display_name || res.ec_number)
                         setUserRole(res.role || "")
                         setPassword("")
+                        // Reload models with auth so task mappings are picked up
+                        try { await reloadModels() } catch {}
                       } else {
                         if (!email.trim() || !isValidZetdcEmail) return
                         if (!emailSent) {
@@ -659,6 +662,8 @@ function AppContent() {
                           setDisplayName(res.display_name || res.ec_number)
                           setUserRole(res.role || "")
                           setEmailCode("")
+                          // Reload models with auth so task mappings are picked up
+                          try { await reloadModels() } catch {}
                         }
                       }
                     } catch (e: any) {

@@ -80,16 +80,7 @@ def _extract_content(data: dict) -> str:
             parts = [item.get("text", "") for item in c if isinstance(item, dict)]
             return " ".join(parts).strip()
 
-    # Strategy 3: reasoning_content as fallback content
-    if "choices" in data:
-        choices = data["choices"]
-        if choices and isinstance(choices, list) and len(choices) > 0:
-            msg = choices[0].get("message") or {}
-            rc = msg.get("reasoning_content")
-            if rc and isinstance(rc, str):
-                return rc.strip()
-
-    # Strategy 4: Non-standard keys
+    # Strategy 3: Non-standard keys
     for key in ("output", "text", "response", "result", "generated_text", "completion"):
         if key in data and isinstance(data[key], str):
             return data[key].strip()
@@ -148,7 +139,7 @@ async def chat_completion(
         "model": model,
         "messages": messages,
         "temperature": 0.3,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
     }
     # Only add Authorization header if api_key is provided
     # Ollama and local providers don't require API keys
@@ -239,18 +230,35 @@ async def chat_completion(
 
     content = _extract_content(data)
     reasoning_text = _extract_reasoning(data)
-    if not content:
-        if reasoning_text and system:
-            logger.info("Reasoning-only response, retrying without system prompt")
-            fallback_messages = [{"role": "user", "content": prompt}]
-            fallback_body = {"model": model, "messages": fallback_messages, "temperature": 0.3, "max_tokens": 2048}
-            resp2 = await client.post(url, json=fallback_body, headers=headers)
-            if resp2.status_code < 400:
-                data2 = resp2.json()
-                content = _extract_content(data2)
-                # Capture reasoning from fallback response too
-                if not reasoning_text:
-                    reasoning_text = _extract_reasoning(data2)
+
+    # ── Retry logic for incomplete responses ────────────────────────────
+    # DeepSeek-style reasoning models may exhaust their output token budget
+    # on chain-of-thought (finish_reason="length"), leaving content empty.
+    # Retry with a higher max_tokens limit when this happens.
+    finish_reason = None
+    choices = data.get("choices") or []
+    if choices and isinstance(choices, list) and len(choices) > 0:
+        finish_reason = choices[0].get("finish_reason")
+
+    should_retry = not content and (
+        finish_reason == "length"  # token limit hit
+        or (reasoning_text and system)  # reasoning-only (old heuristic)
+    )
+    if should_retry:
+        logger.info(
+            "Reasoning-only/incomplete response (finish_reason=%s, reasoning_len=%d), "
+            "retrying with higher max_tokens",
+            finish_reason, len(reasoning_text),
+        )
+        # Retry without system prompt to save token budget
+        retry_messages = [{"role": "user", "content": prompt}]
+        retry_body = {"model": model, "messages": retry_messages, "temperature": 0.3, "max_tokens": 16384}
+        resp2 = await client.post(url, json=retry_body, headers=headers)
+        if resp2.status_code < 400:
+            data2 = resp2.json()
+            content = _extract_content(data2)
+            if not reasoning_text:
+                reasoning_text = _extract_reasoning(data2)
 
     return content, reasoning_text or ""
 
@@ -280,7 +288,7 @@ async def chat_completion_stream(
         "model": model,
         "messages": messages,
         "temperature": 0.3,
-        "max_tokens": 2048,
+        "max_tokens": 8192,
         "stream": True,
     }
     # Only add Authorization header if api_key is provided

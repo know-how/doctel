@@ -10,6 +10,9 @@ import { ChatHeader } from "../components/ChatHeader"
 import { WelcomeScreen } from "../components/WelcomeScreen"
 import { ChatMessage, Message } from "../components/ChatMessage"
 import { ChatInput } from "../components/ChatInput"
+import { AudioContextCardMobile } from "../components/AudioContextCardMobile"
+import { AgentExecutionCardMobile } from "../components/AgentExecutionCardMobile"
+import { MeetingSummaryCardMobile } from "../components/MeetingSummaryCardMobile"
 import { isCloudModel } from "../utils/modelUtils"
 
 const generateId = () => `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -65,10 +68,36 @@ export function NewChatScreen({ onOpenDocument }: NewChatScreenProps) {
   const [attachedPreview, setAttachedPreview] = useState<string | null>(null)
   const [promptSuggestions, setPromptSuggestions] = useState<{ id: number; title: string; prompt_text: string; icon: string; category: string }[]>([])
   const [loadingPrompts, setLoadingPrompts] = useState(false)
+
+  // ── Audio session context (persistent recording context) ──
+  const [audioContext, setAudioContext] = useState<{
+    filename: string
+    transcript: string
+    summary?: string
+    durationSec?: number | null
+    entities?: string[]
+    topics?: string[]
+  } | null>(null)
+
+  // ── Agent execution results (from response metadata) ──
+  const [agentExecution, setAgentExecution] = useState<{
+    agentsExecuted: number
+    agentResults?: any[]
+    executionSummary?: string
+    mergedEntities?: string[]
+    mergedActions?: any[]
+    mergedDecisions?: any[]
+    mergedRisks?: any[]
+    totalDurationMs?: number
+  } | null>(null)
+
+  // ── Meeting analysis results ──
+  const [meetingAnalysis, setMeetingAnalysis] = useState<any | null>(null)
+
   const recordingRef = useRef<Audio.Recording | null>(null)
   const scrollRef = useRef<ScrollView>(null)
-  const { selectedModel, setSelectedModel, availableModels: models, modelCapabilities, modelLabels, loading: loadingModels, v2Providers, taskDefaults, setModelForTask } = useModel()
-  const cloudModel = isCloudModel(selectedModel, v2Providers)
+  const { selectedModel, setSelectedModel, availableModels: models, modelCapabilities, modelLabels, modelDetails, loading: loadingModels, v2Providers, taskDefaults, setModelForTask } = useModel()
+  const cloudModel = isCloudModel(selectedModel, modelDetails, v2Providers)
 
   // Load prompt suggestions
   useEffect(() => {
@@ -86,12 +115,13 @@ export function NewChatScreen({ onOpenDocument }: NewChatScreenProps) {
     loadPrompts()
   }, [])
 
-  // Apply task mapping for chat
+  // Apply task mapping for chat — always auto-select when models are loaded
+  // Falls back through: task mapping → auto-routing → stored → chat default → default_model → first available
   useEffect(() => {
-    if (!loadingModels && Object.keys(taskDefaults).length > 0) {
+    if (!loadingModels && models.length > 0) {
       setModelForTask("chat")
     }
-  }, [loadingModels, taskDefaults])
+  }, [loadingModels, taskDefaults, models])
 
   // Create session on mount
   useEffect(() => {
@@ -173,13 +203,24 @@ export function NewChatScreen({ onOpenDocument }: NewChatScreenProps) {
     try {
       const recording = recordingRef.current
       if (!recording) return
+      const status = await recording.getStatusAsync()
+      const recordedDurationMs = status?.durationMillis ?? null
       await recording.stopAndUnloadAsync()
       const uri = recording.getURI() || ""
+      const filename = uri.split("/").pop() || "recording.m4a"
       setIsRecording(false)
       setIsTranscribing(true)
       try {
-        const result = await transcribeAudio(uri, "recording.m4a", "audio/m4a")
-        if (result.text?.trim()) setInput(result.text.trim())
+        const result = await transcribeAudio(uri, filename, "audio/m4a")
+        if (result.text?.trim()) {
+          setInput(result.text.trim())
+          // Populate persistent audio context so AudioContextCardMobile appears
+          setAudioContext({
+            filename,
+            transcript: result.text,
+            durationSec: recordedDurationMs != null ? recordedDurationMs / 1000 : null,
+          })
+        }
       } catch {} finally { setIsTranscribing(false) }
     } catch { setIsRecording(false) }
   }
@@ -264,14 +305,12 @@ export function NewChatScreen({ onOpenDocument }: NewChatScreenProps) {
 
       if (isStreamingModel) {
         // ── Streaming path (for cloud/V2 models) ──
-        // Matches the web frontend's chatGloballyStream flow
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === thinkingId
-              ? { ...m, content: "", uiStatus: "streaming" as const }
-              : m,
-          ),
-        )
+        // Do NOT pre-set uiStatus to "streaming" — that causes a visible
+        // flash of the Thinking... indicator when ReadableStream is not
+        // available (React Native) and the chatGloballyStream fallback
+        // calls onChunk + onDone in rapid succession. Instead, the
+        // onChunk callback transitions from "waiting" to "streaming"
+        // on the first chunk received, which is visually seamless.
 
         let fullAnswer = ""
         await chatGloballyStream(
@@ -287,7 +326,12 @@ export function NewChatScreen({ onOpenDocument }: NewChatScreenProps) {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === thinkingId
-                    ? { ...m, content: (m.content || "") + chunk, uiStatus: "streaming" as const }
+                    ? {
+                        ...m,
+                        content: (m.content || "") + chunk,
+                        // Transition from waiting → streaming on first chunk
+                        uiStatus: m.uiStatus === "waiting" ? "streaming" as const : m.uiStatus,
+                      }
                     : m,
                 ),
               )
@@ -296,7 +340,12 @@ export function NewChatScreen({ onOpenDocument }: NewChatScreenProps) {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === thinkingId
-                    ? { ...m, reasoning: (m.reasoning || "") + reasoning }
+                    ? {
+                        ...m,
+                        reasoning: (m.reasoning || "") + reasoning,
+                        // Reasoning chunks also transition from waiting → streaming
+                        uiStatus: m.uiStatus === "waiting" ? "streaming" as const : m.uiStatus,
+                      }
                     : m,
                 ),
               )
@@ -430,6 +479,20 @@ export function NewChatScreen({ onOpenDocument }: NewChatScreenProps) {
             </View>
           )}
         </ScrollView>
+
+        {/* Audio context card (persistent recording context) */}
+        {audioContext && (
+          <AudioContextCardMobile
+            audioContext={audioContext}
+            onRemove={() => setAudioContext(null)}
+            onAnalyzeMeeting={() => {
+              // TODO: Call meeting analysis agent with transcript
+            }}
+            onAddToKnowledgeBase={() => {
+              // TODO: Add transcript to knowledge base
+            }}
+          />
+        )}
 
         {/* Attachment preview */}
         {attachedFile && (

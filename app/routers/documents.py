@@ -106,6 +106,18 @@ async def list_documents(
     q = q.order_by(Document.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(q)
     docs = list(result.scalars().all())
+
+    # Batch-load doc_types for all documents (avoids N+1 queries)
+    doc_ids = [d.id for d in docs]
+    doc_type_rows = await db.execute(
+        select(DocAnalysis.document_id, DocAnalysis.doc_type).where(
+            DocAnalysis.document_id.in_(doc_ids)
+        )
+    )
+    doc_type_map: dict = {}
+    for row in doc_type_rows.all():
+        doc_type_map[row.document_id] = row.doc_type
+
     items = []
     for d in docs:
         proj_name = ""
@@ -117,12 +129,15 @@ async def list_documents(
             doc_tags = json.loads(d.tags_json) if d.tags_json else []
         except Exception:
             doc_tags = []
+        doc_type: str | None = doc_type_map.get(d.id)
+
         items.append({
             "id": f"doc_{d.id}",
             "filename": d.filename,
             "project_id": str(d.project_id) if d.project_id is not None else None,
             "project_name": proj_name,
             "status": d.status or "uploaded",
+            "doc_type": doc_type,
             "is_public": bool(getattr(d, "is_public", False)),
             "tags": doc_tags,
             "created_at": str(d.created_at) if getattr(d, "created_at", None) else "",
@@ -136,6 +151,46 @@ async def list_documents(
 @router.get("/api/documents/{document_id}/download")
 async def download_document_file_api(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     return await _download_document_file(document_id=document_id, user=user, db=db)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/documents/{document_id}/preview/{chunk_index} — preview a chunk
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# GET /api/documents/{document_id}/chunks — list all chunks for a document
+# ---------------------------------------------------------------------------
+@router.get("/api/documents/{document_id}/chunks")
+async def list_document_chunks(
+    document_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    doc_int = _parse_document_id(document_id)
+    doc_res = await db.execute(select(Document).where(Document.id == doc_int))
+    doc = doc_res.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    await assert_can_view(doc, user, db)
+    result = await db.execute(
+        select(Chunk).where(Chunk.document_id == doc_int).order_by(Chunk.chunk_index)
+    )
+    chunks = list(result.scalars().all())
+    await log_interaction(
+        db, user.id, "list_chunks", "document", f"doc_{doc.id}",
+        {"filename": doc.filename, "chunk_count": len(chunks)},
+    )
+    return {
+        "document_id": document_id,
+        "filename": doc.filename,
+        "total_chunks": len(chunks),
+        "chunks": [
+            {
+                "chunk_index": c.chunk_index,
+                "text": c.text,
+            }
+            for c in chunks
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -324,10 +379,23 @@ async def my_documents(page: int = 1, page_size: int = 50, user: User = Depends(
         q = select(Document).where(base_where).order_by(Document.created_at.desc()).offset((pg - 1) * pg_sz).limit(pg_sz)
     dres = await db.execute(q)
     docs = list(dres.scalars().all())
+    # Batch-load doc_types for all documents (avoids N+1 queries)
+    doc_ids = [d.id for d in docs]
+    doc_type_rows = await db.execute(
+        select(DocAnalysis.document_id, DocAnalysis.doc_type).where(
+            DocAnalysis.document_id.in_(doc_ids)
+        )
+    )
+    doc_type_map: dict = {}
+    for row in doc_type_rows.all():
+        doc_type_map[row.document_id] = row.doc_type
+
     items = []
     for d in docs:
         pres = await db.execute(select(Project).where(Project.id == d.project_id))
         p = pres.scalar_one_or_none()
+        doc_type: str | None = doc_type_map.get(d.id)
+
         items.append(
             {
                 "id": f"doc_{d.id}",
@@ -335,6 +403,7 @@ async def my_documents(page: int = 1, page_size: int = 50, user: User = Depends(
                 "project_id": str(d.project_id) if d.project_id is not None else None,
                 "project_name": p.name if p else "",
                 "status": d.status,
+                "doc_type": doc_type,
                 "is_public": bool(getattr(d, "is_public", False)),
                 "created_at": str(d.created_at) if getattr(d, "created_at", None) else "",
                 "download_url": f"/api/documents/doc_{d.id}/download",

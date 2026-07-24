@@ -2,12 +2,15 @@ import React, { useEffect, useRef, useState } from "react"
 import { MermaidView } from "../components/MermaidView"
 import {
   DocumentAnalysisResponse,
+  EnterpriseSummary,
   ChatMessage,
   SummaryHistoryEntry,
   OllamaModelDetail,
 } from "../types/api"
 import {
   getDocumentAnalysis,
+  getEnterpriseSummary,
+  getDocumentChunks,
   getDocumentPrompts,
   suggestPrompts,
   chatWithDocument,
@@ -60,11 +63,190 @@ type UIChatMessage = Omit<ChatMessage, "id"> & {
 
 const GLOBAL_CHAT_SESSION_KEY = "docintel_chat_session_global"
 const GLOBAL_SUGGESTED_PROMPTS = [
-  "What are the main ZETDC governance, compliance, and operational priorities I should know?",
-  "Summarize what internal knowledge says about this topic and note any conflicting guidance.",
-  "Search the web if needed and give me the latest external guidance in plain language.",
-  "Use transferred learning and organizational context to suggest the best next steps.",
+  "What knowledge and documents are available in my workspace?",
+  "Summarise my recent documents and highlight key topics.",
+  "What are the main business systems, processes, and workflows across my documents?",
+  "Identify any risks, compliance requirements, or action items across my knowledge base.",
 ]
+
+/**
+ * Generate context-aware fallback prompts based on a document analysis response.
+ * Uses topics, entities, sentiment, and actions to produce specific, actionable prompts.
+ */
+function generateFallbackPrompts(analysis: DocumentAnalysisResponse | null): string[] {
+  const topics = analysis?.topics || []
+  const entities = analysis?.entities || []
+  const hasActions = (analysis?.action_items?.length ?? 0) > 0
+  const hasDecisions = (analysis?.decisions?.length ?? 0) > 0
+
+  const topicLower = topics.map(t => t.toLowerCase())
+
+  // Detect document domain from topics and entities
+  const isBilling = topicLower.some(t => t.includes('bill') || t.includes('payment') || t.includes('tariff') || t.includes('meter'))
+  const isOMS = topicLower.some(t => t.includes('oms') || t.includes('outage') || t.includes('fault') || t.includes('incident'))
+  const isCRM = topicLower.some(t => t.includes('crm') || t.includes('customer') || t.includes('service') || t.includes('case'))
+  const isNDPM = topicLower.some(t => t.includes('ndpm') || t.includes('connection') || t.includes('commission') || t.includes('workflow'))
+  const isHR = topicLower.some(t => t.includes('hr') || t.includes('employee') || t.includes('staff') || t.includes('personnel'))
+  const isPolicy = topicLower.some(t => t.includes('policy') || t.includes('compliance') || t.includes('regulation') || t.includes('governance'))
+
+  // Build domain-specific prompt suggestions
+  const prompts: string[] = []
+
+  if (isBilling) {
+    prompts.push(
+      "Explain the billing lifecycle described in this document, including key steps and systems.",
+      "What payment methods, collection processes, and account adjustments are documented?",
+    )
+  } else if (isOMS) {
+    prompts.push(
+      "Describe the outage management workflow, including fault detection, dispatch, and restoration.",
+      "How is the OMS integrated with the CRM, billing, and notification systems?",
+    )
+  } else if (isCRM) {
+    prompts.push(
+      "Explain the customer journey as described in this document, from enquiry through resolution.",
+      "What CRM integrations with other enterprise systems are documented?",
+    )
+  } else if (isNDPM) {
+    prompts.push(
+      "Walk through the new connection process from application to commissioning.",
+      "What roles and responsibilities are involved in each stage of the NDPM workflow?",
+    )
+  } else if (isHR) {
+    prompts.push(
+      "Summarise the HR policies, employee lifecycle, and organisational structure described.",
+      "What staff roles, responsibilities, and performance criteria are documented?",
+    )
+  } else if (isPolicy) {
+    prompts.push(
+      "Summarise the key policy requirements, compliance obligations, and governance rules.",
+      "What are the enforcement mechanisms and escalation procedures described?",
+    )
+  } else {
+    prompts.push(
+      "Summarise this document in 10 sentences or less, focusing on the key purpose and scope.",
+      "List the main systems, processes, and entities referenced in this document.",
+    )
+  }
+
+  if (hasActions) {
+    prompts.push("List all action items and decisions mentioned in this document with ownership details.")
+  } else {
+    prompts.push("What key requirements, deadlines, and responsibilities are mentioned?")
+  }
+
+  prompts.push("Generate a Mermaid process flow diagram based on the key steps in this document.")
+
+  if (entities.length > 0) {
+    prompts.push(`Analyse the relationships between key entities: ${entities.slice(0, 5).join(', ')}.`)
+  } else {
+    prompts.push("Extract all key entities: systems, departments, roles, locations, and dates.")
+  }
+
+  if (hasDecisions) {
+    prompts.push("What decisions were made and what are their business implications?")
+  }
+
+  return prompts.slice(0, 6)
+}
+
+/**
+ * Compute top N related documents by comparing entity + topic overlap with the current document.
+ * Uses Jaccard similarity (intersection / union) on topics, then entity overlap as tiebreaker.
+ */
+interface RelatedDocResult {
+  id: string
+  filename: string
+  project_name?: string
+  score: number
+  match_reasons: string[]
+  matched_topics: string[]
+  matched_entities: string[]
+}
+
+async function computeRelatedDocuments(
+  currentAnalysis: DocumentAnalysisResponse,
+  maxDocs: number = 50,
+): Promise<RelatedDocResult[]> {
+  const currentTopics = (currentAnalysis.topics || []).map(t => t.toLowerCase())
+  const currentEntities = (currentAnalysis.entities || []).map(e => e.toLowerCase())
+
+  if (currentTopics.length === 0 && currentEntities.length === 0) {
+    return []
+  }
+
+  let allDocs: any[]
+  try {
+    const res = await getMyDocuments(1, maxDocs)
+    allDocs = res?.documents || []
+  } catch {
+    return []
+  }
+
+  if (allDocs.length === 0) return []
+
+  const results: RelatedDocResult[] = []
+
+  // Fetch analysis for all documents in parallel (tolerate failures)
+  const analysisResults = await Promise.allSettled(
+    allDocs.map(doc =>
+      getDocumentAnalysis(doc.id).then(analysis => ({ doc, analysis }))
+    ),
+  )
+
+  for (const result of analysisResults) {
+    if (result.status !== "fulfilled") continue
+    const { doc, analysis } = result.value
+    if (!analysis || analysis.status !== "READY") continue
+
+    // Skip the current document itself
+    if (doc.id === currentAnalysis.id) continue
+
+    const docTopics = (analysis.topics || []).map(t => t.toLowerCase())
+    const docEntities = (analysis.entities || []).map(e => e.toLowerCase())
+
+    // Jaccard similarity on topics
+    const topicSet = new Set(currentTopics)
+    const docTopicSet = new Set(docTopics)
+    const topicIntersection = currentTopics.filter(t => docTopicSet.has(t)).length
+    const topicUnion = new Set([...topicSet, ...docTopicSet]).size
+    const topicScore = topicUnion > 0 ? topicIntersection / topicUnion : 0
+
+    // Entity overlap (fraction of current entities found in the other doc)
+    const entityMatchCount = currentEntities.filter(e => docEntities.includes(e)).length
+    const entityScore = currentEntities.length > 0 ? entityMatchCount / currentEntities.length : 0
+
+    // Combined score: 60% topic + 40% entity
+    const score = topicScore * 0.6 + entityScore * 0.4
+
+    if (score <= 0) continue
+
+    // Build match reasons
+    const matchReasons: string[] = []
+    const matchedTopics = docTopics.filter(t => currentTopics.includes(t))
+    const matchedEntities = docEntities.filter(e => currentEntities.includes(e))
+
+    if (matchedTopics.length > 0) {
+      matchReasons.push(`Shared topics: ${matchedTopics.slice(0, 3).join(", ")}`)
+    }
+    if (matchedEntities.length > 0) {
+      matchReasons.push(`Shared entities: ${matchedEntities.slice(0, 3).join(", ")}`)
+    }
+
+    results.push({
+      id: doc.id || analysis.id,
+      filename: doc.filename || analysis.filename || "Unknown",
+      project_name: doc.project_name || analysis.project_name,
+      score: Math.round(score * 100) / 100,
+      match_reasons: matchReasons,
+      matched_topics: matchedTopics.slice(0, 5),
+      matched_entities: matchedEntities.slice(0, 5),
+    })
+  }
+
+  // Sort by score descending, return top 5
+  return results.sort((a, b) => b.score - a.score).slice(0, 5)
+}
 
 function renderRichContent(apiBaseUrl: string, content: string) {
   const text = String(content || "")
@@ -163,6 +345,9 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   
   const [activeDocumentId, setActiveDocumentId] = useState(documentId)
   const [analysis, setAnalysis] = useState<DocumentAnalysisResponse | null>(null)
+  const [enterpriseSummary, setEnterpriseSummary] = useState<EnterpriseSummary | null>(null)
+  const [relatedDocuments, setRelatedDocuments] = useState<RelatedDocResult[]>([])
+  const [loadingRelated, setLoadingRelated] = useState(false)
   const [prompts, setPrompts] = useState<string[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [chatMessages, setChatMessages] = useState<UIChatMessage[]>([])
@@ -229,6 +414,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
   const [pollIngestMs, setPollIngestMs] = useState(1500)
   const [pollPullMs, setPollPullMs] = useState(800)
   const [clearOnSend, setClearOnSend] = useState(true)
+  const [docChunks, setDocChunks] = useState<{ chunk_index: number; text: string }[] | null>(null)
+  const [showDocContent, setShowDocContent] = useState(false)
   const pendingAskRef = useRef<{ documentId: string; text: string } | null>(null)
   const [bootstrapRunning, setBootstrapRunning] = useState(false)
   const [bootstrapPercent, setBootstrapPercent] = useState(0)
@@ -315,6 +502,8 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
     // When activeDocumentId changes, handle analysis/prompts/chat reset
     if (!activeDocumentId) {
       setAnalysis(null)
+      setEnterpriseSummary(null)
+      setRelatedDocuments([])
       setPrompts(GLOBAL_SUGGESTED_PROMPTS)
       setSessionId(null)
       setChatMessages([])
@@ -626,13 +815,35 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         ])
         setAnalysis(analysisRes)
         const rawPrompts: string[] = (promptsRes as any).prompts || []
-        setPrompts(rawPrompts.length > 0 ? rawPrompts : [
-          "Summarize this document in 10 sentences or less.",
-          "List the key topics and entities mentioned in this document.",
-          "List all action items and decisions mentioned in this document.",
-          "Generate a process flow diagram (Mermaid) based on this document.",
-          "What are the key requirements, deadlines, and responsibilities mentioned?",
-        ])
+        setPrompts(rawPrompts.length > 0 ? rawPrompts : generateFallbackPrompts(analysisRes))
+        // Fetch enterprise summary
+        try {
+          const esRes = await getEnterpriseSummary(activeDocumentId)
+          if (esRes.summary && Object.keys(esRes.summary).length > 0) {
+            setEnterpriseSummary(esRes.summary as EnterpriseSummary)
+          }
+        } catch {
+          // Enterprise summary not available — fine, use legacy analysis
+        }
+        // Fetch related documents by comparing entities and topics
+        if (analysisRes && analysisRes.status === "READY") {
+          setLoadingRelated(true)
+          computeRelatedDocuments(analysisRes).then(related => {
+            setRelatedDocuments(related)
+          }).catch(() => {}).finally(() => {
+            setLoadingRelated(false)
+          })
+        }
+        // Fetch document chunks for content preview
+        try {
+          const chunkRes = await getDocumentChunks(activeDocumentId)
+          if (chunkRes?.chunks && chunkRes.chunks.length > 0) {
+            setDocChunks(chunkRes.chunks)
+          }
+        } catch {
+          // Chunks not available yet
+          setDocChunks(null)
+        }
         setSummaryHistory(summaryRes.history)
         if (analysisRes.status !== "READY") {
           try {
@@ -710,14 +921,17 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
       ])
       if (cancelled) return
       setAnalysis(analysisRes)
+      // Also refresh enterprise summary
+      try {
+        const esRes = await getEnterpriseSummary(activeDocumentId)
+        if (esRes.summary && Object.keys(esRes.summary).length > 0) {
+          setEnterpriseSummary(esRes.summary as EnterpriseSummary)
+        }
+      } catch {
+        // Enterprise summary not available yet
+      }
       const refreshedPrompts: string[] = (promptsRes as any).prompts || []
-      setPrompts(refreshedPrompts.length > 0 ? refreshedPrompts : [
-        "Summarize this document in 10 sentences or less.",
-        "List the key topics and entities mentioned in this document.",
-        "List all action items and decisions mentioned in this document.",
-        "Generate a process flow diagram (Mermaid) based on this document.",
-        "What are the key requirements, deadlines, and responsibilities mentioned?",
-      ])
+      setPrompts(refreshedPrompts.length > 0 ? refreshedPrompts : generateFallbackPrompts(analysisRes))
       setIngestStatus(null)
     }
 
@@ -1438,7 +1652,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           Analysis Dashboard
         </div>
         <div style={{ fontSize: 12, color: c.textMuted }}>
-            {activeDocumentId || "No document selected"}
+            {analysis?.filename ? `Document: ${analysis.filename}` : activeDocumentId ? "Selected" : "No document selected"}
         </div>
       </div>
 
@@ -1565,6 +1779,334 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           )}
         </div>
       )}
+      {/* ── Document Intelligence Card ── */}
+      {analysis && analysis.status === "READY" && (
+        <div style={cardStyle}>
+          <div style={cardHeaderStyle}>
+            <span>📊 Document Intelligence</span>
+            {analysis.sentiment && (
+              <span style={{
+                ...pillStyle,
+                backgroundColor: analysis.sentiment === 'Positive' ? 'rgba(22,163,74,0.15)' :
+                  analysis.sentiment === 'Urgent' ? 'rgba(239,68,68,0.15)' :
+                  analysis.sentiment === 'Negative' ? 'rgba(245,158,11,0.15)' :
+                  'rgba(107,114,128,0.15)',
+                borderColor: analysis.sentiment === 'Positive' ? 'rgba(22,163,74,0.25)' :
+                  analysis.sentiment === 'Urgent' ? 'rgba(239,68,68,0.25)' :
+                  analysis.sentiment === 'Negative' ? 'rgba(245,158,11,0.25)' :
+                  'rgba(107,114,128,0.25)',
+                color: analysis.sentiment === 'Positive' ? '#4ADE80' :
+                  analysis.sentiment === 'Urgent' ? '#F87171' :
+                  analysis.sentiment === 'Negative' ? '#FBBF24' :
+                  '#9CA3AF',
+              }}>
+                {analysis.sentiment}
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {analysis.topics && analysis.topics.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Business Areas</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {analysis.topics.slice(0, 6).map(topic => (
+                    <span key={topic} style={chipStyle}>{topic}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {analysis.entities && analysis.entities.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Systems & Entities</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {analysis.entities.slice(0, 8).map(entity => (
+                    <span key={entity} style={chipOutlineStyle}>{entity}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {(analysis.action_items?.length ?? 0) > 0 && (
+                <span style={{
+                  padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+                  background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.2)", color: "#FCD34D",
+                }}>
+                  ⚡ {(analysis.action_items?.length ?? 0)} Action{(analysis.action_items?.length ?? 0) !== 1 ? 's' : ''}
+                </span>
+              )}
+              {(analysis.decisions?.length ?? 0) > 0 && (
+                <span style={{
+                  padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+                  background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.2)", color: "#60A5FA",
+                }}>
+                  ✓ {(analysis.decisions?.length ?? 0)} Decision{(analysis.decisions?.length ?? 0) !== 1 ? 's' : ''}
+                </span>
+              )}
+              {analysis.document_type && (
+                <span style={{
+                  padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+                  background: "rgba(139,92,246,0.12)", border: "1px solid rgba(139,92,246,0.2)", color: "#A78BFA",
+                }}>
+                  📄 {analysis.document_type}
+                </span>
+              )}
+              {enterpriseSummary && enterpriseSummary.doc_type && (
+                <span style={{
+                  padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 700,
+                  background: "rgba(16,185,129,0.12)", border: "1px solid rgba(16,185,129,0.25)", color: "#34D399",
+                  textTransform: "uppercase", letterSpacing: "0.5px",
+                }}>
+                  🏷 {enterpriseSummary.doc_type}
+                </span>
+              )}
+              {enterpriseSummary && enterpriseSummary.key_findings && enterpriseSummary.key_findings.length > 0 && (
+                <span style={{
+                  padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+                  background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.2)", color: "#60A5FA",
+                }}>
+                  🔍 {enterpriseSummary.key_findings.length} Finding{enterpriseSummary.key_findings.length !== 1 ? 's' : ''}
+                </span>
+              )}
+              {enterpriseSummary && enterpriseSummary.risks && enterpriseSummary.risks.length > 0 && (
+                <span style={{
+                  padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+                  background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.2)", color: "#F87171",
+                }}>
+                  ⚠ {enterpriseSummary.risks.length} Risk{enterpriseSummary.risks.length !== 1 ? 's' : ''}
+                </span>
+              )}
+              {enterpriseSummary && enterpriseSummary.actions && enterpriseSummary.actions.length > 0 && (
+                <span style={{
+                  padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+                  background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.2)", color: "#FCD34D",
+                }}>
+                  ✓ {enterpriseSummary.actions.length} Action{enterpriseSummary.actions.length !== 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── Enterprise Summary Card ── */}
+      {analysis && analysis.status === "READY" && enterpriseSummary && (
+        <div style={cardStyle}>
+          <div style={cardHeaderStyle}>
+            <span>🏢 Enterprise Summary</span>
+            {enterpriseSummary.doc_type && (
+              <span style={{ ...pillStyle, backgroundColor: "rgba(99,102,241,0.15)", borderColor: "rgba(99,102,241,0.25)", color: "#818CF8" }}>
+                {enterpriseSummary.doc_type.toUpperCase()}
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {enterpriseSummary.executive_summary && (
+              <div>
+                <div style={sectionLabelStyle}>Executive Summary</div>
+                <p style={{ fontSize: 13, lineHeight: 1.6, color: c.textSecondary, margin: "4px 0 0" }}>
+                  {enterpriseSummary.executive_summary}
+                </p>
+              </div>
+            )}
+            {enterpriseSummary.key_findings && enterpriseSummary.key_findings.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Key Findings ({enterpriseSummary.key_findings.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                  {enterpriseSummary.key_findings.slice(0, 5).map((f, i) => (
+                    <div key={i} style={{ fontSize: 13, color: c.textSecondary, paddingLeft: 12, borderLeft: `2px solid ${c.border}` }}>
+                      {f}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {enterpriseSummary.systems_entities && enterpriseSummary.systems_entities.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Systems & Entities</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                  {enterpriseSummary.systems_entities.slice(0, 8).map((e, i) => (
+                    <span key={i} style={{
+                      padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 500,
+                      backgroundColor: "rgba(139,92,246,0.12)", border: "1px solid rgba(139,92,246,0.2)", color: "#A78BFA",
+                    }}>
+                      {e.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {enterpriseSummary.risks && enterpriseSummary.risks.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Risks ({enterpriseSummary.risks.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                  {enterpriseSummary.risks.slice(0, 4).map((r, i) => (
+                    <div key={i} style={{
+                      fontSize: 12, color: c.textSecondary, padding: "6px 10px",
+                      borderRadius: 8, backgroundColor: "rgba(239,68,68,0.08)",
+                      border: "1px solid rgba(239,68,68,0.15)",
+                    }}>
+                      <span style={{ fontWeight: 600, color: "#F87171" }}>⚠ </span>
+                      {r.risk}
+                      {r.mitigation && <div style={{ marginTop: 2, fontSize: 11, color: c.textMuted }}>Mitigation: {r.mitigation}</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {enterpriseSummary.actions && enterpriseSummary.actions.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Actions ({enterpriseSummary.actions.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                  {enterpriseSummary.actions.slice(0, 4).map((a, i) => (
+                    <div key={i} style={{ fontSize: 13, color: c.textSecondary, paddingLeft: 12, borderLeft: `2px solid ${c.border}` }}>
+                      {a}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {enterpriseSummary.responsibilities && enterpriseSummary.responsibilities.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Responsibilities</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                  {enterpriseSummary.responsibilities.slice(0, 4).map((r, i) => (
+                    <div key={i} style={{
+                      fontSize: 12, color: c.textSecondary, padding: "6px 10px",
+                      borderRadius: 8, backgroundColor: "rgba(59,130,246,0.06)",
+                      border: "1px solid rgba(59,130,246,0.12)",
+                    }}>
+                      <span style={{ fontWeight: 600 }}>{r.role}</span>
+                      {r.department && <span style={{ color: c.textMuted }}> · {r.department}</span>}
+                      <div style={{ marginTop: 2, fontSize: 11 }}>{r.responsibility}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {enterpriseSummary.functional_requirements && enterpriseSummary.functional_requirements.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Requirements ({enterpriseSummary.functional_requirements.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                  {enterpriseSummary.functional_requirements.slice(0, 5).map((r, i) => (
+                    <div key={i} style={{ fontSize: 13, color: c.textSecondary, paddingLeft: 12, borderLeft: `2px solid ${c.border}` }}>
+                      {r}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {enterpriseSummary.decisions && enterpriseSummary.decisions.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Decisions ({enterpriseSummary.decisions.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                  {enterpriseSummary.decisions.slice(0, 4).map((d, i) => (
+                    <div key={i} style={{ fontSize: 13, color: c.textSecondary, paddingLeft: 12, borderLeft: `2px solid ${c.border}` }}>
+                      {d}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {enterpriseSummary.compliance_requirements && enterpriseSummary.compliance_requirements.length > 0 && (
+              <div>
+                <div style={sectionLabelStyle}>Compliance Requirements</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                  {enterpriseSummary.compliance_requirements.slice(0, 4).map((c, i) => (
+                    <div key={i} style={{ fontSize: 13, color: c.textSecondary, paddingLeft: 12, borderLeft: `2px solid ${c.border}` }}>
+                      {c}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {enterpriseSummary.business_impact && (
+              <div>
+                <div style={sectionLabelStyle}>Business Impact</div>
+                <p style={{ fontSize: 13, lineHeight: 1.6, color: c.textSecondary, margin: "4px 0 0" }}>
+                  {enterpriseSummary.business_impact}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {analysis && analysis.status === "READY" && (
+        <div style={cardStyle}>
+          <div style={cardHeaderStyle}>
+            <span>Related Documents</span>
+            {loadingRelated && (
+              <span style={{ fontSize: 11, color: c.textMuted }}>Computing similarity…</span>
+            )}
+            {!loadingRelated && relatedDocuments.length > 0 && (
+              <span style={{ fontSize: 11, color: c.textMuted }}>Top {relatedDocuments.length}</span>
+            )}
+          </div>
+          {!loadingRelated && relatedDocuments.length === 0 && (
+            <div style={{ fontSize: 13, color: c.textMuted }}>
+              No related documents found. Add more documents to surface related content.
+            </div>
+          )}
+          {relatedDocuments.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {relatedDocuments.map((rd) => (
+                <div
+                  key={rd.id}
+                  onClick={() => {
+                    setActiveDocumentId(rd.id);
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                  }}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    background: "rgba(59,130,246,0.04)",
+                    border: "1px solid rgba(59,130,246,0.1)",
+                    cursor: "pointer",
+                    transition: "background 0.15s, border-color 0.15s",
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = "rgba(59,130,246,0.1)";
+                    (e.currentTarget as HTMLElement).style.borderColor = "rgba(59,130,246,0.25)";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = "rgba(59,130,246,0.04)";
+                    (e.currentTarget as HTMLElement).style.borderColor = "rgba(59,130,246,0.1)";
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontWeight: 600, fontSize: 13, color: c.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                      {rd.filename}
+                    </span>
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 999,
+                      background: "rgba(59,130,246,0.12)", color: "#60A5FA", marginLeft: 8, whiteSpace: "nowrap",
+                    }}>
+                      {Math.round(rd.score * 100)}%
+                    </span>
+                  </div>
+                  {rd.matched_topics.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
+                      {rd.matched_topics.map((t) => (
+                        <span key={t} style={{
+                          padding: "1px 6px", borderRadius: 999, fontSize: 10,
+                          background: "rgba(16,185,129,0.1)", color: "#34D399",
+                        }}>
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {rd.match_reasons.length > 0 && (
+                    <div style={{ fontSize: 11, color: c.textMuted, lineHeight: 1.5 }}>
+                      {rd.match_reasons.map((r, i) => (
+                        <div key={i}>{r}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {analysis && (
         <>
           <div style={cardStyle}>
@@ -1586,6 +2128,23 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               >
                 View Original Document
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const el = document.getElementById("doc-content-preview")
+                  if (el) el.scrollIntoView({ behavior: "smooth" })
+                }}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: 999,
+                  border: `1px solid ${c.border}`,
+                  backgroundColor: "#FFFFFF",
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                📄 View Content
+              </button>
               {ingestStatus?.status === "failed" && (
                 <button
                   type="button"
@@ -1604,142 +2163,177 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
               )}
             </div>
           </div>
-          {summaryHistory.length > 0 && (
-            <div style={cardStyle}>
-              <div style={cardHeaderStyle}>
-                <span>Summary History</span>
+
+          {/* ── Document Content Preview ── */}
+          {docChunks && docChunks.length > 0 && (
+            <div id="doc-content-preview" style={{
+              ...cardStyle,
+              overflow: "hidden",
+            }}>
+              <div
+                onClick={() => setShowDocContent(!showDocContent)}
+                style={{
+                  ...cardHeaderStyle,
+                  cursor: "pointer",
+                  userSelect: "none",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>📖 Document Content</span>
+                  <span style={{
+                    fontSize: 10,
+                    color: c.textMuted,
+                    fontWeight: 400,
+                    background: c.surfaceActive,
+                    borderRadius: 8,
+                    padding: "2px 8px",
+                  }}>
+                    {docChunks.length} section{docChunks.length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+                <span style={{
+                  fontSize: 11,
+                  color: c.textMuted,
+                  transition: "transform 0.2s",
+                }}>
+                  {showDocContent ? "▲ Hide" : "▼ Show"}
+                </span>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {summaryHistory.map((entry, idx) => (
-                  <div
-                    key={`${entry.document_id}-${idx}`}
-                    style={{
-                      border: `1px solid ${c.border}`,
-                      borderRadius: 10,
-                      padding: 10,
-                      backgroundColor: "#FFFFFF",
-                    }}
-                  >
-                    <div style={{ fontSize: 12, color: c.textMuted }}>
-                      {entry.document_id} • {new Date(entry.created_at).toLocaleString()}
-                    </div>
-                    <div style={{ marginTop: 6, ...bodyTextStyle }}>
-                      {entry.executive_summary}
-                    </div>
-                  </div>
-                ))}
-              </div>
+              {showDocContent && (
+                <div style={{ maxHeight: 500, overflowY: "auto", padding: "4px 0" }}>
+                  {docChunks.map((chunk, idx) => (
+                    <details key={idx} style={{
+                      marginBottom: idx < docChunks.length - 1 ? 10 : 0,
+                      fontSize: 13,
+                    }}>
+                      <summary style={{
+                        cursor: "pointer",
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: c.primary,
+                        padding: "6px 10px",
+                        background: c.surfaceActive,
+                        borderRadius: 6,
+                        outline: "none",
+                      }}>
+                        Section {chunk.chunk_index + 1}
+                      </summary>
+                      <div style={{
+                        padding: "10px 12px",
+                        fontSize: 12.5,
+                        lineHeight: 1.7,
+                        color: c.textSecondary,
+                        whiteSpace: "pre-wrap",
+                      }}>
+                        {chunk.text}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              )}
             </div>
           )}
-          {analysis.status === "READY" && <div style={cardStyle}>
+
+          {analysis.status === "READY" && analysis.executive_summary && (
+            <div style={{
+              ...cardStyle,
+              borderLeft: `4px solid ${c.primary}`,
+            }}>
               <div style={cardHeaderStyle}>
-                <span>Executive Summary</span>
-                <span style={pillStyle}>AI generated</span>
+                <span>📋 Executive Summary</span>
+                <span style={{...pillStyle, backgroundColor: "rgba(91,136,255,0.15)", borderColor: "rgba(91,136,255,0.25)", color: "#93B4FF"}}>
+                  AI generated
+                </span>
               </div>
-            <p style={bodyTextStyle}>{analysis.executive_summary}</p>
-          </div>}
-
-          {analysis.status === "READY" && <div style={cardStyle}>
-            <div style={cardHeaderStyle}>
-              <span>Detailed Summary</span>
+              <p style={{...bodyTextStyle, fontSize: 14, lineHeight: 1.7}}>{analysis.executive_summary}</p>
             </div>
-            <ul style={{ paddingLeft: 18, margin: 0 }}>
-              {analysis.detailed_summary.map((item, idx) => (
-                <li key={idx} style={bodyTextStyle}>
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </div>}
+          )}
 
-          {analysis.status === "READY" && <div style={cardStyle}>
-            <div style={cardHeaderStyle}>
-              <span>Key Insights</span>
-            </div>
-            <div style={{ marginBottom: 8 }}>
-              <div style={sectionLabelStyle}>Topics</div>
+          {analysis.status === "READY" && (
+            <div style={cardStyle}>
+              <div style={cardHeaderStyle}>
+                <span>🏷️ Topics & Business Areas</span>
+              </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {analysis.topics.map((topic) => (
                   <span key={topic} style={chipStyle}>
                     {topic}
                   </span>
                 ))}
+                {analysis.topics.length === 0 && (
+                  <span style={{ fontSize: 13, color: c.textMuted }}>No topics extracted</span>
+                )}
               </div>
             </div>
-            <div style={{ marginBottom: 8 }}>
-              <div style={sectionLabelStyle}>Entities</div>
+          )}
+
+          {analysis.status === "READY" && (
+            <div style={cardStyle}>
+              <div style={cardHeaderStyle}>
+                <span>🔧 Systems & Entities</span>
+              </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {analysis.entities.map((entity) => (
                   <span key={entity} style={chipOutlineStyle}>
                     {entity}
                   </span>
                 ))}
+                {analysis.entities.length === 0 && (
+                  <span style={{ fontSize: 13, color: c.textMuted }}>No entities extracted</span>
+                )}
               </div>
             </div>
-            {(analysis.key_entities?.dates?.length ?? 0) > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={sectionLabelStyle}>Dates</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {analysis.key_entities?.dates?.map((date) => (
-                    <span key={date} style={chipOutlineStyle}>
-                      {date}
-                    </span>
-                  ))}
-                </div>
+          )}
+
+          {analysis.status === "READY" && analysis.detailed_summary && analysis.detailed_summary.length > 0 && (
+            <div style={cardStyle}>
+              <div style={cardHeaderStyle}>
+                <span>📄 Detailed Summary</span>
               </div>
-            )}
-            {(analysis.key_entities?.locations?.length ?? 0) > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={sectionLabelStyle}>Locations</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {analysis.key_entities?.locations?.map((loc) => (
-                    <span key={loc} style={chipOutlineStyle}>
-                      {loc}
-                    </span>
-                  ))}
-                </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {analysis.detailed_summary.map((item, idx) => (
+                  <p key={idx} style={{...bodyTextStyle, margin: 0, paddingLeft: 12, borderLeft: `2px solid ${c.border}`}}>
+                    {item}
+                  </p>
+                ))}
               </div>
-            )}
-            {(analysis.action_items?.length ?? 0) > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={sectionLabelStyle}>Action Items</div>
-                <ul style={{ paddingLeft: 18, margin: 0 }}>
-                  {analysis.action_items?.slice(0, 6).map((item, idx) => (
-                    <li key={idx} style={bodyTextStyle}>
-                      {item}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {(analysis.decisions?.length ?? 0) > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={sectionLabelStyle}>Decisions</div>
-                <ul style={{ paddingLeft: 18, margin: 0 }}>
-                  {analysis.decisions?.slice(0, 6).map((item, idx) => (
-                    <li key={idx} style={bodyTextStyle}>
-                      {item}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            <div>
-              <div style={sectionLabelStyle}>Sentiment</div>
-                <span
-                  style={{
-                    ...pillStyle,
-                    backgroundColor:
-                      analysis.sentiment.toLowerCase() === "negative" ||
-                      analysis.sentiment.toLowerCase() === "urgent"
-                        ? c.danger
-                        : c.primary,
-                  }}
-                >
-                  {analysis.sentiment}
-                </span>
             </div>
-          </div>}
+          )}
+
+          {analysis.status === "READY" && ((analysis.action_items?.length ?? 0) > 0 || (analysis.decisions?.length ?? 0) > 0) && (
+            <div style={cardStyle}>
+              <div style={cardHeaderStyle}>
+                <span>⚡ Actions & Decisions</span>
+              </div>
+              {(analysis.action_items?.length ?? 0) > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  <div style={sectionLabelStyle}>Action Items</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {analysis.action_items?.slice(0, 6).map((item, idx) => (
+                      <div key={idx} style={{...bodyTextStyle, margin: 0, padding: '8px 12px', background: 'rgba(245,158,11,0.06)', borderRadius: 8, borderLeft: '3px solid rgba(245,158,11,0.3)'}}>
+                        {item}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(analysis.decisions?.length ?? 0) > 0 && (
+                <div>
+                  <div style={sectionLabelStyle}>Decisions</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {analysis.decisions?.slice(0, 6).map((item, idx) => (
+                      <div key={idx} style={{...bodyTextStyle, margin: 0, padding: '8px 12px', background: 'rgba(59,130,246,0.06)', borderRadius: 8, borderLeft: '3px solid rgba(59,130,246,0.3)'}}>
+                        ✓ {item}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>
@@ -1768,9 +2362,23 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
         </div>
       </div>
         <div style={cardStyle}>
-          <div style={{ ...cardHeaderStyle, display: "flex", justifyContent: "space-between", gap: 10 }}>
-            <span>Suggested Prompts</span>
-            <div style={{ display: "flex", gap: 8 }}>
+          <details style={{ marginBottom: 0 }}>
+            <summary style={{
+              cursor: "pointer",
+              color: c.textPrimary,
+              fontWeight: 700,
+              fontSize: 14,
+              padding: "6px 0",
+              outline: "none",
+              userSelect: "none",
+              ...cardHeaderStyle,
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 10,
+            }}>
+              <span>Suggested Prompts</span>
+            </summary>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button
                 type="button"
                 onClick={openDiagram}
@@ -1804,12 +2412,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
                 Chart builder
               </button>
             </div>
-          </div>
-          <p style={{ ...bodyTextStyle, marginBottom: 12 }}>
-            {activeDocumentId
-              ? "Click a prompt or ask a question about this document. Answers are grounded in this document only."
-              : "Ask general questions here. The assistant can use shared organizational knowledge, transferred learning, and web search fallback when needed."}
-          </p>
+          </details>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {(prompts.length > 0 ? prompts : GLOBAL_SUGGESTED_PROMPTS).map((p) => (
               <button
@@ -1823,6 +2426,30 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
             ))}
           </div>
         </div>
+
+      {analysis && analysis.status === "READY" && (enterpriseSummary?.executive_summary || analysis.executive_summary) && (
+        <div style={{
+          ...cardStyle,
+          borderLeft: `4px solid ${c.primary}`,
+          marginBottom: 0,
+        }}>
+          <div style={cardHeaderStyle}>
+            <span>Executive Summary</span>
+            {enterpriseSummary && enterpriseSummary.doc_type && (
+              <span style={{
+                padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 700,
+                background: "rgba(16,185,129,0.12)", border: "1px solid rgba(16,185,129,0.25)", color: "#34D399",
+                textTransform: "uppercase", letterSpacing: "0.5px",
+              }}>
+                {enterpriseSummary.doc_type}
+              </span>
+            )}
+          </div>
+          <p style={{...bodyTextStyle, fontSize: 14, lineHeight: 1.7, margin: 0}}>
+            {enterpriseSummary?.executive_summary || analysis.executive_summary}
+          </p>
+        </div>
+      )}
 
       <div
         style={{
@@ -1841,7 +2468,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           style={{
             flex: 1,
             height: "100%",
-            maxHeight: "calc(100vh - 450px)",
+            maxHeight: "calc(100vh - 360px)",
             overflowY: "auto",
             display: "flex",
             flexDirection: "column",
@@ -3298,7 +3925,7 @@ export const DocumentViewPage: React.FC<DocumentViewPageProps> = ({
           gridTemplateColumns:
             isMobile || !showAnalysisDrawer
               ? "minmax(0, 1fr)"
-              : "minmax(0, 2fr) minmax(0, 3fr)",
+              : "minmax(0, 1fr) minmax(0, 3fr)",
           gap: 20,
           minHeight: 0,
           transition: "grid-template-columns 0.3s ease",

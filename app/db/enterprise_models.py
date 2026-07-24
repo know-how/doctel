@@ -1212,3 +1212,122 @@ class AgentExecutionPlan(Base):
             "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
         }
 
+
+class KnowledgeAsset(Base):
+    """Knowledge asset registry (Pillar 19).
+
+    Maps to the existing ``knowledge_assets`` table, referenced by
+    ``processing_jobs.asset_id``.  The table already exists in the
+    database; this model is defined so Alembic autogenerate can resolve
+    the FK during ``sort_tables_and_constraints``.
+    """
+    __tablename__ = "knowledge_assets"
+    __table_args__ = {"extend_existing": True}
+
+    id                      = Column(UUID(as_uuid=True), primary_key=True)
+    asset_type              = Column(String(100), nullable=True)
+    source_table            = Column(String(100), nullable=True)
+    source_id               = Column(String(255), nullable=True)
+    owned_by_user_id        = Column(UUID(as_uuid=True), nullable=True)
+    owned_by_department     = Column(String(100), nullable=True)
+    classification          = Column(String(50), nullable=True)
+    classification_updated_at = Column(DateTime(timezone=True), nullable=True)
+    department_id           = Column(String(100), nullable=True)
+    parent_asset_id         = Column(UUID(as_uuid=True), nullable=True)
+    source_asset_id         = Column(UUID(as_uuid=True), nullable=True)
+    root_asset_id           = Column(UUID(as_uuid=True), nullable=True)
+    lifecycle_state         = Column(String(50), nullable=True)
+    lifecycle_changed_at    = Column(DateTime(timezone=True), nullable=True)
+    lifecycle_reason        = Column(Text, nullable=True)
+    title                   = Column(String(500), nullable=True)
+    description             = Column(Text, nullable=True)
+    tags_json               = Column(Text, nullable=True)
+    metadata_json           = Column(Text, nullable=True)
+    created_by_user_id      = Column(UUID(as_uuid=True), nullable=True)
+    created_at              = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at              = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": str(self.id) if self.id else None,
+            "assetType": self.asset_type,
+            "sourceTable": self.source_table,
+            "sourceId": self.source_id,
+            "ownedByUserId": str(self.owned_by_user_id) if self.owned_by_user_id else None,
+            "ownedByDepartment": self.owned_by_department,
+            "classification": self.classification,
+            "classificationUpdatedAt": self.classification_updated_at.isoformat() if self.classification_updated_at else None,
+            "title": self.title,
+            "description": self.description,
+            "tags": json.loads(self.tags_json) if self.tags_json else [],
+            "metadata": json.loads(self.metadata_json) if self.metadata_json else {},
+            "lifecycleState": self.lifecycle_state,
+            "lifecycleChangedAt": self.lifecycle_changed_at.isoformat() if self.lifecycle_changed_at else None,
+            "createdByUserId": str(self.created_by_user_id) if self.created_by_user_id else None,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WORKFLOW ENGINE — Persistent Execution Records
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class WorkflowExecutionRecord(Base):
+    """Persistent record of an autonomous workflow execution."""
+    __tablename__ = 'workflow_execution_records'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    execution_id = Column(String(128), unique=True, nullable=False, index=True)
+    workflow_type = Column(String(64), nullable=False, index=True)
+    objective = Column(Text, nullable=False)
+    status = Column(String(32), nullable=False, default='pending', index=True)
+    session_id = Column(Integer, ForeignKey('sessions.id', ondelete='SET NULL'), nullable=True)
+    document_id = Column(String(128), nullable=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
+    project_ids_json = Column(Text, default='[]')
+    steps_json = Column(Text, default='[]')
+    deliverables_json = Column(Text, default='{}')
+    merged_entities_json = Column(Text, default='[]')
+    merged_actions_json = Column(Text, default='[]')
+    merged_decisions_json = Column(Text, default='[]')
+    merged_risks_json = Column(Text, default='[]')
+    merged_workflows_json = Column(Text, default='[]')
+    execution_summary = Column(Text, default='')
+    error_message = Column(Text, default='')
+    total_duration_ms = Column(Float, default=0.0)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index('idx_wfexec_status_created', 'status', 'created_at'),
+        Index('idx_wfexec_type_status', 'workflow_type', 'status'),
+        Index('idx_wfexec_session', 'session_id'),
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id,
+            'execution_id': self.execution_id,
+            'workflow_type': self.workflow_type,
+            'objective': self.objective,
+            'status': self.status,
+            'session_id': self.session_id,
+            'document_id': self.document_id,
+            'project_ids': json.loads(self.project_ids_json) if self.project_ids_json else [],
+            'steps': json.loads(self.steps_json) if self.steps_json else [],
+            'deliverables': json.loads(self.deliverables_json) if self.deliverables_json else {},
+            'merged_entities': json.loads(self.merged_entities_json) if self.merged_entities_json else [],
+            'merged_actions_count': len(json.loads(self.merged_actions_json)) if self.merged_actions_json else 0,
+            'merged_decisions_count': len(json.loads(self.merged_decisions_json)) if self.merged_decisions_json else 0,
+            'merged_risks_count': len(json.loads(self.merged_risks_json)) if self.merged_risks_json else 0,
+            'execution_summary': self.execution_summary,
+            'error': self.error_message,
+            'total_duration_ms': round(self.total_duration_ms, 1) if self.total_duration_ms else 0.0,
+            'started_at': self.started_at.isoformat() if self.started_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }

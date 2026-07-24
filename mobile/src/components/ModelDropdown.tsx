@@ -109,7 +109,8 @@ export function ModelDropdown({
       groups.push({ provider, models, isExpanded })
     }
 
-    // Add non-V2 models (local-only) as a synthetic "Ollama" group
+    // Add non-V2 models (local-only). If a V2 provider with id="ollama" already
+    // exists, merge into it to avoid duplicate keys; otherwise create a synthetic group.
     const nonV2Models = availableModels.filter(id => !v2ModelIdSet.has(id))
     if (nonV2Models.length > 0) {
       let filtered = nonV2Models
@@ -118,43 +119,78 @@ export function ModelDropdown({
         filtered = nonV2Models.filter(m => m.toLowerCase().includes(q))
       }
       if (filtered.length > 0) {
-        const localProvider: V2Provider = {
-          id: "ollama",
-          name: "Ollama",
-          vendor: "ollama",
-          base_url: "",
-          api_key_value: "",
-          status: "active",
-          description: "Local models",
-          icon: "cpu",
-          order: 999,
-          models: filtered.map(id => ({
-            id,
-            name: (modelLabels[id] || id).replace(/[-_:]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-            contextWindow: 4096,
-            supportsChat: true,
-            supportsVision: false,
-            supportsTools: false,
-            supportsCode: false,
-            supportsEmbedding: false,
-            supportsReasoning: false,
-            supportsRag: false,
-            supportsClassification: false,
-            supportsSummary: false,
-            supportsExtraction: false,
-            enabled: true,
-            visibleToUsers: true,
-            isDefault: false,
-            allowedRoles: [],
-            departmentRestrictions: [],
-            state: "active",
-            pricingTier: "local",
-            license: "Open Source",
-            capabilities: modelCapabilities[id] || ["chat"],
-          })),
+        // Check if a V2 Ollama provider already exists
+        const existingOllamaGroup = groups.find(g => g.provider.id === "ollama" || g.provider.vendor === "ollama")
+        if (existingOllamaGroup) {
+          // Merge non-V2 models into the existing V2 Ollama group
+          for (const mid of filtered) {
+            if (!existingOllamaGroup.models.some(m => m.id === mid)) {
+              existingOllamaGroup.models.push({
+                id: mid,
+                name: (modelLabels[mid] || mid).replace(/[-_:]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+                contextWindow: 4096,
+                supportsChat: true,
+                supportsVision: false,
+                supportsTools: false,
+                supportsCode: false,
+                supportsEmbedding: false,
+                supportsReasoning: false,
+                supportsRag: false,
+                supportsClassification: false,
+                supportsSummary: false,
+                supportsExtraction: false,
+                enabled: true,
+                visibleToUsers: true,
+                isDefault: false,
+                allowedRoles: [],
+                departmentRestrictions: [],
+                state: "active",
+                pricingTier: "local",
+                license: "Open Source",
+                capabilities: modelCapabilities[mid] || ["chat"],
+              })
+            }
+          }
+        } else {
+          // No V2 Ollama provider — create a synthetic group
+          const localProvider: V2Provider = {
+            id: "ollama",
+            name: "Ollama",
+            vendor: "ollama",
+            base_url: "",
+            api_key_value: "",
+            status: "active",
+            description: "Local models",
+            icon: "cpu",
+            order: 999,
+            models: filtered.map(id => ({
+              id,
+              name: (modelLabels[id] || id).replace(/[-_:]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+              contextWindow: 4096,
+              supportsChat: true,
+              supportsVision: false,
+              supportsTools: false,
+              supportsCode: false,
+              supportsEmbedding: false,
+              supportsReasoning: false,
+              supportsRag: false,
+              supportsClassification: false,
+              supportsSummary: false,
+              supportsExtraction: false,
+              enabled: true,
+              visibleToUsers: true,
+              isDefault: false,
+              allowedRoles: [],
+              departmentRestrictions: [],
+              state: "active",
+              pricingTier: "local",
+              license: "Open Source",
+              capabilities: modelCapabilities[id] || ["chat"],
+            })),
+          }
+          const isExpanded = searchQuery.trim() ? true : expandedProviders.has("ollama")
+          groups.push({ provider: localProvider, models: localProvider.models, isExpanded })
         }
-        const isExpanded = searchQuery.trim() ? true : expandedProviders.has("ollama")
-        groups.push({ provider: localProvider, models: localProvider.models, isExpanded })
       }
     }
 

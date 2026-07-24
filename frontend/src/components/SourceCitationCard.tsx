@@ -1,4 +1,4 @@
-import React from "react"
+import React, { useState, useCallback } from "react"
 import { useTheme } from "../context/ThemeContext"
 import { getTokens, ThemeTokens } from "../theme/themeTokens"
 
@@ -18,19 +18,46 @@ export interface SourceCitationProps {
   project_id?: string | number
 }
 
-// ── helper: truncate text ────────────────────────────────────────────────────
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/** Convert raw filename into a human-readable title.
+ *  - Strips file extension
+ *  - Removes noisy prefixes (apply BEFORE replacing separators)
+ *  - Replaces underscores/hyphens with spaces
+ *  - Preserves original casing so acronyms (ZETDC, LLM, FRS) stay readable
+ */
+function humanReadableTitle(filename?: string): string {
+  if (!filename) return "Source document"
+  // Strip extension
+  const noExt = filename.replace(/\.[^.]+$/, "")
+  // Remove common prefixes BEFORE replacing separators (regex needs underscores)
+  const unprefixed = noExt.replace(/^(ZETDC_|DocTel_|draft_|v\d+_)/i, "")
+  // Replace underscores/hyphens with spaces
+  const spaced = unprefixed.replace(/[_-]/g, " ")
+  // Trim and collapse multiple spaces
+  return spaced.replace(/\s+/g, " ").trim()
+}
+
+/** Derive a relevance label and color from the distance score.
+ *  Returns CSS-compatible values that work in both light and dark mode
+ *  by using opaque text colors and semi-transparent backgrounds.
+ */
+function relevanceBadge(distance?: number): { label: string; color: string; bg: string } {
+  if (distance === undefined || distance === null) {
+    return { label: "Source", color: "#888", bg: "rgba(128,128,128,0.12)" }
+  }
+  if (distance <= 0.3) return { label: "High relevance", color: "#16a34a", bg: "rgba(22,163,74,0.10)" }
+  if (distance <= 0.6) return { label: "Medium relevance", color: "#ca8a04", bg: "rgba(202,138,4,0.10)" }
+  return { label: "Low relevance", color: "#dc2626", bg: "rgba(220,38,38,0.10)" }
+}
+
+/** Truncate text for preview. */
 function truncate(text: string, max = 180): string {
   if (!text) return ""
   return text.length > max ? text.slice(0, max) + "…" : text
 }
 
-// ── helper: format chunk / page label ────────────────────────────────────────
-function chunkLabel(idx?: number): string {
-  if (idx === undefined || idx === null) return ""
-  return `p.${idx + 1}`
-}
-
-// ── helper: derive file icon letter from extension ───────────────────────────
+/** File icon letter from extension. */
 function fileIconLetter(filename?: string): string {
   if (!filename) return "D"
   const ext = filename.split(".").pop()?.toLowerCase()
@@ -60,36 +87,35 @@ const SourceCitationCard: React.FC<SourceCitationProps> = ({
 }) => {
   const { theme } = useTheme()
   const t: ThemeTokens = getTokens(theme)
+  const [expanded, setExpanded] = useState(false)
+  const toggle = useCallback(() => setExpanded((e) => !e), [])
 
-  // ── styles (computed from tokens) ──────────────────────────────────────────
-  const cardStyle: React.CSSProperties = {
+  const title = humanReadableTitle(filename)
+  const badge = relevanceBadge(distance)
+  const letter = fileIconLetter(filename)
+
+  // ── inline styles ──────────────────────────────────────────────────────────
+  const card: React.CSSProperties = {
     background: t.colors.cardBg,
     border: `1px solid ${t.colors.border}`,
     borderRadius: t.radii.md,
-    padding: 0,
-    display: "flex",
-    flexDirection: "column",
-    gap: 0,
     overflow: "hidden",
-    backdropFilter: "blur(12px)",
-    WebkitBackdropFilter: "blur(12px)",
+    cursor: "pointer",
     transition: "all 0.2s ease",
-    minWidth: 0,
-    maxWidth: "100%",
-    boxShadow: t.shadows.sm,
+    boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
   }
 
-  const headerStyle: React.CSSProperties = {
+  const header: React.CSSProperties = {
     display: "flex",
     alignItems: "center",
-    gap: t.spacing.sm,
-    padding: `${t.spacing.sm} ${t.spacing.md}`,
-    borderBottom: `1px solid ${t.colors.border}`,
+    gap: 10,
+    padding: "10px 14px",
+    userSelect: "none",
   }
 
-  const iconBoxStyle: React.CSSProperties = {
-    width: 28,
-    height: 28,
+  const iconBox: React.CSSProperties = {
+    width: 26,
+    height: 26,
     borderRadius: t.radii.sm,
     background: `linear-gradient(135deg, ${t.colors.primary}22, ${t.colors.secondary}11)`,
     color: t.colors.primary,
@@ -97,13 +123,13 @@ const SourceCitationCard: React.FC<SourceCitationProps> = ({
     alignItems: "center",
     justifyContent: "center",
     fontWeight: 700,
-    fontSize: 11,
+    fontSize: 10,
     flexShrink: 0,
     fontFamily: t.font.sans,
   }
 
-  const fileNameStyle: React.CSSProperties = {
-    fontSize: 12.5,
+  const titleStyle: React.CSSProperties = {
+    fontSize: 13,
     fontWeight: 600,
     color: t.colors.text,
     flex: 1,
@@ -113,79 +139,81 @@ const SourceCitationCard: React.FC<SourceCitationProps> = ({
     fontFamily: t.font.sans,
   }
 
-  const chunkBadgeStyle: React.CSSProperties = {
+  const badgeStyle: React.CSSProperties = {
     fontSize: 10,
     fontWeight: 600,
-    color: t.colors.textMuted,
-    background: t.colors.surface,
-    borderRadius: t.radii.sm,
-    padding: "2px 7px",
+    color: badge.color,
+    background: badge.bg,
+    borderRadius: 20,
+    padding: "2px 10px",
     flexShrink: 0,
+    lineHeight: "18px",
     fontFamily: t.font.sans,
   }
 
-  const bodyStyle: React.CSSProperties = {
-    padding: `${t.spacing.sm} ${t.spacing.md}`,
+  const chevron: React.CSSProperties = {
+    fontSize: 10,
+    color: t.colors.textMuted,
+    flexShrink: 0,
+    transition: "transform 0.25s ease",
+    transform: expanded ? "rotate(180deg)" : "rotate(0deg)",
   }
 
-  const previewStyle: React.CSSProperties = {
-    fontSize: 12,
-    lineHeight: "1.55",
-    color: t.colors.textSecondary,
-    fontFamily: t.font.sans,
-    display: "-webkit-box",
-    WebkitLineClamp: 3,
-    WebkitBoxOrient: "vertical",
+  const detailPanel: React.CSSProperties = {
+    maxHeight: expanded ? 500 : 0,
+    opacity: expanded ? 1 : 0,
     overflow: "hidden",
+    transition: "all 0.3s ease",
+  }
+
+  const bodyText: React.CSSProperties = {
+    fontSize: 12.5,
+    lineHeight: 1.6,
+    color: t.colors.textSecondary,
+    padding: "0 14px 10px",
     margin: 0,
     wordBreak: "break-word",
+    fontFamily: t.font.sans,
   }
 
-  const footerStyle: React.CSSProperties = {
+  const footer: React.CSSProperties = {
     display: "flex",
     alignItems: "center",
-    gap: t.spacing.xs,
-    padding: `${t.spacing.xs} ${t.spacing.md}`,
-    borderTop: `1px solid ${t.colors.border}`,
+    gap: 6,
+    padding: "0 14px 10px",
     flexWrap: "wrap",
   }
 
-  const actionBtnBase: React.CSSProperties = {
+  const btnBase: React.CSSProperties = {
     display: "inline-flex",
     alignItems: "center",
     gap: 4,
     fontSize: 10.5,
     fontWeight: 600,
-    fontFamily: t.font.sans,
     padding: "4px 10px",
     borderRadius: t.radii.sm,
     border: "none",
     cursor: "pointer",
-    transition: "all 0.15s ease",
     textDecoration: "none",
     lineHeight: 1,
+    transition: "opacity 0.15s ease",
   }
 
   const primaryBtn: React.CSSProperties = {
-    ...actionBtnBase,
+    ...btnBase,
     background: `linear-gradient(135deg, ${t.colors.primary}, ${t.colors.secondary})`,
     color: "#FFFFFF",
   }
 
   const ghostBtn: React.CSSProperties = {
-    ...actionBtnBase,
+    ...btnBase,
     background: t.colors.surface,
     color: t.colors.textSecondary,
     border: `1px solid ${t.colors.border}`,
   }
 
-  // round distance to 3 decimal places for display
-  const distLabel = distance !== undefined ? `rel: ${distance.toFixed(3)}` : null
-
-  // ── build action buttons ──────────────────────────────────────────────────
+  // ── build action buttons (only shown when expanded) ───────────────────────
   const actions: React.ReactNode[] = []
-
-  //   View / Preview
   if (can_view && preview_url) {
     actions.push(
       <a key="preview" href={preview_url} style={primaryBtn}
@@ -207,8 +235,6 @@ const SourceCitationCard: React.FC<SourceCitationProps> = ({
       </a>,
     )
   }
-
-  //   Download
   if (can_download && download_url) {
     actions.push(
       <a key="download" href={download_url} style={ghostBtn}
@@ -220,68 +246,68 @@ const SourceCitationCard: React.FC<SourceCitationProps> = ({
       </a>,
     )
   }
-
-  //   Full-text available indicator
   if (full_text_available && can_view) {
     actions.push(
-      <span key="fulltext" style={{
-        ...ghostBtn, cursor: "default", opacity: 0.7, fontSize: 10, gap: 3,
-      }}>
+      <span key="fulltext" style={{ ...ghostBtn, cursor: "default", opacity: 0.7, fontSize: 10, gap: 3 }}>
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
         Full text
       </span>,
     )
   }
 
-  // ── render ────────────────────────────────────────────────────────────────
+  // ── section reference (human-readable, not "Chunk N") ────────────────────
+  const sectionRef = chunk_index !== undefined
+    ? `Section ${(chunk_index + 1)}`
+    : null
+
   return (
-    <div style={cardStyle}
+    <div
+      style={card}
+      onClick={toggle}
       onMouseEnter={(e) => {
         e.currentTarget.style.borderColor = t.colors.borderFocus
         e.currentTarget.style.boxShadow = t.shadows.md
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.borderColor = t.colors.border
-        e.currentTarget.style.boxShadow = t.shadows.sm
+        e.currentTarget.style.boxShadow = "0 1px 2px rgba(0,0,0,0.05)"
       }}
     >
-      {/* ── Header ─────────────────────────────────────────────────── */}
-      <div style={headerStyle}>
-        <div style={iconBoxStyle}>{fileIconLetter(filename)}</div>
-        <span style={fileNameStyle} title={filename}>
-          {filename || "Source document"}
+      {/* ── Header (always visible) ─────────────────────────────────── */}
+      <div style={header}>
+        <div style={iconBox}>{letter}</div>
+        <span style={titleStyle} title={title}>
+          {title}
         </span>
-        {chunk_index !== undefined && (
-          <span style={chunkBadgeStyle}>{chunkLabel(chunk_index)}</span>
-        )}
+        <span style={badgeStyle}>{badge.label}</span>
+        <span style={chevron}>▼</span>
       </div>
 
-      {/* ── Text preview ───────────────────────────────────────────── */}
-      {text && (
-        <div style={bodyStyle}>
-          <p style={previewStyle}>
-            {truncate(text)}
-          </p>
-        </div>
-      )}
-
-      {/* ── Footer: distance + action buttons ──────────────────────── */}
-      {(actions.length > 0 || distLabel) && (
-        <div style={footerStyle}>
-          {distLabel && (
+      {/* ── Detail panel (collapsible) ───────────────────────────────── */}
+      <div style={detailPanel}>
+        {/* Section reference */}
+        {sectionRef && (
+          <div style={{ padding: "0 14px 4px" }}>
             <span style={{
-              fontSize: 9.5,
+              fontSize: 10.5,
               color: t.colors.textMuted,
-              fontFamily: t.font.sans,
-              marginRight: "auto",
               fontWeight: 500,
             }}>
-              {distLabel}
+              {sectionRef}
             </span>
-          )}
-          {actions}
-        </div>
-      )}
+          </div>
+        )}
+
+        {/* Text preview */}
+        {text && (
+          <p style={bodyText}>{truncate(text)}</p>
+        )}
+
+        {/* Action buttons */}
+        {actions.length > 0 && (
+          <div style={footer}>{actions}</div>
+        )}
+      </div>
     </div>
   )
 }

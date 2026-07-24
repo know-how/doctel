@@ -267,18 +267,22 @@ async def resolve_provider_credentials(db: AsyncSession, model_id: str, provider
                     "provider_id": provider.provider_id or "",
                     "provider_name": provider.name or "",
                 }
-            # Try matching by id (in case provider_id_hint is the internal id)
-            result = await db.execute(sa_sel(AIProvider).where(AIProvider.id == provider_id_hint).limit(1))
-            provider = result.scalars().first()
-            if provider:
-                logger.info("[CREDENTIALS] Found provider by id: name=%s, provider_id=%s, has_api_key=%s, base_url=%s",
-                           provider.name, provider.provider_id, bool(provider.api_key_value), provider.base_url)
-                return {
-                    "api_key": (provider.api_key_value or "").strip(),
-                    "base_url": (provider.base_url or "").strip(),
-                    "provider_id": provider.provider_id or "",
-                    "provider_name": provider.name or "",
-                }
+            # Try matching by id (in case provider_id_hint is the internal integer id)
+            # Guard: AIProvider.id is an integer column — comparing it with a
+            # non-numeric string (e.g. "gemini") throws a PostgreSQL error that
+            # aborts the transaction, even when caught by the outer try/except.
+            if provider_id_hint and str(provider_id_hint).lstrip("-").isdigit():
+                result = await db.execute(sa_sel(AIProvider).where(AIProvider.id == int(provider_id_hint)).limit(1))
+                provider = result.scalars().first()
+                if provider:
+                    logger.info("[CREDENTIALS] Found provider by id: name=%s, provider_id=%s, has_api_key=%s, base_url=%s",
+                               provider.name, provider.provider_id, bool(provider.api_key_value), provider.base_url)
+                    return {
+                        "api_key": (provider.api_key_value or "").strip(),
+                        "base_url": (provider.base_url or "").strip(),
+                        "provider_id": provider.provider_id or "",
+                        "provider_name": provider.name or "",
+                    }
             logger.warning("[CREDENTIALS] Provider hint %s not found, falling back to model lookup", provider_id_hint)
         
         # Match by exact model_id, then by LIKE
@@ -318,6 +322,13 @@ async def resolve_provider_credentials(db: AsyncSession, model_id: str, provider
             }
     except Exception as e:
         logger.error("[CREDENTIALS] Exception: %s", e, exc_info=True)
+        # Rollback the aborted PostgreSQL transaction so the caller
+        # can continue with its own DB operations without hitting
+        # InFailedSQLTransactionError.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
     logger.info("[CREDENTIALS] Returning empty credentials")
     return {"api_key": "", "base_url": "", "provider_id": "", "provider_name": ""}
 

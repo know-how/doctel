@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from app.db.models import Document, Chunk, DocAnalysis
 from app.config import settings
-from app.services.knowledge_asset_service import KnowledgeAssetRegistry
+from app.services.knowledge_asset_service import KnowledgeAssetService
 
 logger = logging.getLogger(__name__)
 
@@ -126,18 +126,20 @@ async def export_documents_for_training(
         for item in training_data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     
-    # ── Knowledge Asset Registry: Register the training batch ──────────
+    # ── Knowledge Asset Service: Register the training batch ──────────
     try:
-        registry = KnowledgeAssetRegistry(db)
-        batch_meta = {
-            "project_ids": project_ids,
-            "documents_exported": len(training_data),
-            "file_path": str(batch_path),
-        }
-        await registry.register_training_batch(
-            batch_id=batch_filename.replace(".jsonl", ""),
+        registry = KnowledgeAssetService(db)
+        await registry.register_asset(
+            asset_type="report",
+            source_table="training_batch",
+            source_id=batch_filename.replace(".jsonl", ""),
             title=f"Training batch {timestamp}",
-            metadata=batch_meta,
+            description=f"Training batch with {len(training_data)} examples from projects {project_ids}",
+            metadata={
+                "project_ids": project_ids,
+                "documents_exported": len(training_data),
+                "file_path": str(batch_path),
+            },
         )
         logger.info("[ASSET] Registered training batch %s", batch_filename)
     except Exception as e:

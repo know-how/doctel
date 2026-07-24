@@ -17,7 +17,7 @@ from app.services.job_poller import create_job
 from app.config import settings as app_settings
 from app.utils.chroma_client import chroma
 from app.utils.pgvector_client import delete_document as pgvector_delete_document  # noqa: F401 — used in _reset_document_artifacts
-from app.services.knowledge_asset_service import KnowledgeAssetRegistry
+from app.services.knowledge_asset_service import KnowledgeAssetService
 
 logger = logging.getLogger(__name__)
 
@@ -242,8 +242,8 @@ async def run_bootstrap_scan() -> None:
                             await db.commit()
                             # Register in knowledge asset registry
                             try:
-                                registry = KnowledgeAssetRegistry(db)
-                                await registry.register_document(doc)
+                                registry = KnowledgeAssetService(db)
+                                await registry.register_document_asset(doc)
                             except Exception:
                                 pass
                         async with _lock:

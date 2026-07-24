@@ -47,6 +47,7 @@ async def get_rag_answer_scoped(
     force_policy: bool = False,
     force_diagram: bool = False,
     source_types: Optional[List[str]] = None,
+    conversation_context: Optional[str] = None,
 ):
     logger.info("[RAG] get_rag_answer_scoped called — project_ids=%s, document_id=%s, user_query_prefix=%r, source_types=%s",
                 project_ids, document_id, user_query[:80] if user_query else "", source_types)
@@ -244,7 +245,7 @@ async def get_rag_answer_scoped(
         }
         citations.append(citation)
         # Better formatted context for LLM with clear source attribution
-        source_label = f"📖 SOURCE: {r['filename']} (Chunk {r['chunk_index']})"
+        source_label = f"📄 {r['filename']}"
         if r.get("source_type") in ("audio", "video"):
             source_label += f" [Type: {r['source_type']}]"
         context_chunks.append(
@@ -285,20 +286,105 @@ async def get_rag_answer_scoped(
     used_files = list(dict.fromkeys([c.get("filename") for c in citations if c.get("filename")]))
     cross_refs = [{"filename": f, "reason": "Used as retrieval context"} for f in used_files[1:]]
 
+    # ── Detect query type from the user's question ──────────────────────
+    # This determines the response structure. Different question types need
+    # different answer formats to provide the best user experience.
+    query_lower = user_query.strip().lower()
+    is_definition = bool(re.search(r"^(what|who|define|describe|explain)\s+(is|are|was|does|a|an|the)\b", query_lower))
+    is_procedure = bool(re.search(r"^(how|what steps|what process|steps to|procedure|guide|walkthrough)\b", query_lower))
+    is_policy = bool(re.search(r"\b(policy|policies|regulation|compliance|rule|standard|requirement|guideline|directive)\b", query_lower))
+    is_comparison = bool(re.search(r"\b(compare|contrast|difference|vs\.?|versus|pros and cons|similarities)\b", query_lower))
+
     system_prompt = (
-        "You are DocTel (ZETDC), a local, privacy-first analyst. "
-        "Use ONLY the provided context to answer. "
-        "CITATION RULES - YOU MUST FOLLOW THESE:\n"
-        "1. When citing information, ALWAYS include the exact quoted text from the source in quotation marks.\n"
-        "2. Format citations like: [Source: filename, Chunk N] immediately after the quote.\n"
-        "3. Example: According to the manual, 'Application for reconnection must be submitted through the Debt Query module' [Source: Dunning Manual.pdf, Chunk 13].\n"
-        "4. Never invent or paraphrase quotes - only use exact text from the provided sources.\n"
-        "5. Multiple citations should each have their own quoted text.\n\n"
-        "Use ZETDC terminology (transmission, distribution, substations, feeders, SCADA, HSE, ZERA compliance). "
-        "SUMMARY WRITING RULES: When writing summaries, NEVER use asterisks or markdown bold formatting. "
-        "NEVER use numbered or bulleted lists. Write summaries as flowing narrative paragraphs in professional prose. "
-        "Begin with a clear statement of scope and purpose, then present key findings in logically ordered paragraphs, "
-        "and close with implications or required actions. Maintain a formal tone suitable for ZETDC leadership and staff. "
+        "You are DocTel, ZETDC's enterprise AI assistant. Your role is to help ZETDC staff "
+        "by providing clear, accurate answers grounded in internal documents.\n\n"
+        "CRITICAL RULES:\n"
+        "1. USE THE RETRIEVED DATA — The context below contains actual document content. "
+        "Use the EXACT information from the context in your answer. List specific items, "
+        "functions, and details that appear in the retrieved text. Do NOT generate a "
+        "generic summary that ignores the specific data provided.\n"
+        "2. NO SOURCE LINES IN ANSWER — Do NOT include any 'Source:', 'Based on', "
+        "or 'According to' text IN the answer body. Source attribution is handled "
+        "separately by the citation system. The user can see source documents in the "
+        "citation cards below your answer.\n"
+        "3. NO INLINE CITATIONS — Never write [Source: ...], (Source: ...), or "
+        "'Source: Document Name' anywhere in your answer text.\n"
+        "4. HIDE INTERNAL MECHANICS — Never mention 'chunk', 'context', 'document_id', "
+        "or 'retrieval'.\n"
+        "5. PARAPHRASE — Summarize information in your own words. Only use exact quotes "
+        "for definitions, regulations, laws, or numerical specifications.\n"
+        "6. TONE — Professional, concise, helpful. Avoid jargon unless the user's question "
+        "demonstrates technical knowledge.\n\n"
+        "INTENT-BASED RESPONSE TEMPLATES:\n"
+    )
+
+    if is_definition:
+        system_prompt += (
+            'The user is asking a DEFINITION question ("What is X?"). Use this structure:\n'
+            '- First line: A clear, concise definition of the entity (what it is, its purpose).\n'
+            '- Then: Key features or characteristics, using ACTUAL data from the context. '
+            'List specific items (e.g., function IDs like F-CRM-007, specific capabilities).\n'
+        )
+    elif is_procedure:
+        system_prompt += (
+            'The user is asking a PROCEDURE question ("How do I?"). Use this structure:\n'
+            '- First: A brief overview of what the procedure accomplishes.\n'
+            '- Then: Numbered steps based on the retrieved document content.\n'
+        )
+    elif is_policy:
+        system_prompt += (
+            'The user is asking a POLICY question. Use this structure:\n'
+            '- Summary: A 1-2 sentence overview of the policy.\n'
+            '- Key Requirements: Specific rules, thresholds, or obligations from the document.\n'
+        )
+    elif is_comparison:
+        system_prompt += (
+            'The user is asking a COMPARISON question. Use this structure:\n'
+            '- First: Identify the items being compared.\n'
+            '- Then: Present differences and similarities using a structured format.\n'
+            '- If the context lacks information for a fair comparison, say so clearly.\n'
+        )
+    else:
+        system_prompt += (
+            'For general questions:\n'
+            '- Start with a direct answer to the question.\n'
+            '- Use specific details from the retrieved context.\n'
+            '- When asked about a system capabilities, list the actual functions '
+            'and features described in the source documents.\n'
+        )
+
+    system_prompt += (
+        "\nUse ZETDC terminology (transmission, distribution, substations, feeders, SCADA, HSE, ZERA compliance) "
+        "when the context warrants it.\n\n"
+        "SUMMARY WRITING RULES: When writing summaries, use flowing narrative paragraphs. "
+        "Avoid bullet lists, numbered lists, and markdown formatting. "
+        "Begin with a clear statement of scope and purpose, present key findings in logically ordered paragraphs, "
+        "and close with implications or required actions. Maintain a formal tone suitable for ZETDC leadership and staff.\n\n"
+        "CONVERSATIONAL CONTINUITY:\n"
+        "The 'Conversation history' section contains the prior Q&A context. Use it to "
+        "maintain coherent multi-turn dialogue. Follow these rules:\n"
+        "1. RESOLVE CONTEXTUAL REFERENCES — If the current question uses pronouns (it, they, "
+        "this, that, these, its) or implicit references ('the system', 'the document', 'the "
+        "process'), first look at the conversation history to determine what entity they refer "
+        "to, then answer based on that resolved reference.\n"
+        "2. CONCEPT CHAINING — When the user asks about a relationship (e.g., 'What is its "
+        "relationship with X?' or 'How does it compare to Y?'), identify the referent from "
+        "the conversation history and answer the comparative or relational question directly, "
+        "not just the new entity in isolation.\n"
+        "3. SEQUENTIAL ELABORATION — When the user builds on a previous topic (e.g., asking "
+        "'What are the modules?' after being told about a system), elaborate based on the "
+        "established context. Do NOT re-introduce the earlier topic as brand-new information.\n"
+        "4. CONTINUITY MARKERS — When appropriate, use natural transition phrases like "
+        "'As mentioned', 'Building on the previous answer', 'In addition to the above', "
+        "or 'To expand on that' to create a connected conversational flow.\n"
+        "5. IMPLICIT COMPARISON — If the current question asks about something related to a "
+        "previously discussed concept (e.g., 'What about [related entity]?'), frame the answer "
+        "by drawing comparisons or contrasts with what was already covered.\n"
+        "6. REDUNDANCY AVOIDANCE — When answering a follow-up that builds on prior discussion, "
+        "do NOT re-state the full definition or introduction of already-established concepts "
+        "unless the user explicitly requests a recap.\n\n"
+        "If the conversation history is empty or the question is fully self-contained, ignore "
+        "all of the above and answer based solely on the retrieved context."
     )
     if force_policy:
         system_prompt += (
@@ -312,7 +398,13 @@ async def get_rag_answer_scoped(
             "1) concise numbered steps, 2) a Mermaid flowchart fenced block, 3) a one-sentence drawing prompt."
         )
 
-    user_prompt = f"Question: {user_query}\n\nContext:\n{context}"
+    # Build the user prompt with optional conversation history
+    user_prompt_parts = []
+    if conversation_context:
+        user_prompt_parts.append(f"Conversation history:\n{conversation_context}\n")
+    user_prompt_parts.append(f"Current question: {user_query}")
+    user_prompt_parts.append(f"\nRetrieved context:\n{context}")
+    user_prompt = "\n\n---\n\n".join(user_prompt_parts)
     # ── Resolve model via centralized model resolver ──────────────────────
     # This consults UI-configured task mappings as the single source of truth.
     from app.services.model_resolver_service import resolve_model
@@ -382,6 +474,30 @@ async def get_rag_answer_scoped(
             chosen, gateway_err,
         )
         answer_text = await ollama.generate(chosen, user_prompt, system=system_prompt)
+        reasoning_text = ""
+
+    # ── Answer grounding validation ───────────────────────────────────────
+    # Check whether the model-generated answer's key claims appear in the
+    # retrieved chunks.  If too many claims are ungrounded, replace the
+    # answer with a neutral "insufficient evidence" message to prevent
+    # hallucination drift over long conversations.
+    from app.services.answer_validator import validate_grounding
+    chunk_texts = [c.get("text", "") for c in citations if c.get("text")]
+    validation = validate_grounding(
+        answer_text,
+        chunk_texts,
+        filename=used_files[0] if used_files else None,
+    )
+    if validation["rejected"]:
+        logger.info(
+            "[RAG_VALIDATOR] Replaced ungrounded answer — "
+            "score=%.2f | claims=%d | ungrounded=%s",
+            validation["score"],
+            validation["total_claims"],
+            validation["ungrounded_claims"][:5],
+        )
+        answer_text = validation["replacement"]
+        # Clear reasoning since the replacement is a fixed message
         reasoning_text = ""
 
     mermaid_code = ""

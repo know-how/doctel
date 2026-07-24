@@ -37,6 +37,7 @@ interface DocItem {
   project_id: string | null
   project_name: string
   status: string
+  doc_type?: string | null
   is_public?: boolean
   created_at: string
   tags?: string[]
@@ -341,6 +342,17 @@ export const DocumentLibraryPage: React.FC<{
                     <span style={badge(doc.is_public ? t.colors.secondary : t.colors.textMuted)}>
                       {doc.is_public ? "🌐 Public" : "🔒 Private"}
                     </span>
+                    {doc.doc_type && (
+                      <span style={{
+                        padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 700,
+                        textTransform: "uppercase", letterSpacing: "0.3px",
+                        backgroundColor: "rgba(16,185,129,0.1)",
+                        border: "1px solid rgba(16,185,129,0.2)",
+                        color: "#34D399",
+                      }}>
+                        {doc.doc_type}
+                      </span>
+                    )}
                     {(doc.tags || []).map((tag) => (
                       <span key={tag} style={{
                         padding: "2px 8px", borderRadius: 999, fontSize: 10,

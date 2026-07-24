@@ -20,7 +20,7 @@ from app.routers.deps import (
     StreamingResponse,
     logger,
     _sse_clients,
-    _sse_poll_buffer,
+    _sse_poll_buffers,
     _sse_poll_lock,
     _sse_broadcast,
     _sse_generator,
@@ -67,10 +67,15 @@ async def api_sync_events(user: User = Depends(get_current_user)):
 
 @router.get("/api/sync/poll")
 async def api_sync_poll(user: User = Depends(get_current_user)):
-    """Polling endpoint for mobile clients that cannot use SSE."""
+    """Polling endpoint for mobile clients that cannot use SSE.
+    Returns only events triggered by the requesting user."""
+    uid = str(user.id)
     async with _sse_poll_lock:
-        if _sse_poll_buffer:
-            evt = _sse_poll_buffer.pop(0)
+        buf = _sse_poll_buffers.get(uid)
+        if buf:
+            evt = buf.pop(0)
+            if not buf:
+                _sse_poll_buffers.pop(uid, None)
             return JSONResponse(evt)
     return JSONResponse({"event": None})
 
@@ -126,6 +131,6 @@ async def auth_logout_with_broadcast(
         pass
 
     # Broadcast to all SSE subscribers (web + mobile)
-    await _sse_broadcast("session.logout", {"user_id": user.id, "ec_number": user.ec_number or ""})
+    await _sse_broadcast("session.logout", {"user_id": str(user.id), "ec_number": user.ec_number or ""})
 
     return {"success": True, "broadcast": True}

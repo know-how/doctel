@@ -87,7 +87,7 @@ from app.services.embedding_service import (
     resolve_embedding_model,
     store_embedding_records,
 )
-from app.services.knowledge_asset_service import KnowledgeAssetRegistry
+from app.services.knowledge_asset_service import KnowledgeAssetService, register_document_asset as _register_doc_asset, register_audio_asset as _register_audio_asset, register_video_asset as _register_video_asset
 from app.db.models import EMBEDDING_VERSION
 from datetime import datetime
 
@@ -97,6 +97,14 @@ logger = logging.getLogger(__name__)
 # Keyed by file path → {"chunks": list[dict], "source_type": str}
 # Set by extract_text(), consumed by run_embedding_pipeline().
 _audio_chunks_cache: dict[str, dict] = {}
+# Cache for audio/video metadata from process_audio_for_rag().
+# Keyed by file path -> {"duration_sec": float, "word_count": int, "model_used": str, ...}
+# Set by extract_text(), consumed by ingest_document() after embedding pipeline.
+_audio_meta_cache: dict[str, dict] = {}
+# Cache for video-specific metadata from video_analysis_service.
+# Keyed by file path -> {"width": int, "height": int, "fps": float, "codec": str, ...}
+# Set by extract_text() for video files.
+_video_meta_cache: dict[str, dict] = {}
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -195,21 +203,51 @@ async def extract_text(file_path: str, mime_type: str) -> str:
     
     if file_ext == ".pdf":
         try:
-            reader = PdfReader(file_path)
-            page_count = len(reader.pages)
-            logger.info(f"[EXTRACT] PDF has {page_count} pages")
-            
-            for i, page in enumerate(reader.pages):
-                page_text = page.extract_text() or ""
-                text += page_text
-                if i < 3:  # Log first 3 pages for debugging
-                    logger.info(f"[EXTRACT] Page {i+1} extracted {len(page_text)} characters")
+            # ── Tier 1: Try pdfplumber (structured text + table extraction) ──
+            # pdfplumber preserves table structure (rows → cells) that PyPDF2
+            # loses by flattening everything into running text. This is critical
+            # for documents with requirements tables, spec matrices, etc.
+            try:
+                import pdfplumber
+                page_texts: list[str] = []
+                table_count = 0
+                with pdfplumber.open(file_path) as pdf:
+                    logger.info(f"[EXTRACT] PDF has {len(pdf.pages)} pages (via pdfplumber)")
+                    for page in pdf.pages:
+                        # Extract regular text first
+                        page_text = page.extract_text() or ""
+                        parts = [page_text] if page_text.strip() else []
+                        # Extract tables with structure preserved
+                        tables = page.extract_tables()
+                        for table in tables:
+                            if not table or len(table) < 2:
+                                continue
+                            table_count += 1
+                            rows: list[str] = []
+                            for row in table:
+                                cells = [str(cell or "").strip() for cell in row]
+                                rows.append(" | ".join(cells))
+                            parts.append("\n" + "\n".join(rows) + "\n")
+                        page_texts.append("\n".join(parts))
+                text = "\n".join(page_texts)
+                logger.info(
+                    "[EXTRACT] pdfplumber extraction: %d chars, %d tables across %d pages",
+                    len(text), table_count, len(pdf.pages),
+                )
+            except ImportError:
+                # pdfplumber not installed — fall through to PyPDF2
+                logger.info("[EXTRACT] pdfplumber not available; falling back to PyPDF2")
+                text = ""
+                reader = PdfReader(file_path)
+                for i, page in enumerate(reader.pages):
+                    page_text = page.extract_text() or ""
+                    text += page_text
+                logger.info("[EXTRACT] PyPDF2 fallback: %d chars", len(text))
             
             extracted_len = len(text)
             stripped_len = len(text.strip())
-            logger.info(f"[EXTRACT] PDF extraction complete: {extracted_len} raw chars, {stripped_len} stripped chars")
             
-            # Fallback to OCR if text is poor/empty
+            # Fallback to OCR if text is poor/empty (for scanned/image-based PDFs)
             if stripped_len < 50:
                 logger.warning(f"[EXTRACT] PDF text extraction poor ({stripped_len} chars), attempting OCR fallback")
                 if _check_tesseract():
@@ -241,7 +279,24 @@ async def extract_text(file_path: str, mime_type: str) -> str:
     elif file_ext == ".docx":
         try:
             doc = docx.Document(file_path)
-            text = "\n".join([para.text for para in doc.paragraphs])
+            # Extract paragraphs (old behavior) — always works
+            para_texts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+            # Extract tables — doc.paragraphs does NOT include table content!
+            # python-docx stores tables separately; we must iterate doc.tables explicitly.
+            # Note: We cannot use id() to match doc.element.body children to doc.paragraphs/tables
+            # because lxml creates different proxy objects for the same element at different access
+            # times, making id() comparison unreliable. Instead, we extract in two passes:
+            # first all paragraphs, then all tables, concatenated in order.
+            table_texts: list[str] = []
+            for table in doc.tables:
+                rows: list[str] = []
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    rows.append(" | ".join(cells))
+                table_texts.append("\n".join(rows))
+            # Combine paragraphs + tables with clear separation
+            all_text = para_texts + table_texts
+            text = "\n".join(all_text)
         except Exception as e:
             logger.error(f"Error extracting text from DOCX {file_path}: {e}")
             raise
@@ -271,13 +326,24 @@ async def extract_text(file_path: str, mime_type: str) -> str:
             stype: str = result.get("source_type", "audio")
             if rag_chunks:
                 _audio_chunks_cache[file_path] = {"chunks": rag_chunks, "source_type": stype}
+                # Also cache metadata for post-ingestion storage
+                _audio_meta_cache[file_path] = {
+                    "duration_sec": result.get("duration_sec"),
+                    "word_count": result.get("word_count"),
+                    "model_used": result.get("model_used"),
+                    "language": result.get("language"),
+                    "source_type": stype,
+                }
                 text = " ".join(c["text"] for c in rag_chunks)
                 logger.info(f"Audio pipeline: {len(rag_chunks)} natural chunks, source_type={stype}, {len(text)} chars from {file_path}")
             elif full_text:
                 text = full_text
                 logger.info(f"Audio transcription extracted {len(text)} chars from {file_path} (no chunks)")
             else:
-                logger.warning(f"Audio transcription returned no content for {file_path}")
+                from app.services.transcription_service import diagnose_transcription_failure, _set_last_error
+                diag = diagnose_transcription_failure()
+                _set_last_error(diag.get("message", "Audio transcription returned no content"))
+                logger.warning("Audio transcription returned no content for %s — %s", file_path, diag.get("message"))
         except Exception as e:
             logger.error(f"Error transcribing audio {file_path}: {e}")
 
@@ -296,7 +362,27 @@ async def extract_text(file_path: str, mime_type: str) -> str:
                 text = full_text
                 logger.info(f"Video transcription extracted {len(text)} chars from {file_path} (no chunks)")
             else:
-                logger.warning(f"Video transcription returned no content for {file_path}")
+                from app.services.transcription_service import diagnose_transcription_failure, _set_last_error
+                diag = diagnose_transcription_failure()
+                _set_last_error(diag.get("message", "Video transcription returned no content"))
+                logger.warning("Video transcription returned no content for %s — %s", file_path, diag.get("message"))
+
+            # Also run lightweight video analysis for metadata (duration, dimensions, codec)
+            try:
+                from app.services.video_analysis_service import analyze_video_light
+                video_info = await analyze_video_light(file_path, mime_type=mime_type)
+                if video_info:
+                    _video_meta_cache[file_path] = video_info
+                    logger.info(
+                        "Video metadata: %.0fs, %dx%d, %.1ffps, %s",
+                        video_info.get("duration_sec", 0),
+                        video_info.get("width", 0),
+                        video_info.get("height", 0),
+                        video_info.get("fps", 0),
+                        video_info.get("codec", "unknown"),
+                    )
+            except Exception as ve:
+                logger.warning("Video metadata extraction skipped: %s", ve)
         except Exception as e:
             logger.error(f"Error transcribing video {file_path}: {e}")
 
@@ -319,7 +405,7 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
         start += (chunk_size - chunk_overlap)
     return chunks
 
-async def analyze_document(text: str, doc_id: int, db: AsyncSession):
+async def analyze_document(text: str, doc_id: int, db: AsyncSession, filename: str = "", detected_type: str = ""):
     # Cap context so even small models don't OOM. 6 000 chars ≈ 1 500 tokens.
     analysis_text = text[:6000].strip()
 
@@ -463,6 +549,33 @@ async def analyze_document(text: str, doc_id: int, db: AsyncSession):
     if sentiment not in {"Positive", "Neutral", "Negative", "Urgent"}:
         sentiment = _infer_sentiment_simple(analysis_text)
 
+    # ── Generate enterprise summary (document-type-aware) ────────────────
+    enterprise_summary: dict | None = None
+    try:
+        from app.services.document_summarizer import generate_enterprise_summary
+        # Determine doc_type from explicit detected_type or infer from analysis
+        detected_doc_type = detected_type or ""
+        if not detected_doc_type:
+            if is_meeting_like(topics, entities):
+                detected_doc_type = "meeting"
+            elif is_policy_like(topics, entities):
+                detected_doc_type = "policy"
+
+        # Pass the full text — the summarizer handles its own input cap (12000 chars)
+        enterprise_summary = await generate_enterprise_summary(
+            db,
+            text,  # full extracted text; summarizer truncates internally
+            filename=filename or "",
+            detected_type=detected_doc_type,
+        )
+        logger.info(
+            "[SUMMARY] Enterprise summary generated for doc %s (type=%s)",
+            doc_id, enterprise_summary.get("doc_type", "unknown"),
+        )
+    except Exception as e:
+        logger.warning("[SUMMARY] Enterprise summary generation failed for doc %s: %s", doc_id, e)
+        enterprise_summary = None
+
     # ── Persist to DB ───────────────────────────────────────────────────────
     analysis = DocAnalysis(
         document_id=doc_id,
@@ -473,6 +586,8 @@ async def analyze_document(text: str, doc_id: int, db: AsyncSession):
         topics_json=json.dumps(topics),
         action_items_json=json.dumps(action_items),
         decisions_json=json.dumps(decisions),
+        summary_json=json.dumps(enterprise_summary) if enterprise_summary else None,
+        doc_type=enterprise_summary.get("doc_type", "") if enterprise_summary else None,
     )
     db.add(analysis)
 
@@ -480,6 +595,27 @@ async def analyze_document(text: str, doc_id: int, db: AsyncSession):
         db.add(SuggestedPrompt(document_id=doc_id, prompt_text=p_text))
 
     await db.commit()
+
+
+def is_meeting_like(topics: list[str], entities: list[str]) -> bool:
+    """Heuristic check if document appears to be a meeting transcript."""
+    lower_topics = " ".join(t.lower() for t in topics)
+    lower_entities = " ".join(e.lower() for e in entities)
+    combined = lower_topics + " " + lower_entities
+    keywords = ["meeting", "transcript", "discussion", "participant", "agenda",
+                "minutes", "decision", "action item", "speaker"]
+    return any(kw in combined for kw in keywords)
+
+
+def is_policy_like(topics: list[str], entities: list[str]) -> bool:
+    """Heuristic check if document appears to be a policy."""
+    lower_topics = " ".join(t.lower() for t in topics)
+    lower_entities = " ".join(e.lower() for e in entities)
+    combined = lower_topics + " " + lower_entities
+    keywords = ["policy", "compliance", "regulation", "governance", "procedure",
+                "responsibility", "obligation", "control", "audit"]
+    score = sum(2 for kw in keywords if kw in combined)
+    return score >= 4
 
 async def ingest_document(doc_id: uuid.UUID, db: AsyncSession):
     # ── DIAG: Check RLS context before SELECT Document ──
@@ -756,8 +892,8 @@ async def ingest_document(doc_id: uuid.UUID, db: AsyncSession):
 
         # ── Knowledge Asset Registry: Register document and chunks ────────
         try:
-            registry = KnowledgeAssetRegistry(db)
-            await registry.register_document(doc)
+            registry = KnowledgeAssetService(db)
+            await registry.register_document_asset(doc)
             # Re-fetch chunks to get their IDs for registration
             chunk_result = await db.execute(
                 select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index)
@@ -772,15 +908,47 @@ async def ingest_document(doc_id: uuid.UUID, db: AsyncSession):
                 )
             )
             db_embeddings = list(emb_result.scalars().all())
-            if db_embeddings:
-                await registry.register_embeddings(doc.id, db_embeddings)
-            logger.info("[ASSET] Registered document %s and %d chunks + embeddings in knowledge asset registry",
+            logger.info("[ASSET] Registered document %s and %d chunks via KnowledgeAssetService",
                         doc.id, len(db_chunks))
         except Exception as asset_err:
             logger.warning("[ASSET] Failed to register assets for document %s: %s", doc.id, asset_err)
 
+        # ── Store audio/video metadata if applicable ───────────────────────
+        _audio_meta_for_asset = _audio_meta_cache.pop(doc.path, None)
+        _video_meta_for_asset = _video_meta_cache.pop(doc.path, None)
+
+        if _audio_meta_for_asset:
+            try:
+                from app.db.models import AudioMetadata
+                meta_record = AudioMetadata(
+                    document_id=doc.id,
+                    duration_sec=_audio_meta_for_asset.get("duration_sec"),
+                    word_count=_audio_meta_for_asset.get("word_count"),
+                    transcription_model=_audio_meta_for_asset.get("model_used"),
+                    language=_audio_meta_for_asset.get("language", "en"),
+                    source_type=_audio_meta_for_asset.get("source_type", "audio"),
+                    processing_time_ms=None,
+                )
+                db.add(meta_record)
+                await db.commit()
+                logger.info("[AUDIO_META] Stored audio metadata for document %s: duration=%s, model=%s",
+                            doc.id, _audio_meta_for_asset.get("duration_sec"), _audio_meta_for_asset.get("model_used"))
+            except Exception as meta_err:
+                logger.warning("[AUDIO_META] Failed to store audio metadata for doc %s: %s", doc.id, meta_err)
+
+        if _video_meta_for_asset:
+            logger.info(
+                "[VIDEO_META] Video metadata for doc %s: %.0fs, %dx%d, %.1ffps, %s",
+                doc.id,
+                _video_meta_for_asset.get("duration_sec", 0),
+                _video_meta_for_asset.get("width", 0),
+                _video_meta_for_asset.get("height", 0),
+                _video_meta_for_asset.get("fps", 0),
+                _video_meta_for_asset.get("codec", "unknown"),
+            )
+
         await _set_doc_state(db, doc, status="summarized", step="summarize", percent=80, message="Generating summaries")
-        await analyze_document(extracted_text, doc_id, db)
+        await analyze_document(extracted_text, doc_id, db, filename=doc.filename or "", detected_type=doc.detected_type or "")
 
         # ── Knowledge Asset Registry: Register analysis after creation ────
         try:
@@ -789,11 +957,29 @@ async def ingest_document(doc_id: uuid.UUID, db: AsyncSession):
             )
             db_analysis = analysis_result.scalar_one_or_none()
             if db_analysis:
-                registry = KnowledgeAssetRegistry(db)
-                await registry.register_analysis(db_analysis)
-                logger.info("[ASSET] Registered analysis %s for document %s", db_analysis.id, doc.id)
+                # Analysis registered via register_document_asset path
+                logger.info("[ASSET] Analysis %s registered for document %s", db_analysis.id, doc.id)
         except Exception as asset_err:
             logger.warning("[ASSET] Failed to register analysis for document %s: %s", doc.id, asset_err)
+
+        # ── Register as Knowledge Asset (upgraded service) ───────────────
+        try:
+            analysis_result = await db.execute(
+                select(DocAnalysis).where(DocAnalysis.document_id == doc.id)
+            )
+            db_analysis = analysis_result.scalar_one_or_none()
+            # Use already-popped metadata variables (not re-reading cache)
+            file_ext = Path(doc.filename).suffix.lower() if doc.filename else ""
+            if file_ext in {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv"} and _video_meta_for_asset:
+                # Register as video asset with full video metadata + transcript
+                transcript = _video_meta_for_asset.get("transcript", "")
+                await _register_video_asset(db, doc, _video_meta_for_asset, transcript=transcript)
+            elif _audio_meta_for_asset:
+                await _register_audio_asset(db, doc, _audio_meta_for_asset)
+            await _register_doc_asset(db, doc, db_analysis)
+            logger.info("[ASSET] Upgraded asset registration for document %s", doc.id)
+        except Exception as asset_err:
+            logger.warning("[ASSET] KnowledgeAsset registration failed for doc %s: %s", doc.id, asset_err)
 
         await _set_doc_state(db, doc, status="completed", step="done", percent=100, message="Completed")
         logger.info(f"[INGEST] ✓ Document {doc_id} ingestion COMPLETED successfully")

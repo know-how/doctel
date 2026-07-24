@@ -1606,6 +1606,12 @@ async def _heartbeat_loop() -> None:
                 # No RLS context needed — the UPDATE only touches jobs
                 # owned by this worker (worker_id filter), which is
                 # allowed by the processing_jobs RLS bypass policy.
+                # Defensive: ensure worker_id is a non-empty string before querying
+                w_id = str(_WORKER_ID).strip()
+                if not w_id:
+                    logger.warning("[HEARTBEAT] Empty worker_id — skipping heartbeat")
+                    continue
+
                 result = await db.execute(
                     text("""
                         UPDATE processing_jobs
@@ -1614,13 +1620,13 @@ async def _heartbeat_loop() -> None:
                         WHERE worker_id = :worker_id
                           AND job_state = 'PROCESSING'
                     """),
-                    {"worker_id": _WORKER_ID},
+                    {"worker_id": w_id},
                 )
                 await db.commit()  # Persist the heartbeat timestamp
                 if result.rowcount > 0:
                     logger.debug(
                         "[HEARTBEAT] Refreshed %d PROCESSING job(s) for worker %s",
-                        result.rowcount, _WORKER_ID,
+                        result.rowcount, w_id,
                     )
 
         except asyncio.CancelledError:

@@ -1,5 +1,19 @@
 from typing import List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, BeforeValidator
+from typing_extensions import Annotated
+
+
+# ── Defensive type: accept int OR str for fields that may come from DB (int) or API (str) ──
+# Pydantic v2 strict mode rejects int for str | None fields, causing ValidationError.
+# This validator converts int → str at the boundary so callers don't have to.
+def _coerce_str(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return str(v)
+    return v
+
+CoercibleStr = Annotated[str | None, BeforeValidator(_coerce_str)]
 
 
 class DocumentMetadata(BaseModel):
@@ -135,13 +149,16 @@ class Citation(BaseModel):
     distance: float | None = None  # Relevance score (lower is better)
 
     # ── Enterprise permission & action URLs ────────────────────────────────
-    can_view: bool = False
-    can_download: bool = False
+    # These are Optional[bool] (rather than plain bool) because enrich_citations
+    # may return citations without these fields when a citation has no document_id.
+    # Pydantic v2 rejects None for plain bool fields even when a default is set.
+    can_view: bool | None = None
+    can_download: bool | None = None
     open_url: str | None = None
     download_url: str | None = None
     preview_url: str | None = None
     source_type: str | None = None
-    project_id: str | None = None
+    project_id: CoercibleStr = None
 
 
 class CrossReference(BaseModel):
@@ -158,6 +175,40 @@ class AskResponse(BaseModel):
     cross_references: List[CrossReference] = Field(default_factory=list)
     used_model: str | None = None
     session_id: str | None = None
+
+    # ── Orchestration fields ──────────────────────────────────────────────
+    render_hint: str | None = Field(
+        default=None,
+        description="Frontend rendering hint: narrative, executive_summary, meeting_report, action_register, risk_register, comparison_matrix, workflow_table, mermaid_diagram, chart_viewer, knowledge_card, report",
+    )
+    citation_mode: str | None = Field(
+        default=None,
+        description="Citation display mode: full, summary, light, on_demand, none",
+    )
+    structured_data: Dict[str, Any] | None = Field(
+        default=None,
+        description="Structured data extracted from the answer (action_items, decisions, risks, etc.)",
+    )
+    knowledge_type: str | None = Field(
+        default=None,
+        description="Knowledge source type: document, audio, csv, database, session, none",
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="Confidence score for the answer (0.0 to 1.0)",
+    )
+    evidence_count: int | None = Field(
+        default=None,
+        description="Number of evidence chunks used to generate the answer",
+    )
+    source_count: int | None = Field(
+        default=None,
+        description="Number of unique sources cited",
+    )
+    execution_plan: dict[str, Any] | None = Field(
+        default=None,
+        description="Tool execution plan from the Tool Planning Layer",
+    )
 
 
 class UploadedDocument(BaseModel):
@@ -233,6 +284,8 @@ class ModelsAvailableResponse(BaseModel):
     models: List[OllamaModelDetail] = Field(default_factory=list)
     ollama_healthy: bool = True
     defaults: Dict[str, str] = Field(default_factory=dict)
+    v2_providers: List[dict] = Field(default_factory=list)
+    v2_auto_routing: bool = True
 
 
 class ModelLabelsResponse(BaseModel):
