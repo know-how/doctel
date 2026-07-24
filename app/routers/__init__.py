@@ -56,10 +56,8 @@ def include_routers(app) -> None:
         "prompt_suggestions",
         "enterprise_admin",
         "admin_embeddings",
-        "agent_gateway",
-        "processing_control",
-        "admin_jobs",
         "voice",
+        # agent_gateway, processing_control, admin_jobs — missing: modules don't exist as files
         "knowledge_assets",
         "knowledge_spaces",
         "knowledge_graph",
@@ -74,9 +72,6 @@ def include_routers(app) -> None:
 
 __all__ = [
     "include_routers",
-    "ingest_router",
-    "processing_control_router",
-    "admin_jobs_router",
     "chat_router",
     "ask_router",
     "vision_router",
