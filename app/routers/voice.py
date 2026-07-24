@@ -30,7 +30,6 @@ from app.routers.deps import (
     UploadFile,
     User,
     get_current_user,
-    get_optional_user,
     settings,
 )
 

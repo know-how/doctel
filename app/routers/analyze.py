@@ -14,6 +14,7 @@ from app.routers.deps import (
     User,
     AsyncSession,
     get_db,
+    get_current_user,
     require_role,
     HTTPException,
     json,

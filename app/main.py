@@ -1,11 +1,20 @@
 """
-DocTel – monolithic FastAPI entry point.
+DocTel – DOCTEL Enterprise AI Platform entry point.
 
-This file has been refactored: all endpoint implementations now live in
-``app/routers/`` sub-modules.  This skeleton only keeps the application
-factory, middleware, exception handlers, the startup event, and the
-``include_routers(app)`` call that registers every sub-router.
+This file has been upgraded with:
+- OpenAPI 3.1 production-grade documentation
+- Enterprise API tags with 24+ categories
+- Standard error contract (ErrorResponse model)
+- JWT Bearer + OAuth2 security schemes
+- Custom branded Swagger UI
+- Environment-aware docs security
+      
+All endpoint implementations live in ``app/routers/`` sub-modules.
+This skeleton keeps the application factory, middleware, exception
+handlers, startup event, and the ``include_routers(app)`` call.
 """
+
+from __future__ import annotations
 
 import os
 import json
@@ -20,11 +29,9 @@ from pathlib import Path
 import asyncio
 import uuid
 import datetime
-
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
 from app.config import settings
@@ -42,11 +49,51 @@ from app.services.startup_service import startup_manager, ServiceStatus
 from app.routers.deps import _sse_broadcast
 from app.routers import include_routers
 
+# ── OpenAPI Configuration ────────────────────────────────────────────────
+from app.openapi import (
+    APP_TITLE,
+    APP_VERSION,
+    APP_DESCRIPTION,
+    API_TAGS,
+    CONTACT,
+    LICENSE,
+    TERMS_OF_SERVICE,
+    doctel_openapi_schema,
+    verify_docs_access,
+)
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="DocIntel")
+# ═══════════════════════════════════════════════════════════════════════════
+# APPLICATION FACTORY
+# ═══════════════════════════════════════════════════════════════════════════
+
+app = FastAPI(
+    title=APP_TITLE,
+    description=APP_DESCRIPTION,
+    version=APP_VERSION,
+    contact=CONTACT,
+    license_info=LICENSE,
+    terms_of_service=TERMS_OF_SERVICE,
+    tags_metadata=API_TAGS,
+    openapi_tags=API_TAGS,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    swagger_ui_parameters={
+        "defaultModelsExpandDepth": -1,  # Hide schemas by default
+        "displayRequestDuration": True,
+        "filter": True,
+        "showExtensions": True,
+        "syntaxHighlight": {"theme": "monokai"},
+        "tryItOutEnabled": False,
+        "persistAuthorization": True,
+    },
+)
 
 include_routers(app)
+
+# Register the custom OpenAPI schema generator AFTER all routers are included
+app.openapi_schema = doctel_openapi_schema(app)  # type: ignore[assignment]
 
 # ── Module-level critical service registrations ──────────────────────────────
 # These are registered early so they are ready before @app.on_event("startup")
@@ -126,6 +173,25 @@ app.add_middleware(
 async def debug_all_requests(request: Request, call_next):
     path = request.url.path
     method = request.method
+    
+    # ── Docs security: protect /docs, /redoc, /openapi.json ──────────────
+    DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
+    if any(path.startswith(p) for p in DOCS_PATHS):
+        env = (settings.environment or "development").lower()
+        if env != "development":
+            try:
+                await verify_docs_access(request)
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    return JSONResponse(
+                        status_code=401,
+                        content={"error": "token_expired"},
+                    )
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={"detail": exc.detail},
+                )
+
     try:
         if method == "POST" and ("/api/ask" in path or "/api/chat" in path):
             print(f"\n=== REQUEST: {method} {path} ===", flush=True)

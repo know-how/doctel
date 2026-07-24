@@ -103,3 +103,5 @@ htmlcov/
 logs/
 *.out
 *.err
+
+.freebuff
